@@ -17,6 +17,14 @@ import SwiftUI
 struct PreviewView: View {
     @EnvironmentObject private var app: AppModel
 
+    /// Thumbnail of the previewed file, used by the mini-map. Falls back
+    /// to nil when the catalog hasn't generated a thumbnail yet (which
+    /// renders the mini-map's placeholder swatch).
+    private var currentThumbnail: NSImage? {
+        guard let id = app.previewFileID else { return nil }
+        return app.catalog.files.first(where: { $0.id == id })?.thumbnail
+    }
+
     var body: some View {
         MetalPreviewRepresentable()
             .background(Color.black)
@@ -30,6 +38,16 @@ struct PreviewView: View {
                             : nil
                     )
                     .transition(.opacity)
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                // Mini-map appears only when zoomed in past fit. Anchored
+                // top-leading so it doesn't fight the bottom-leading HUD
+                // for screen real estate.
+                if app.hudVisible, let viewport = app.previewViewport {
+                    PreviewMiniMap(thumbnail: currentThumbnail, viewport: viewport)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
                 }
             }
             .environmentObject(app)
@@ -109,6 +127,41 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     var texturePixelSize: CGSize? {
         guard let tex = beforeTex else { return nil }
         return CGSize(width: tex.width, height: tex.height)
+    }
+
+    /// Compute the visible-image sub-region in normalised image coordinates
+    /// (0…1, top-left origin) and publish it to AppModel for the mini-map
+    /// overlay. nil when the whole image fits in the view at the current
+    /// zoom (mini-map is hidden in that case).
+    func publishViewport() {
+        guard let tex = beforeTex, let view = view else {
+            app.previewViewport = nil
+            return
+        }
+        let texW = CGFloat(tex.width), texH = CGFloat(tex.height)
+        let viewW = view.drawableSize.width, viewH = view.drawableSize.height
+        guard texW > 0, texH > 0, viewW > 0, viewH > 0 else {
+            app.previewViewport = nil; return
+        }
+        let fit = min(viewW / texW, viewH / texH)
+        let effScale = fit * CGFloat(zoomScale)
+        guard effScale > 0 else { app.previewViewport = nil; return }
+        let fracW = min(1.0, viewW / (texW * effScale))
+        let fracH = min(1.0, viewH / (texH * effScale))
+        // Hide the mini-map when nothing is cropped — full image visible.
+        if fracW >= 0.999 && fracH >= 0.999 {
+            app.previewViewport = nil
+            return
+        }
+        // Centre of viewport in normalised image coords. Sign matches the
+        // display shader's panPx convention (positive panPx.x shifts image
+        // RIGHT on screen, so the viewport sees content LEFT of centre).
+        var cx = 0.5 - CGFloat(panPx.x) / (texW * effScale)
+        var cy = 0.5 - CGFloat(panPx.y) / (texH * effScale)
+        let halfW = fracW / 2, halfH = fracH / 2
+        cx = min(1 - halfW, max(halfW, cx))
+        cy = min(1 - halfH, max(halfH, cy))
+        app.previewViewport = CGRect(x: cx - halfW, y: cy - halfH, width: fracW, height: fracH)
     }
 
     // Re-process trigger (throttled for "instant" slider feedback).
@@ -275,6 +328,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             panPx = .zero
         }
         view.needsDisplay = true
+        publishViewport()
     }
 
     private func onPlaybackFrameChanged() {
@@ -314,9 +368,10 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         }
         let url = entry.url
         let isSER = entry.isSER
+        let isAVI = entry.isAVI
 
         // Seed the HUD with header-derived info immediately. Bytes / dates
-        // come from the FileEntry and the (optional) SER header.
+        // come from the FileEntry and the (optional) SER / AVI header.
         var stats = PreviewStats()
         stats.fileName = entry.name
         stats.fileSizeBytes = entry.sizeBytes
@@ -324,9 +379,10 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         stats.totalFrames = 1
         stats.currentFrame = 1
 
-        // For SER files, read the header up front so we know the frame count
-        // and can show the scrub slider. Reset scrub for non-SER files.
+        // For frame-sequence files, read the header up front so we know the
+        // frame count and can show the scrub slider. Reset scrub for stills.
         var serHeader: SerHeader?
+        var aviReader: AviReader?
         if isSER {
             serHeader = try? SerReader(url: url).header
             if let h = serHeader {
@@ -338,6 +394,15 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 stats.bayerLabel = Self.bayerLabel(for: h.colorID)
                 if let d = h.dateUTC { stats.captureDate = d }
             }
+        } else if isAVI {
+            aviReader = try? AviReader(url: url)
+            if let a = aviReader {
+                app.previewSerFrameCount = a.frameCount
+                app.previewSerFrameIndex = 0
+                stats.totalFrames = a.frameCount
+                stats.dimensions = (a.imageWidth, a.imageHeight)
+                stats.bayerLabel = "AVI"
+            }
         } else {
             app.previewSerFrameCount = 0
             app.previewSerFrameIndex = 0
@@ -345,11 +410,14 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         app.previewStats = stats
 
         let flipped = entry.meridianFlipped
+        let aviForBackground = aviReader
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             var tex: MTLTexture?
             if isSER {
                 tex = try? SerFrameLoader.loadFrame(url: url, frameIndex: 0, device: MetalDevice.shared.device)
+            } else if let avi = aviForBackground {
+                tex = try? avi.loadFrame(at: 0, device: MetalDevice.shared.device)
             } else {
                 tex = try? ImageTexture.load(url: url, device: MetalDevice.shared.device)
             }
@@ -358,7 +426,9 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             if flipped, let t = tex {
                 tex = RotateTexture.rotate180(t, device: MetalDevice.shared.device)
             }
-            let hist = isSER ? [] : Histogram.compute(url: url)
+            // Skip the on-disk histogram path for any frame-sequence file —
+            // Histogram.compute reads via ImageIO which doesn't grok SER/AVI.
+            let hist = (isSER || isAVI) ? [] : Histogram.compute(url: url)
             // Sharpness for the displayed frame — runs on this background
             // queue so the main thread stays responsive even on 4K SERs.
             let sharpness: Float? = tex.map { self.sharpnessProbe.compute(texture: $0) }
@@ -373,6 +443,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 }
                 self.app.previewStats.currentSharpness = sharpness
                 self.view?.needsDisplay = true
+                self.publishViewport()  // file load resets zoom → fresh map
                 self.reprocess()
             }
         }
@@ -408,19 +479,29 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         }
     }
 
-    /// Called when the user scrubs the SER frame slider. Loads the requested
-    /// frame and re-runs the processing pipeline. Throttled in the
-    /// subscription so rapid scrubs don't queue up.
+    /// Called when the user scrubs the frame-sequence slider. Loads the
+    /// requested frame and re-runs the processing pipeline. Throttled in
+    /// the subscription so rapid scrubs don't queue up. Despite the
+    /// historical name this also handles AVI frame access.
     func loadCurrentSerFrame() {
         guard let id = app.previewFileID,
               let entry = app.catalog.files.first(where: { $0.id == id }),
-              entry.isSER else { return }
+              entry.isFrameSequence else { return }
         let url = entry.url
+        let isSER = entry.isSER
         let frameIndex = app.previewSerFrameIndex
         let flipped = entry.meridianFlipped
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            var tex = try? SerFrameLoader.loadFrame(url: url, frameIndex: frameIndex, device: MetalDevice.shared.device)
+            var tex: MTLTexture?
+            if isSER {
+                tex = try? SerFrameLoader.loadFrame(url: url, frameIndex: frameIndex, device: MetalDevice.shared.device)
+            } else {
+                // AVI — instantiate a lightweight reader per scrub. The
+                // generator caches under the hood so consecutive frame-N
+                // requests stay fast even without persistent state.
+                tex = try? AviReader(url: url).loadFrame(at: frameIndex, device: MetalDevice.shared.device)
+            }
             if flipped, let t = tex {
                 tex = RotateTexture.rotate180(t, device: MetalDevice.shared.device)
             }
@@ -592,6 +673,7 @@ final class ZoomableMTKView: MTKView {
             c.zoomScale = 1
             c.panPx = .zero
             needsDisplay = true
+            c.publishViewport()
             return
         }
 
@@ -622,6 +704,7 @@ final class ZoomableMTKView: MTKView {
             c.panPx.x = panStartOffset.x + Float(current.x - panDragStart.x)
             c.panPx.y = panStartOffset.y + Float(current.y - panDragStart.y)
             needsDisplay = true
+            c.publishViewport()
             return
         }
 
@@ -654,6 +737,7 @@ final class ZoomableMTKView: MTKView {
         c.panPx.x += Float(event.scrollingDeltaX) * s
         c.panPx.y += Float(event.scrollingDeltaY) * s
         needsDisplay = true
+        c.publishViewport()
     }
 
     override func magnify(with event: NSEvent) {
@@ -702,5 +786,6 @@ final class ZoomableMTKView: MTKView {
         c.panPx.y = Float(relY - imgY * newEffective)
         c.zoomScale = newScale
         needsDisplay = true
+        c.publishViewport()
     }
 }

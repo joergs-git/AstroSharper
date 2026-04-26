@@ -205,11 +205,13 @@ final class SerQualityScanner {
             var scores: [Float] = []
             scores.reserveCapacity(sampleCount)
             // Squared shift magnitudes between adjacent samples — squared so
-            // we can finalise as RMS without an extra pass. Each pair is one
-            // 1024² FFT-pair (~50 ms on M-series), so 64 samples ≈ 3 s.
+            // we can finalise as RMS without an extra pass. Each pair only
+            // costs one new FFT (the prior sample's FFT is reused as the
+            // reference) plus the cross-power-spectrum + IFFT step, instead
+            // of two FFTs per pair as in the naïve path.
             var shiftSqSum: Double = 0
             var shiftCount: Int = 0
-            var prevTex: MTLTexture? = nil
+            var prevFFT: Align.FrameFFT? = nil
             for i in 0..<sampleCount {
                 if Task.isCancelled { return }
                 // Even spacing: pick frame indices across the full range.
@@ -222,17 +224,18 @@ final class SerQualityScanner {
                 ) else { continue }
                 let s = probe.compute(texture: tex)
                 if s.isFinite { scores.append(s) }
-                // Pairwise phase correlation against the previously loaded
-                // sample. Magnitude in original-texture pixels.
-                if let prev = prevTex,
-                   let shift = Align.phaseCorrelate(reference: prev, frame: tex) {
+                // Compute the FFT once per sample. It serves as the "frame"
+                // FFT for this pair and the "reference" FFT for the next.
+                let curFFT = Align.computeFFT(of: tex)
+                if let prev = prevFFT, let cur = curFFT,
+                   let shift = Align.phaseCorrelate(refFFT: prev, frameFFT: cur) {
                     let mag2 = Double(shift.dx * shift.dx + shift.dy * shift.dy)
                     if mag2.isFinite {
                         shiftSqSum += mag2
                         shiftCount += 1
                     }
                 }
-                prevTex = tex
+                prevFFT = curFFT
             }
             if Task.isCancelled || scores.isEmpty { return }
 

@@ -58,10 +58,14 @@ the project follows semantic versioning once it leaves 0.x.
 ### Added
 - **HUD toggle shortcut** (`I`) and View-menu item — show / hide the preview stats overlay.
 - **Frame-to-frame jitter score** (RMS pixel shift, phase-correlated between adjacent samples) added to the SER quality scan; surfaced in the HUD distribution panel and used to refine the lucky-stack keep-% recommendation when jitter > 15 px.
+- **ROI mini-map overlay** (top-leading corner of the preview) — Photoshop-Navigator-style thumbnail with a dashed yellow rectangle marking the visible viewport. Hidden when the full image fits in the view. Updates live during pan / zoom / pinch.
+- **AVI preview support** — `AviReader` (AVFoundation-backed) decodes AVI frames into the same `rgba16Float` pipeline as SER. Browse, scrub, play, sharpness-probe and quality-scan AVI files exactly like SERs. Lucky-Stack on AVI still routes through its existing gate.
+- **Downsampled load path for image sharpness** — `ImageTexture.loadDownsampled(maxDimension:)` uses ImageIO's thumbnail pipeline, so per-file sharpness scoring on 6 K TIFFs no longer triggers a full decode.
 
 ### Changed
 - **`SharpnessProbe.shared`** singleton replaces per-call instantiation. Instantiating one probe per file in the thumbnail loader (500 TIFFs → 500 command queues) was the dominant import cost; now negligible.
 - **Probe texture cache** keyed by `(width, height, pixelFormat)` — destination Laplacian / stats textures are allocated once per shape and reused. SER quality scans of 64 same-shaped frames now reuse the same two destination textures across the whole scan.
+- **FFT-cached phase correlation** — `Align.computeFFT(of:)` + `Align.phaseCorrelate(refFFT:frameFFT:)` lets the SER quality scanner reuse each sample's FFT as the next pair's reference, halving CPU time for the jitter pass.
 
 ## [0.2.0] — 2026-04-25
 

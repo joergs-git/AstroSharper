@@ -152,6 +152,11 @@ final class AppModel: ObservableObject {
     @Published var previewStats: PreviewStats = PreviewStats()
     @Published var hudVisible: Bool = true
 
+    /// Visible viewport in normalised image coordinates (0…1, top-left
+    /// origin). nil when the whole image fits in the view (mini-map hidden).
+    /// Updated by PreviewCoordinator whenever zoom or pan changes.
+    @Published var previewViewport: CGRect? = nil
+
     /// When ON, a folder/file open auto-detects Sun/Moon/Jupiter/Saturn/Mars
     /// from filenames + folder names and applies the matching default preset.
     @Published var autoDetectPresetOnOpen: Bool = true
@@ -1349,13 +1354,13 @@ final class AppModel: ObservableObject {
 
     // MARK: - SER in-file player
 
-    /// True when the currently-previewed file is a SER with more than one
-    /// frame. Drives whether the play button auto-advances frames in the
-    /// file or blinks across files.
+    /// True when the currently-previewed file is a frame-sequence (SER or
+    /// AVI) with more than one frame. Drives whether the play button
+    /// auto-advances frames in the file or blinks across files.
     var canPlaySerFrames: Bool {
         guard let id = previewFileID,
               let entry = catalog.files.first(where: { $0.id == id }),
-              entry.isSER else { return false }
+              entry.isFrameSequence else { return false }
         return previewSerFrameCount > 1
     }
 
@@ -1442,8 +1447,15 @@ final class AppModel: ObservableObject {
                 }
                 // Shared probe — instantiating one per file in a 500-file
                 // import burned more time on queue/cache setup than the
-                // actual GPU pass.
-                guard let tex = try? ImageTexture.load(url: url, device: MetalDevice.shared.device) else { return }
+                // actual GPU pass. Load via ImageIO's thumbnail path capped
+                // at 512² so a 6 K TIFF doesn't trigger a full decode just
+                // to score sharpness — variance-of-Laplacian is largely
+                // scale-invariant on natural content.
+                guard let tex = try? ImageTexture.loadDownsampled(
+                    url: url,
+                    maxDimension: 512,
+                    device: MetalDevice.shared.device
+                ) else { return }
                 let s = SharpnessProbe.shared.compute(texture: tex)
                 await MainActor.run {
                     guard let self, let idx = self.catalog.index(of: id) else { return }

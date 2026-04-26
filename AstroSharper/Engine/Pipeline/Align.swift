@@ -18,51 +18,73 @@ struct AlignShift: Equatable {
 }
 
 enum Align {
-    /// Compute the shift of `frame` relative to `reference` (i.e. applying
-    /// `+shift` to `frame` aligns it to `reference`).
-    static func phaseCorrelate(reference: MTLTexture, frame: MTLTexture) -> AlignShift? {
-        // Choose a power-of-two working size: largest 2^k <= min(min(dim), 1024).
-        let maxDim = min(min(reference.width, reference.height), min(frame.width, frame.height), 1024)
+    /// Pre-computed forward 2-D FFT of a luminance buffer, ready to be fed
+    /// straight into the cross-power-spectrum step. Re-use across multiple
+    /// correlations against the same frame avoids repeating the (expensive)
+    /// FFT pass — e.g. the SER quality scanner pairs frame i with frame i+1
+    /// for jitter, so the FFT of i computed for pair (i-1, i) is reused as
+    /// the "reference" FFT for pair (i, i+1).
+    struct FrameFFT {
+        let real: [Float]
+        let imag: [Float]
+        let n: Int
+        let log2n: Int
+        let sourceWidth: Int
+        let sourceHeight: Int
+    }
+
+    /// Compute the forward FFT once so it can be reused. Mirrors the
+    /// preprocessing of `phaseCorrelate` (DC removal + Hann window) so
+    /// downstream `phaseCorrelate(refFFT:frameFFT:)` can skip straight to
+    /// the cross-power spectrum.
+    static func computeFFT(of texture: MTLTexture) -> FrameFFT? {
+        let maxDim = min(min(texture.width, texture.height), 1024)
         let log2n = Int(log2(Double(maxDim)))
         let n = 1 << log2n
         guard n >= 64 else { return nil }
-
-        guard let refLum = luminanceBuffer(from: reference, size: n),
-              let frameLum = luminanceBuffer(from: frame, size: n)
-        else { return nil }
-
-        // Remove DC before windowing. For solar/lunar imagery a bright disk
-        // against a black background creates a huge low-frequency component
-        // that dominates the cross-power spectrum and pushes the correlation
-        // peak around frame-to-frame as the disk's mean brightness changes.
-        // Subtracting the mean whitens the spectrum and makes the peak track
-        // surface detail (granulation, sunspots, limb edge) rather than the
-        // disk's overall luminance.
-        subtractMean(&refLum.wrappedValue)
-        subtractMean(&frameLum.wrappedValue)
-
-        applyHannWindow(&refLum.wrappedValue, size: n)
-        applyHannWindow(&frameLum.wrappedValue, size: n)
-
-        guard let peak = fft2dPhaseCorrelation(ref: refLum.wrappedValue, frame: frameLum.wrappedValue, log2n: log2n) else {
+        guard let lum = luminanceBuffer(from: texture, size: n) else { return nil }
+        subtractMean(&lum.wrappedValue)
+        applyHannWindow(&lum.wrappedValue, size: n)
+        guard var (real, imag) = fft2dForwardOnce(input: lum.wrappedValue, log2n: log2n) else {
             return nil
         }
+        // Take ownership — the helper returns owned arrays so we don't
+        // re-alias `lum.wrappedValue`.
+        _ = (real.count, imag.count)
+        return FrameFFT(real: real, imag: imag, n: n, log2n: log2n,
+                        sourceWidth: texture.width, sourceHeight: texture.height)
+    }
 
-        // Integer peak wraps: if >n/2, subtract n (negative shift).
-        var dxI = peak.x
-        var dyI = peak.y
+    /// Phase-correlate two pre-computed FFTs. Skips the FFT setup +
+    /// luminance extraction + windowing — those happen in `computeFFT`.
+    /// Both FFTs must share the same `n` / `log2n`.
+    static func phaseCorrelate(refFFT: FrameFFT, frameFFT: FrameFFT) -> AlignShift? {
+        guard refFFT.log2n == frameFFT.log2n else { return nil }
+        let n = refFFT.n
+        guard let peak = fft2dPhaseCorrelation(refReal: refFFT.real, refImag: refFFT.imag,
+                                                frmReal: frameFFT.real, frmImag: frameFFT.imag,
+                                                log2n: refFFT.log2n) else {
+            return nil
+        }
+        var dxI = peak.x, dyI = peak.y
         if dxI > n / 2 { dxI -= n }
         if dyI > n / 2 { dyI -= n }
-
-        // Scale the shift back to original texture coordinates.
-        let scaleX = Float(frame.width) / Float(n)
-        let scaleY = Float(frame.height) / Float(n)
-
-        // Parabolic sub-pixel offset around the integer peak uses the correlation surface.
+        let scaleX = Float(frameFFT.sourceWidth) / Float(n)
+        let scaleY = Float(frameFFT.sourceHeight) / Float(n)
         let subX = peak.subX * scaleX
         let subY = peak.subY * scaleY
-
         return AlignShift(dx: Float(dxI) * scaleX + subX, dy: Float(dyI) * scaleY + subY)
+    }
+
+    /// Compute the shift of `frame` relative to `reference` (i.e. applying
+    /// `+shift` to `frame` aligns it to `reference`). Convenience wrapper —
+    /// when correlating many frames against the same reference, prefer the
+    /// `computeFFT` + `phaseCorrelate(refFFT:frameFFT:)` path.
+    static func phaseCorrelate(reference: MTLTexture, frame: MTLTexture) -> AlignShift? {
+        guard let r = computeFFT(of: reference),
+              let f = computeFFT(of: frame),
+              r.log2n == f.log2n else { return nil }
+        return phaseCorrelate(refFFT: r, frameFFT: f)
     }
 
     // MARK: - Reference quality scoring
@@ -126,7 +148,12 @@ enum Align {
         applyHannWindow(&refLum.wrappedValue, size: n)
         applyHannWindow(&frmLum.wrappedValue, size: n)
 
-        guard let peak = fft2dPhaseCorrelation(ref: refLum.wrappedValue, frame: frmLum.wrappedValue, log2n: log2n) else {
+        // Forward-FFT both, then phase correlate.
+        guard let r = fft2dForwardOnce(input: refLum.wrappedValue, log2n: log2n),
+              let f = fft2dForwardOnce(input: frmLum.wrappedValue, log2n: log2n),
+              let peak = fft2dPhaseCorrelation(refReal: r.real, refImag: r.imag,
+                                                frmReal: f.real, frmImag: f.imag,
+                                                log2n: log2n) else {
             return nil
         }
 
@@ -338,27 +365,34 @@ enum Align {
         let subY: Float
     }
 
-    private static func fft2dPhaseCorrelation(ref: [Float], frame: [Float], log2n: Int) -> Peak? {
+    /// Forward 2-D FFT only. Used by `computeFFT` so the result can be
+    /// cached and reused across multiple correlations against the same
+    /// frame.
+    private static func fft2dForwardOnce(input: [Float], log2n: Int) -> (real: [Float], imag: [Float])? {
         let n = 1 << log2n
+        var real = input
+        var imag = [Float](repeating: 0, count: n * n)
+        guard let setup = vDSP_create_fftsetup(vDSP_Length(log2n + 1), FFTRadix(kFFTRadix2)) else { return nil }
+        defer { vDSP_destroy_fftsetup(setup) }
+        real.withUnsafeMutableBufferPointer { rp in
+            imag.withUnsafeMutableBufferPointer { ip in
+                var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                vDSP_fft2d_zip(setup, &split, 1, 0, vDSP_Length(log2n), vDSP_Length(log2n), FFTDirection(FFT_FORWARD))
+            }
+        }
+        return (real, imag)
+    }
 
-        // vDSP splits real arrays into real + imaginary halves for packed format.
-        // We take the complex FFT of each image (imag = 0 at input).
-        var refReal = ref
-        var refImag = [Float](repeating: 0, count: n * n)
-        var frmReal = frame
-        var frmImag = [Float](repeating: 0, count: n * n)
+    /// Cross-power spectrum + inverse FFT + peak find. Both inputs must
+    /// already be in frequency domain (use `fft2dForwardOnce`).
+    private static func fft2dPhaseCorrelation(refReal: [Float], refImag: [Float],
+                                              frmReal: [Float], frmImag: [Float],
+                                              log2n: Int) -> Peak? {
+        let n = 1 << log2n
 
         guard let setup = vDSP_create_fftsetup(vDSP_Length(log2n + 1), FFTRadix(kFFTRadix2)) else { return nil }
         defer { vDSP_destroy_fftsetup(setup) }
 
-        func fft2dForward(_ real: inout [Float], _ imag: inout [Float]) {
-            real.withUnsafeMutableBufferPointer { rp in
-                imag.withUnsafeMutableBufferPointer { ip in
-                    var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
-                    vDSP_fft2d_zip(setup, &split, 1, 0, vDSP_Length(log2n), vDSP_Length(log2n), FFTDirection(FFT_FORWARD))
-                }
-            }
-        }
         func fft2dInverse(_ real: inout [Float], _ imag: inout [Float]) {
             real.withUnsafeMutableBufferPointer { rp in
                 imag.withUnsafeMutableBufferPointer { ip in
@@ -367,9 +401,6 @@ enum Align {
                 }
             }
         }
-
-        fft2dForward(&refReal, &refImag)
-        fft2dForward(&frmReal, &frmImag)
 
         // Cross-power spectrum: CP = (F * conj(G)) / |F * conj(G)|
         // Where F = ref, G = frame. Result after IFFT peaks at the shift.
