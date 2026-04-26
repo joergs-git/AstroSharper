@@ -91,12 +91,12 @@ SwiftUI on top, `MTKView` preview, `MPSGraph` and hand-written Metal compute ker
 
 ## Documentation
 
+- [**Wiki on GitHub**](https://github.com/joergs-git/AstroSharper/wiki) — page-per-feature reference, including the new [Preview HUD & Quality](https://github.com/joergs-git/AstroSharper/wiki/Preview-HUD-and-Quality) page
 - [**Workflow guide**](docs/WORKFLOW.md) — smart end-to-end use cases (Sun, Moon, planets)
 - [**Architecture**](docs/ARCHITECTURE.md) — code structure & GPU pipeline
-- [**Wiki**](docs/wiki/Home.md) — page-per-feature reference
-- [**Keyboard shortcuts**](docs/wiki/Keyboard-Shortcuts.md)
-- [**Troubleshooting**](docs/wiki/Troubleshooting.md)
-- [**FAQ**](docs/wiki/FAQ.md)
+- [**Keyboard shortcuts**](https://github.com/joergs-git/AstroSharper/wiki/Keyboard-Shortcuts)
+- [**Troubleshooting**](https://github.com/joergs-git/AstroSharper/wiki/Troubleshooting)
+- [**FAQ**](https://github.com/joergs-git/AstroSharper/wiki/FAQ)
 
 ## Roadmap
 
