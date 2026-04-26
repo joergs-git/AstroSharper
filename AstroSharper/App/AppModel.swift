@@ -1440,9 +1440,11 @@ final class AppModel: ObservableObject {
                     }
                     return
                 }
-                let probe = SharpnessProbe(device: MetalDevice.shared.device)
+                // Shared probe — instantiating one per file in a 500-file
+                // import burned more time on queue/cache setup than the
+                // actual GPU pass.
                 guard let tex = try? ImageTexture.load(url: url, device: MetalDevice.shared.device) else { return }
-                let s = probe.compute(texture: tex)
+                let s = SharpnessProbe.shared.compute(texture: tex)
                 await MainActor.run {
                     guard let self, let idx = self.catalog.index(of: id) else { return }
                     self.catalog.files[idx].sharpness = s

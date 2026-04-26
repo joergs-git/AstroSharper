@@ -2,6 +2,11 @@
 
 Patterns and gotchas captured from this project. Read at session start; append after every correction.
 
+## [2026-04-26] — Share GPU helpers, cache temp textures by shape
+- **Mistake:** `SharpnessProbe` was instantiated **per file** in the thumbnail loader. Importing 500 TIFFs created 500 probes + 500 Metal command queues + 500 destination-texture allocations. Per-call allocation in `compute()` also allocated fresh Laplacian-dest + stats-dest textures every single call — even though all SER frames in a scan share the same shape.
+- **Rule:** For any small GPU helper used at high frequency (probe, stats, etc.), expose a `static let shared` singleton with its own command queue. Cache scratch textures by shape `(w, h, pixelFormat)` so the inner loop reuses allocations. Wrap the cache in `NSLock` if the shared instance can be touched from multiple `Task.detached` workers.
+- **Applies to:** `Engine/Pipeline/QualityProbe.swift::SharpnessProbe.shared`. Pattern is reusable for any future MPS-backed metric.
+
 ## [2026-04-26] — Mouse model for any preview = AstroTriage's, copied verbatim
 - **Mistake:** Twice "improved" the preview pan/zoom to my own scheme (plain drag = pan). User rejected both, asked for "exactly as astrotriage repo is showing it. e.g. photoshop style zoom".
 - **Rule:** For preview viewers, **port** AstroTriage's `ZoomableMTKView` mouse model — anchored click-drag zoom on plain drag, ⌥-drag pan, double-click fit, anchored pinch zoom. Don't redesign.

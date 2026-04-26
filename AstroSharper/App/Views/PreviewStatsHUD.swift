@@ -50,6 +50,14 @@ struct PreviewStatsHUD: View {
                     Text(formatSharpness(d.p90))
                 }
                 .font(.system(size: 10, design: .monospaced))
+                if let j = d.jitterRMS {
+                    HStack(spacing: 4) {
+                        Image(systemName: "waveform.path.ecg")
+                            .foregroundColor(.secondary)
+                        Text("Jitter: \(String(format: "%.1f", j)) px RMS")
+                            .help("Root-mean-square frame-to-frame shift (phase correlation between adjacent samples). Higher = more atmospheric motion to register.")
+                    }
+                }
                 Text("Recommend: keep top \(Int(d.recommendedKeepFraction * 100))%")
                     .fontWeight(.semibold)
                     .foregroundColor(.yellow)

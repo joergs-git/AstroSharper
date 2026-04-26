@@ -55,7 +55,13 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
-_Nothing yet — track new work here._
+### Added
+- **HUD toggle shortcut** (`I`) and View-menu item — show / hide the preview stats overlay.
+- **Frame-to-frame jitter score** (RMS pixel shift, phase-correlated between adjacent samples) added to the SER quality scan; surfaced in the HUD distribution panel and used to refine the lucky-stack keep-% recommendation when jitter > 15 px.
+
+### Changed
+- **`SharpnessProbe.shared`** singleton replaces per-call instantiation. Instantiating one probe per file in the thumbnail loader (500 TIFFs → 500 command queues) was the dominant import cost; now negligible.
+- **Probe texture cache** keyed by `(width, height, pixelFormat)` — destination Laplacian / stats textures are allocated once per shape and reused. SER quality scans of 64 same-shaped frames now reuse the same two destination textures across the whole scan.
 
 ## [0.2.0] — 2026-04-25
 

@@ -101,7 +101,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
 
     // HUD support — sharpness probe (called on every loaded preview frame)
     // and SER distribution scanner (kicked once per opened SER file).
-    private let sharpnessProbe = SharpnessProbe(device: MetalDevice.shared.device)
+    private let sharpnessProbe = SharpnessProbe.shared
     private let qualityScanner = SerQualityScanner()
 
     /// Texture pixel dimensions of the currently-shown preview, exposed so

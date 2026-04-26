@@ -105,6 +105,13 @@ struct AstroSharperApp: App {
                     NotificationCenter.default.post(name: .previewZoomCommand, object: PreviewZoomCommand.twoHundred)
                 }
                 .keyboardShortcut("2", modifiers: [.command])
+                Divider()
+                // I = info / inspector. Toggles the translucent stats overlay
+                // in the bottom-left corner of the preview.
+                Button(appModel.hudVisible ? "Hide Preview HUD" : "Show Preview HUD") {
+                    appModel.hudVisible.toggle()
+                }
+                .keyboardShortcut("i", modifiers: [])
             }
             CommandGroup(replacing: .help) {
                 Button("AstroSharper on GitHub") { NSWorkspace.shared.open(AppLinks.github) }
