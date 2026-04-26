@@ -11,6 +11,9 @@ struct PreviewStatsHUD: View {
     /// Invoked when the user clicks "Calculate Video Quality". Optional —
     /// when nil, the button is hidden (e.g. for static-image previews).
     var onCalculateVideoQuality: (() -> Void)? = nil
+    /// True while a scan is running — HUD shows a spinner instead of the
+    /// button so the user gets immediate feedback that the click landed.
+    var isScanning: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -66,19 +69,34 @@ struct PreviewStatsHUD: View {
                     .lineLimit(2)
                     .frame(maxWidth: 280, alignment: .leading)
             } else if stats.totalFrames > 1 {
-                // Distribution not yet computed for this video. Offer the
-                // user an explicit "Calculate Video Quality" button instead
-                // of auto-scanning every SER they click — scans take a few
-                // seconds for big files and used to make browsing sluggish.
+                // Distribution not yet computed for this video. Offer an
+                // explicit "Calculate Video Quality" button instead of
+                // auto-scanning every SER the user clicks. While scanning,
+                // swap to a spinner so the click obviously registered —
+                // the scan takes 3-5 s and silent UI looked broken.
                 Divider().background(Color.white.opacity(0.15)).padding(.vertical, 2)
-                Text("Video quality not yet calculated.")
-                    .foregroundColor(.secondary)
-                if let onCalc = onCalculateVideoQuality {
-                    Button("Calculate Video Quality") { onCalc() }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .tint(.yellow)
-                        .help("Sample up to 64 frames, measure sharpness, and recommend a lucky-stack keep-percentage. Result is cached on disk.")
+                if isScanning {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.yellow)
+                        Text("Scanning frames…")
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    Text("Video quality not yet calculated.")
+                        .foregroundColor(.secondary)
+                    if let onCalc = onCalculateVideoQuality {
+                        Button("Calculate Video Quality") { onCalc() }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .tint(.yellow)
+                            .help("Sample up to 64 frames, measure sharpness + jitter, and recommend a lucky-stack keep-percentage. Result is cached on disk so re-opens are instant.")
+                    } else {
+                        Text("Quality scan available for SER files only (AVI scan coming soon).")
+                            .foregroundColor(.secondary)
+                            .italic()
+                    }
                 }
             }
         }

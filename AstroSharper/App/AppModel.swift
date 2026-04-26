@@ -153,9 +153,13 @@ final class AppModel: ObservableObject {
     @Published var hudVisible: Bool = true
 
     /// Visible viewport in normalised image coordinates (0…1, top-left
-    /// origin). nil when the whole image fits in the view (mini-map hidden).
-    /// Updated by PreviewCoordinator whenever zoom or pan changes.
+    /// origin). Mini-map overlay was disabled — kept on the model so the
+    /// helper code can be revived without churn.
     @Published var previewViewport: CGRect? = nil
+
+    /// True while a Calculate-Video-Quality scan is running for the active
+    /// file. The HUD swaps the button for a spinner when set.
+    @Published var isCalculatingVideoQuality: Bool = false
 
     /// When ON, a folder/file open auto-detects Sun/Moon/Jupiter/Saturn/Mars
     /// from filenames + folder names and applies the matching default preset.
@@ -1482,8 +1486,13 @@ final class AppModel: ObservableObject {
               entry.isSER else { return }
         let url = entry.url
         let seed = previewStats
+        // Flip the scanning flag immediately so the HUD swaps the button
+        // for a spinner; the user otherwise sees nothing change for the
+        // 3-5 s the scan takes and assumes the click was lost.
+        isCalculatingVideoQuality = true
         videoQualityScanner.scan(url: url, seedStats: seed) { [weak self] updated in
             guard let self else { return }
+            self.isCalculatingVideoQuality = false
             guard self.previewFileID == id else { return }
             var merged = self.previewStats
             merged.distribution = updated.distribution

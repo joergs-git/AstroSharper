@@ -17,12 +17,18 @@ import SwiftUI
 struct PreviewView: View {
     @EnvironmentObject private var app: AppModel
 
-    /// Thumbnail of the previewed file, used by the mini-map. Falls back
-    /// to nil when the catalog hasn't generated a thumbnail yet (which
-    /// renders the mini-map's placeholder swatch).
+    /// Thumbnail of the previewed file. Currently unused (mini-map is
+    /// disabled) — kept for the eventual revival of `PreviewMiniMap`.
     private var currentThumbnail: NSImage? {
         guard let id = app.previewFileID else { return nil }
         return app.catalog.files.first(where: { $0.id == id })?.thumbnail
+    }
+
+    /// Drives whether the HUD's "Calculate Video Quality" button is
+    /// offered — quality scanning is currently SER-only.
+    private var currentEntryIsSER: Bool {
+        guard let id = app.previewFileID else { return false }
+        return app.catalog.files.first(where: { $0.id == id })?.isSER ?? false
     }
 
     var body: some View {
@@ -33,23 +39,19 @@ struct PreviewView: View {
                 if app.hudVisible && app.previewFileID != nil {
                     PreviewStatsHUD(
                         stats: app.previewStats,
-                        onCalculateVideoQuality: app.previewStats.totalFrames > 1
+                        onCalculateVideoQuality: currentEntryIsSER && app.previewStats.totalFrames > 1
                             ? { app.calculateVideoQualityForCurrentFile() }
-                            : nil
+                            : nil,
+                        isScanning: app.isCalculatingVideoQuality
                     )
                     .transition(.opacity)
                 }
             }
-            .overlay(alignment: .topLeading) {
-                // Mini-map appears only when zoomed in past fit. Anchored
-                // top-leading so it doesn't fight the bottom-leading HUD
-                // for screen real estate.
-                if app.hudVisible, let viewport = app.previewViewport {
-                    PreviewMiniMap(thumbnail: currentThumbnail, viewport: viewport)
-                        .allowsHitTesting(false)
-                        .transition(.opacity)
-                }
-            }
+            // Mini-map overlay was disabled — pan/zoom recomputed it on
+            // every drag tick, and the user found it slow without
+            // commensurate value. The view + computation helpers stay in
+            // the codebase (PreviewMiniMap.swift, publishViewport()) for
+            // future revival.
             .environmentObject(app)
     }
 
@@ -328,7 +330,6 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             panPx = .zero
         }
         view.needsDisplay = true
-        publishViewport()
     }
 
     private func onPlaybackFrameChanged() {
@@ -443,7 +444,6 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 }
                 self.app.previewStats.currentSharpness = sharpness
                 self.view?.needsDisplay = true
-                self.publishViewport()  // file load resets zoom → fresh map
                 self.reprocess()
             }
         }
@@ -673,7 +673,6 @@ final class ZoomableMTKView: MTKView {
             c.zoomScale = 1
             c.panPx = .zero
             needsDisplay = true
-            c.publishViewport()
             return
         }
 
@@ -700,11 +699,14 @@ final class ZoomableMTKView: MTKView {
 
         if isPanDragging {
             let current = toDrawable(convert(event.locationInWindow, from: nil))
-            // Pan follows the hand 1:1 in drawable pixels.
-            c.panPx.x = panStartOffset.x + Float(current.x - panDragStart.x)
+            // Pan follows the hand 1:1 in drawable pixels. The display shader
+            // has positive panPx.x mapping to "image content shifts LEFT on
+            // screen", so to make the image follow the hand to the right we
+            // *decrease* panPx.x as the cursor moves right. Y stays direct
+            // because NSView coords are y-up and the shader's y-flip cancels.
+            c.panPx.x = panStartOffset.x - Float(current.x - panDragStart.x)
             c.panPx.y = panStartOffset.y + Float(current.y - panDragStart.y)
             needsDisplay = true
-            c.publishViewport()
             return
         }
 
@@ -733,11 +735,11 @@ final class ZoomableMTKView: MTKView {
         }
         // Pan when zoomed in. Multiply by backing scale to keep retina
         // movement in the same drawable-pixel units the shader expects.
+        // Same X sign convention as the ⌥-drag pan above.
         let s = Float(window?.backingScaleFactor ?? 1)
-        c.panPx.x += Float(event.scrollingDeltaX) * s
+        c.panPx.x -= Float(event.scrollingDeltaX) * s
         c.panPx.y += Float(event.scrollingDeltaY) * s
         needsDisplay = true
-        c.publishViewport()
     }
 
     override func magnify(with event: NSEvent) {
@@ -754,7 +756,19 @@ final class ZoomableMTKView: MTKView {
 
     /// Update `zoomScale` and `panPx` so the image pixel that was under
     /// `anchor` (in drawable-pixel view coords) stays under the anchor
-    /// after the zoom change. Mirrors AstroTriage's anchored-zoom math.
+    /// after the zoom change.
+    ///
+    /// Sign convention: the display shader uses `uv += panPx / texSize`, so
+    /// positive `panPx.x` shifts image content to the LEFT on screen
+    /// (samples further to the right in the source). That's *opposite* to
+    /// AstroTriage's pan-offset convention, so the math here is the
+    /// negated form of the AstroTriage formula derived for our shader:
+    ///   sampled image-x = relX_view * (texW / (viewW * zoom * fitX)) + ½texW + panPx.x
+    /// Solving for the panPx.x that keeps the same image-x under the anchor
+    /// yields:
+    ///   imgX_at_anchor = (relX + oldPan.x) / oldEffective
+    ///   panPx.x_new    = imgX_at_anchor * newEffective − relX
+    /// (same shape for Y).
     private func anchoredZoom(toScale newScale: Float,
                               anchor: CGPoint,
                               fromScale oldScale: Float,
@@ -769,23 +783,17 @@ final class ZoomableMTKView: MTKView {
         let oldEffective = baseFit * CGFloat(oldScale)
         let newEffective = baseFit * CGFloat(newScale)
 
-        // Anchor relative to view center, in drawable pixels.
         let viewW = drawableSize.width
         let viewH = drawableSize.height
         let relX = anchor.x - viewW / 2.0
         let relY = anchor.y - viewH / 2.0
 
-        // Image-space coordinate currently under the anchor (oldScale).
-        // Sign convention matches the display shader; +panPx.x shifts the
-        // image right on screen, so the anchor's image-x is offset by -panPx.x.
-        let imgX = (relX - CGFloat(oldPan.x)) / oldEffective
-        let imgY = (relY - CGFloat(oldPan.y)) / oldEffective
+        let imgX = (relX + CGFloat(oldPan.x)) / oldEffective
+        let imgY = (relY + CGFloat(oldPan.y)) / oldEffective
 
-        // New pan that keeps that image point under the anchor.
-        c.panPx.x = Float(relX - imgX * newEffective)
-        c.panPx.y = Float(relY - imgY * newEffective)
+        c.panPx.x = Float(imgX * newEffective - relX)
+        c.panPx.y = Float(imgY * newEffective - relY)
         c.zoomScale = newScale
         needsDisplay = true
-        c.publishViewport()
     }
 }
