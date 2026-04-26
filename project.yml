@@ -43,3 +43,4 @@ targets:
         CODE_SIGN_ENTITLEMENTS: AstroSharper/AstroSharper.entitlements
         DEVELOPMENT_TEAM: FDSVBU33S8
         CODE_SIGN_STYLE: Automatic
+        OTHER_CODE_SIGN_FLAGS: "--timestamp"
