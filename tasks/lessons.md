@@ -2,6 +2,44 @@
 
 Patterns and gotchas captured from this project. Read at session start; append after every correction.
 
+## [2026-04-26] — Mouse model for any preview = AstroTriage's, copied verbatim
+- **Mistake:** Twice "improved" the preview pan/zoom to my own scheme (plain drag = pan). User rejected both, asked for "exactly as astrotriage repo is showing it. e.g. photoshop style zoom".
+- **Rule:** For preview viewers, **port** AstroTriage's `ZoomableMTKView` mouse model — anchored click-drag zoom on plain drag, ⌥-drag pan, double-click fit, anchored pinch zoom. Don't redesign.
+- **Reference:** `/Users/joergklaas/Desktop/claude-code/AstroTriage-blinkV2/AstroTriage/UI/ImageViewerView.swift` lines ~410-650.
+- **Applies to:** `App/Views/PreviewView.swift::ZoomableMTKView`.
+
+## [2026-04-26] — MTKView for static previews must be on-demand, not free-spin
+- **Mistake:** Default `isPaused = false; preferredFramesPerSecond = 60` made window-resize sluggish with a 4 K SER loaded — the display loop competed with AppKit's resize.
+- **Rule:** For preview MTKViews, set `enableSetNeedsDisplay = true; isPaused = true`. Every mutation site already calls `needsDisplay = true`, so behaviour is unchanged but the GPU stops spinning idle.
+
+## [2026-04-26] — Don't auto-run expensive per-file analysis
+- **Mistake:** Auto-scanned SER quality on every file click — sample 64 frames + GPU pass per click. Browsing felt sluggish.
+- **Rule:** For non-trivial per-file work: cache fingerprinted by (path → size+mtime), and add an explicit "Calculate X" button in the relevant UI. Static-image scoring is cheap enough to run-once-on-import + cache, but still cache.
+- **Applies to:** `Engine/IO/QualityCache.swift`, `Engine/Pipeline/QualityProbe.swift`, `App/Views/PreviewStatsHUD.swift`'s "Calculate Video Quality" button.
+
+## [2026-04-26] — Scrub lag was a stale "after" texture, not slow decode
+- **Mistake:** Scrubbing SER frames felt laggy. First instinct was decode/upload speed, but the decode is sub-millisecond.
+- **Root cause:** `loadCurrentSerFrame` only updated `beforeTex`; the user was viewing `afterTex` (sharpened), which only refreshed when the heavy pipeline (sharpen + LR deconv + tone curve) completed.
+- **Rule:** When swapping the source texture during a scrub, also drop `afterTex = nil` so the raw frame paints in the next display tick (~16 ms) and the sharpened version replaces it asynchronously.
+
+## [2026-04-26] — Hide rather than show idle UI affordances
+- **Mistake:** Flip-column rendered a grey icon on every row. Most rows aren't post-meridian — the icons were noise.
+- **Rule:** Toggle controls that are off most of the time should render an invisible hit-target (preserves layout + click-toggle) and only become visible when on. Discoverability for the off→on path moves to the context menu.
+
+## [2026-04-26] — SourceKit inline errors are stale during xcodegen file adds
+- **Mistake:** Reacted to "Cannot find type 'AppModel'" diagnostics that the IDE surfaced after adding new Swift files via xcodegen.
+- **Root cause:** SourceKit indexes lazily; xcodebuild was happy.
+- **Rule:** After adding a file, regen with xcodegen and check `xcodebuild ... | grep -E "error:|BUILD"`. If `BUILD SUCCEEDED`, ignore SourceKit.
+
+## [2026-04-26] — Apple Developer App ID capabilities ≠ entitlements
+- **Mistake:** Told the user to tick "App Sandbox" on the Apple Developer App ID Capabilities list — it doesn't exist there.
+- **Rule:** App Sandbox is an entitlement (set in `*.entitlements`), not an App ID capability. App ID Capabilities are the upstream services (iCloud, Push, etc.) that need server-side enablement.
+
+## [2026-04-26] — Auto-managed Developer ID profile is enough for notarized GH releases
+- **Mistake:** Tried to switch the project to manual signing referencing a hand-created `AstroSharper Developer ID` profile, broke archives ("No profile for team ... matching ... found").
+- **Rule:** Xcode's auto-managed *"Mac Team Direct Provisioning Profile"* (created on first archive with `-allowProvisioningUpdates`) covers Developer ID notarization. No manual profile needed unless you have a deterministic-build constraint. Manual signing is for Mac App Store submission, not Developer ID.
+- **Applies to:** `project.yml` `CODE_SIGN_STYLE`. Keep `Automatic`.
+
 ## [2026-04-26] — DC removal before Hann window for solar phase correlation
 - **Mistake:** First-pass solar stabilization used straight Hann + FFT, with the result that the bright disc's DC component dominated the cross-power spectrum and the correlation peak drifted between frames.
 - **Root cause:** Phase correlation normalises by magnitude, but the Hann window is centred at 0.5 amplitude — a frame with mean luminance ≠ 0 still has huge low-frequency energy.

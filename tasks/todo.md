@@ -2,6 +2,13 @@
 
 A running record of where we are, what's done, and what's next. Update at the end of every session.
 
+## Current state (v0.3.0 — released 2026-04-26)
+
+- Public GitHub repo: https://github.com/joergs-git/AstroSharper
+- Latest release: **v0.3.0** notarized + stapled, available on GitHub Releases
+- Mac App Store submission: deferred ("another time" per user)
+- All Apple infra in place for next notarized GH release: Developer ID cert installed, `notarytool` keychain profile configured, auto-managed provisioning profile present
+
 ## Current state (v0.2.0 + unreleased)
 
 - Native macOS app, Swift 5.9 + Metal, macOS 14+
@@ -17,6 +24,21 @@ A running record of where we are, what's done, and what's next. Update at the en
 - Stabilize-from-memory preserves in-place edits
 
 ## Done — recent batches
+
+### v0.3.0 — Preview HUD, quality intelligence, viewer polish (this session)
+- Preview HUD overlay (filename / dims / bit-depth / Bayer / size / capture date / current frame / live sharpness)
+- SER quality scanner with on-demand "Calculate Video Quality" button
+- Disk-persistent quality cache (`Application Support/AstroSharper/quality-cache.json`)
+- Sortable Type and Sharpness columns
+- Live filename filter with Include / Exclude (eye / eye-slash) toggle
+- In-SER play / pause + autostop on file switch
+- Photoshop-style anchored click-drag zoom ported from AstroBlinkV2
+- Flip icon hidden when off
+- MTKView switched to setNeedsDisplay-driven (window-resize fix)
+- Native macOS app icon wired through AppIcon asset catalog
+- README expanded into 5 themed Highlights sections
+- Public GitHub repo created
+- v0.3.0 notarized release on GitHub
 
 ### Solar stabilization fix (current session)
 - DC removal before Hann window — fixes solar disc drift
@@ -49,12 +71,16 @@ A running record of where we are, what's done, and what's next. Update at the en
 - [ ] Drizzle 1.5×, 2× reconstruction (C5 task)
 - [ ] CompiledFFT path: re-enable MPSGraph phase correlator (currently disabled, vDSP CPU path is the active route)
 
-### App Store path
-- [ ] Replace `idPLACEHOLDER` in `AppLinks.appStoreReview` with real App Store ID
-- [ ] Apple notarization workflow (notarytool integration)
+### App Store path (deferred — pick up when user says "set up MAS submission")
+- [ ] Register app in App Store Connect (https://appstoreconnect.apple.com/apps)
+- [ ] Create `Mac App Distribution` certificate (one-shot CSR via Keychain Assistant)
+- [ ] Create `Mac Installer Distribution` certificate (same CSR)
+- [ ] Create `AstroSharper Mac App Store` provisioning profile
+- [ ] Add MAS export-options.plist + Release-MAS scheme/config
+- [ ] Replace `idPLACEHOLDER` in `AppLinks.appStoreReview` with real App Store ID (after first MAS submission)
 - [ ] Privacy manifest (`PrivacyInfo.xcprivacy`)
 - [ ] App Store screenshots (required: 1280×800, 1440×900, 2560×1600, 2880×1800)
-- [ ] App Store description, keywords, support URL
+- [ ] App Store description, keywords, support URL, age rating
 - [ ] Pricing tier decision
 
 ### Mid-term
@@ -91,6 +117,7 @@ A running record of where we are, what's done, and what's next. Update at the en
 
 ## Session log
 
-- **2026-04-26** — Solar stabilization improvements: R-key reference, alignment modes, memory-texture path, DC removal. Full docs written. (this session)
+- **2026-04-26** (PM) — v0.3.0 ship: Preview HUD + sharpness probe + SER quality scanner + on-disk cache + sortable Type/Sharpness columns + filename filter + AstroTriage mouse port + flip-icon hide-when-off + MTKView on-demand redraw + native app icon. Public GitHub repo + notarized GH release.
+- **2026-04-26** (AM) — Solar stabilization improvements: R-key reference, alignment modes, memory-texture path, DC removal. Full docs written.
 - **2026-04-25** — D14 polish, inline player, thumbnail fix
 - **2026-04-22** — D12 brand identity, About panel, How-To window

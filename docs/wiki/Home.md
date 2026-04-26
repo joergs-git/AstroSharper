@@ -5,6 +5,7 @@ Welcome. This wiki mirrors the in-app **How AstroSharper works** window plus dee
 ## Pages
 
 - [Getting Started](Getting-Started.md) — first folder, first stack
+- [Preview HUD & Quality](Preview-HUD-and-Quality.md) — sharpness probe, distribution scan, lucky-% recommendation
 - [Lucky Stack](Lucky-Stack.md) — quality grading, multi-AP, variants
 - [Stabilization](Stabilization.md) — reference modes, alignment modes, ROI, memory path
 - [Sharpening](Sharpening.md) — wavelet, unsharp, Wiener, Lucy-Richardson
