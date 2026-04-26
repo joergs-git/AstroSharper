@@ -21,6 +21,17 @@ struct PreviewView: View {
         MetalPreviewRepresentable()
             .background(Color.black)
             .overlay(placeholderOverlay)
+            .overlay(alignment: .bottomLeading) {
+                if app.hudVisible && app.previewFileID != nil {
+                    PreviewStatsHUD(
+                        stats: app.previewStats,
+                        onCalculateVideoQuality: app.previewStats.totalFrames > 1
+                            ? { app.calculateVideoQualityForCurrentFile() }
+                            : nil
+                    )
+                    .transition(.opacity)
+                }
+            }
             .environmentObject(app)
     }
 
@@ -54,9 +65,12 @@ private struct MetalPreviewRepresentable: NSViewRepresentable {
         let view = ZoomableMTKView(frame: .zero, device: MetalDevice.shared.device)
         view.colorPixelFormat = .rgba16Float
         view.framebufferOnly = false
-        view.enableSetNeedsDisplay = false
-        view.isPaused = false
-        view.preferredFramesPerSecond = 60
+        // Drive on demand. Continuous 60 fps was redundant — the display
+        // shader only changes when textures or zoom/pan do, and free-running
+        // burned cycles during window resize, making large SERs feel sluggish
+        // to drag-resize. Every mutation site already calls needsDisplay = true.
+        view.enableSetNeedsDisplay = true
+        view.isPaused = true
         view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         view.delegate = context.coordinator
         view.coordinator = context.coordinator
@@ -84,6 +98,18 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     private var beforeTex: MTLTexture?
     private var afterTex: MTLTexture?
     private var currentFileID: UUID?
+
+    // HUD support — sharpness probe (called on every loaded preview frame)
+    // and SER distribution scanner (kicked once per opened SER file).
+    private let sharpnessProbe = SharpnessProbe(device: MetalDevice.shared.device)
+    private let qualityScanner = SerQualityScanner()
+
+    /// Texture pixel dimensions of the currently-shown preview, exposed so
+    /// the ZoomableMTKView can compute fit-scale for anchored zooming.
+    var texturePixelSize: CGSize? {
+        guard let tex = beforeTex else { return nil }
+        return CGSize(width: tex.width, height: tex.height)
+    }
 
     // Re-process trigger (throttled for "instant" slider feedback).
     private let reprocessSubject = PassthroughSubject<Void, Never>()
@@ -274,26 +300,49 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         if app.displayedSection == .memory && app.playback.hasFrames { return }
 
         currentFileID = app.previewFileID
+        // A different file invalidates the SER quality scan from the previous
+        // file — cancel before kicking new work or stale results land.
+        qualityScanner.cancel()
+
         guard let id = app.previewFileID,
               let entry = app.catalog.files.first(where: { $0.id == id }) else {
             beforeTex = nil
             afterTex = nil
+            app.previewStats = PreviewStats()
+            view?.needsDisplay = true
             return
         }
         let url = entry.url
         let isSER = entry.isSER
 
+        // Seed the HUD with header-derived info immediately. Bytes / dates
+        // come from the FileEntry and the (optional) SER header.
+        var stats = PreviewStats()
+        stats.fileName = entry.name
+        stats.fileSizeBytes = entry.sizeBytes
+        stats.captureDate = entry.creationDate
+        stats.totalFrames = 1
+        stats.currentFrame = 1
+
         // For SER files, read the header up front so we know the frame count
         // and can show the scrub slider. Reset scrub for non-SER files.
+        var serHeader: SerHeader?
         if isSER {
-            if let header = try? SerReader(url: url).header {
-                app.previewSerFrameCount = header.frameCount
+            serHeader = try? SerReader(url: url).header
+            if let h = serHeader {
+                app.previewSerFrameCount = h.frameCount
                 app.previewSerFrameIndex = 0
+                stats.totalFrames = h.frameCount
+                stats.dimensions = (h.imageWidth, h.imageHeight)
+                stats.bitDepth = h.pixelDepthPerPlane
+                stats.bayerLabel = Self.bayerLabel(for: h.colorID)
+                if let d = h.dateUTC { stats.captureDate = d }
             }
         } else {
             app.previewSerFrameCount = 0
             app.previewSerFrameIndex = 0
         }
+        app.previewStats = stats
 
         let flipped = entry.meridianFlipped
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -310,14 +359,52 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 tex = RotateTexture.rotate180(t, device: MetalDevice.shared.device)
             }
             let hist = isSER ? [] : Histogram.compute(url: url)
+            // Sharpness for the displayed frame — runs on this background
+            // queue so the main thread stays responsive even on 4K SERs.
+            let sharpness: Float? = tex.map { self.sharpnessProbe.compute(texture: $0) }
             DispatchQueue.main.async {
                 self.beforeTex = tex
                 self.afterTex = nil
                 self.zoomScale = 1
                 self.panPx = .zero
                 self.app.previewHistogram = hist
+                if let dim = tex.map({ ($0.width, $0.height) }) {
+                    self.app.previewStats.dimensions = dim
+                }
+                self.app.previewStats.currentSharpness = sharpness
+                self.view?.needsDisplay = true
                 self.reprocess()
             }
+        }
+
+        // Look the SER distribution up in the on-disk cache. Hit → use it
+        // immediately; miss → leave `distribution` nil so the HUD shows the
+        // "Calculate Video Quality" button and the user opts in. We
+        // deliberately don't auto-scan anymore — browsing many SERs in a
+        // capture session was too slow when each one kicked a fresh scan.
+        if isSER, serHeader != nil {
+            if let cached = QualityCache.shared.lookup(url: url),
+               let dist = cached.distribution {
+                app.previewStats.distribution = dist
+            }
+        }
+        // For static images, populate sharpness from the catalog if it has
+        // already been computed by the thumbnail loader.
+        if !isSER, let s = entry.sharpness {
+            app.previewStats.currentSharpness = s
+        }
+    }
+
+    /// Friendly Bayer-pattern label for the HUD. Mirrors `SerColorID` but
+    /// kept here so the engine type doesn't bleed into UI strings.
+    private static func bayerLabel(for id: SerColorID) -> String {
+        switch id {
+        case .mono:      return "Mono"
+        case .rgb, .bgr: return "RGB"
+        case .bayerRGGB: return "RGGB"
+        case .bayerGRBG: return "GRBG"
+        case .bayerGBRG: return "GBRG"
+        case .bayerBGGR: return "BGGR"
         }
     }
 
@@ -337,9 +424,22 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             if flipped, let t = tex {
                 tex = RotateTexture.rotate180(t, device: MetalDevice.shared.device)
             }
+            // Probe sharpness on the same background queue so the HUD updates
+            // in lock-step with what the user sees.
+            let sharpness: Float? = tex.map { self.sharpnessProbe.compute(texture: $0) }
             DispatchQueue.main.async {
                 guard let tex else { return }
+                // Drop the stale sharpened texture so the raw frame paints
+                // immediately. Without this the user stares at the previous
+                // frame's "after" texture until the sharpen / tone-curve
+                // pipeline finishes for the new frame — which is what made
+                // scrubbing feel laggy. The pipeline still runs and replaces
+                // afterTex when it lands.
+                self.afterTex = nil
                 self.beforeTex = tex
+                self.app.previewStats.currentFrame = frameIndex + 1
+                self.app.previewStats.currentSharpness = sharpness
+                self.view?.needsDisplay = true
                 self.reprocess()
             }
         }
@@ -457,45 +557,84 @@ final class ZoomableMTKView: MTKView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    // Mouse model — ported from AstroBlinkV2 / AstroTriage's ZoomableMTKView
+    // so the experience is identical:
+    //   • Plain left-drag  = Photoshop click-drag zoom (anchored to click;
+    //     right = zoom in, left = zoom out, ~200 pt → 2×).
+    //   • ⌥ + drag         = pan (hand tool, closed-hand cursor).
+    //   • Double-click     = reset to fit-to-view + center.
+    //   • Pinch (magnify)  = zoom anchored to cursor.
+    //   • Scroll wheel     = pan when zoomed in.
+
+    /// `panPx` in the coordinator is in drawable pixels (same units the
+    /// display shader sees). Mouse events come in points, so we convert.
+    private func toDrawable(_ p: NSPoint) -> CGPoint {
+        let s = window?.backingScaleFactor ?? 1
+        return CGPoint(x: p.x * s, y: p.y * s)
+    }
+
+    /// Fit-scale = how much the texture is scaled up/down to fit the view
+    /// at zoomScale = 1. Matches the display shader's implicit fit.
+    private func fitScale() -> CGFloat {
+        guard let c = coordinator,
+              let texSize = c.texturePixelSize else { return 0 }
+        let view = drawableSize
+        guard view.width > 0, view.height > 0,
+              texSize.width > 0, texSize.height > 0 else { return 0 }
+        return min(view.width / texSize.width, view.height / texSize.height)
+    }
+
     override func mouseDown(with event: NSEvent) {
         guard let c = coordinator else { return }
+
         if event.clickCount == 2 {
+            // Reset to fit + center.
             c.zoomScale = 1
             c.panPx = .zero
             needsDisplay = true
             return
         }
+
         if event.modifierFlags.contains(.option) {
+            // ⌥-drag = pan (hand tool).
             isPanDragging = true
-            panDragStart = convert(event.locationInWindow, from: nil)
+            panDragStart = toDrawable(convert(event.locationInWindow, from: nil))
             panStartOffset = c.panPx
             NSCursor.closedHand.set()
             return
         }
+
+        // Default = anchored zoom drag. Record the click anchor and the
+        // starting zoom + pan; mouseDragged will compute new pan to keep the
+        // pixel under the cursor stationary as zoom changes.
         isZoomDragging = true
-        zoomAnchorView = convert(event.locationInWindow, from: nil)
+        zoomAnchorView = toDrawable(convert(event.locationInWindow, from: nil))
         zoomStartScale = c.zoomScale
         zoomStartPan = c.panPx
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard let c = coordinator else { return }
+
         if isPanDragging {
-            let current = convert(event.locationInWindow, from: nil)
-            // Pan in image pixels (inverse of effective scale).
-            let eff = max(c.zoomScale, 0.001)
-            c.panPx.x = panStartOffset.x - Float(current.x - panDragStart.x) / eff
-            c.panPx.y = panStartOffset.y + Float(current.y - panDragStart.y) / eff
+            let current = toDrawable(convert(event.locationInWindow, from: nil))
+            // Pan follows the hand 1:1 in drawable pixels.
+            c.panPx.x = panStartOffset.x + Float(current.x - panDragStart.x)
+            c.panPx.y = panStartOffset.y + Float(current.y - panDragStart.y)
             needsDisplay = true
             return
         }
+
         guard isZoomDragging else { return }
-        let current = convert(event.locationInWindow, from: nil)
-        let dx = Float(current.x - zoomAnchorView.x)
-        // ~200 pt of drag = 2x zoom change.
-        let zoomFactor = powf(2.0, dx / 200.0)
-        c.zoomScale = max(0.1, min(50.0, zoomStartScale * zoomFactor))
-        needsDisplay = true
+        let current = toDrawable(convert(event.locationInWindow, from: nil))
+        let dx = current.x - zoomAnchorView.x
+        // ~200 drawable px of horizontal drag = 2× zoom change.
+        let zoomFactor = pow(2.0, dx / 200.0)
+        let newScale = max(0.1, min(50.0, CGFloat(zoomStartScale) * zoomFactor))
+        anchoredZoom(toScale: Float(newScale),
+                     anchor: zoomAnchorView,
+                     fromScale: zoomStartScale,
+                     fromPan: zoomStartPan)
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -509,16 +648,59 @@ final class ZoomableMTKView: MTKView {
             super.scrollWheel(with: event)
             return
         }
-        let eff = max(c.zoomScale, 0.001)
-        c.panPx.x -= Float(event.scrollingDeltaX) / eff
-        c.panPx.y += Float(event.scrollingDeltaY) / eff
+        // Pan when zoomed in. Multiply by backing scale to keep retina
+        // movement in the same drawable-pixel units the shader expects.
+        let s = Float(window?.backingScaleFactor ?? 1)
+        c.panPx.x += Float(event.scrollingDeltaX) * s
+        c.panPx.y += Float(event.scrollingDeltaY) * s
         needsDisplay = true
     }
 
     override func magnify(with event: NSEvent) {
         guard let c = coordinator else { return }
-        let factor = Float(1.0 + event.magnification)
-        c.zoomScale = max(0.1, min(50.0, c.zoomScale * factor))
+        let mouseInView = toDrawable(convert(event.locationInWindow, from: nil))
+        let factor = CGFloat(1.0 + event.magnification)
+        let oldScale = c.zoomScale
+        let newScale = Float(max(0.1, min(50.0, CGFloat(oldScale) * factor)))
+        anchoredZoom(toScale: newScale,
+                     anchor: mouseInView,
+                     fromScale: oldScale,
+                     fromPan: c.panPx)
+    }
+
+    /// Update `zoomScale` and `panPx` so the image pixel that was under
+    /// `anchor` (in drawable-pixel view coords) stays under the anchor
+    /// after the zoom change. Mirrors AstroTriage's anchored-zoom math.
+    private func anchoredZoom(toScale newScale: Float,
+                              anchor: CGPoint,
+                              fromScale oldScale: Float,
+                              fromPan oldPan: SIMD2<Float>) {
+        guard let c = coordinator else { return }
+        let baseFit = fitScale()
+        guard baseFit > 0 else {
+            c.zoomScale = newScale
+            needsDisplay = true
+            return
+        }
+        let oldEffective = baseFit * CGFloat(oldScale)
+        let newEffective = baseFit * CGFloat(newScale)
+
+        // Anchor relative to view center, in drawable pixels.
+        let viewW = drawableSize.width
+        let viewH = drawableSize.height
+        let relX = anchor.x - viewW / 2.0
+        let relY = anchor.y - viewH / 2.0
+
+        // Image-space coordinate currently under the anchor (oldScale).
+        // Sign convention matches the display shader; +panPx.x shifts the
+        // image right on screen, so the anchor's image-x is offset by -panPx.x.
+        let imgX = (relX - CGFloat(oldPan.x)) / oldEffective
+        let imgY = (relY - CGFloat(oldPan.y)) / oldEffective
+
+        // New pan that keeps that image point under the anchor.
+        c.panPx.x = Float(relX - imgX * newEffective)
+        c.panPx.y = Float(relY - imgY * newEffective)
+        c.zoomScale = newScale
         needsDisplay = true
     }
 }

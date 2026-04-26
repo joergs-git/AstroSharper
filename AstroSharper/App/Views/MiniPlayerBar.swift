@@ -60,12 +60,23 @@ struct MiniPlayerBar: View {
     }
 
     // MARK: - Mode-aware accessors
+    //
+    // Three priorities for the play / step / fps controls:
+    //   1. Memory mode wins when the in-memory transport has frames.
+    //   2. SER in-file playback when the previewed file is a multi-frame
+    //      SER — play the captured stream instead of cycling files.
+    //   3. Otherwise blink-cycle through the file selection (AstroTriage).
 
     private var isMemoryMode: Bool {
         app.displayedSection == .memory && app.playback.hasFrames
     }
+    private var isSerFileMode: Bool {
+        !isMemoryMode && app.canPlaySerFrames
+    }
     private var isPlaying: Bool {
-        isMemoryMode ? app.playback.isPlaying : app.blinkActive
+        if isMemoryMode { return app.playback.isPlaying }
+        if isSerFileMode { return app.serPlaybackActive }
+        return app.blinkActive
     }
     private var fps: Double {
         isMemoryMode ? app.playback.fps : app.blinkRate
@@ -74,15 +85,18 @@ struct MiniPlayerBar: View {
         if isMemoryMode {
             return "\(app.playback.currentIndex + 1)/\(app.playback.frames.count)"
         }
+        if isSerFileMode {
+            return "\(app.previewSerFrameIndex + 1)/\(app.previewSerFrameCount)"
+        }
         let total = candidates.count
         guard total > 0 else { return "—" }
         let cur = candidates.firstIndex(of: app.previewFileID ?? .init()).map { $0 + 1 } ?? 1
         return "\(cur)/\(total)"
     }
     private var playTooltip: String {
-        isMemoryMode
-            ? "Play / Pause memory frames (P)"
-            : "Blink-cycle through selected files (or all files if none selected) (P)"
+        if isMemoryMode { return "Play / Pause memory frames (P)" }
+        if isSerFileMode { return "Play / Pause frames inside this SER (P)" }
+        return "Blink-cycle through selected files (or all files if none selected) (P)"
     }
     private var candidates: [FileEntry.ID] {
         if !app.selectedFileIDs.isEmpty {
@@ -92,10 +106,13 @@ struct MiniPlayerBar: View {
     }
 
     private func togglePlay() {
-        if isMemoryMode { app.togglePlay() } else { app.toggleBlink() }
+        if isMemoryMode { app.togglePlay(); return }
+        if isSerFileMode { app.toggleSerPlayback(); return }
+        app.toggleBlink()
     }
     private func step(by delta: Int) {
         if isMemoryMode { app.stepFrame(by: delta); return }
+        if isSerFileMode { app.stepSerFrame(by: delta); return }
         let cands = candidates
         guard cands.count >= 1 else { return }
         let cur = cands.firstIndex(of: app.previewFileID ?? .init()) ?? 0

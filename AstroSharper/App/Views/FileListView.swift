@@ -16,12 +16,77 @@ struct FileListView: View {
         KeyPathComparator(\.name, order: .forward)
     ]
 
-    private var sortedFiles: [FileEntry] {
-        app.catalog.files.sorted(using: sortOrder)
+    /// Live filename search. Empty string = no filter. The toggle next to
+    /// the field flips the match into an EXCLUDE filter (hide rows that
+    /// contain the query) — useful for stripping intermediate "_conv" /
+    /// "_aligned" outputs while leaving the originals visible.
+    @State private var searchText: String = ""
+    @State private var negateSearch: Bool = false
+
+    private var filteredFiles: [FileEntry] {
+        let sorted = app.catalog.files.sorted(using: sortOrder)
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return sorted }
+        return sorted.filter { file in
+            let hit = file.name.range(of: q, options: .caseInsensitive) != nil
+            return negateSearch ? !hit : hit
+        }
     }
 
     var body: some View {
-        Table(sortedFiles, selection: $app.selectedFileIDs, sortOrder: $sortOrder) {
+        VStack(spacing: 0) {
+            searchBar
+            Divider()
+            table
+        }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(.secondary)
+                .font(.system(size: 11))
+            TextField("Filter filenames…", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11))
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear filter")
+            }
+            // Include / Exclude toggle. Eye = show matches; eye-slash = hide
+            // matches. Tinted red when negated so the user can't miss that
+            // rows are being hidden.
+            Button {
+                negateSearch.toggle()
+            } label: {
+                Image(systemName: negateSearch ? "eye.slash.fill" : "eye.fill")
+                    .foregroundColor(negateSearch ? .red : .accentColor)
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(.plain)
+            .help(negateSearch
+                  ? "Excluding rows whose name contains the query — click to switch to INCLUDE."
+                  : "Showing rows whose name contains the query — click to switch to EXCLUDE.")
+            // Subtle status — visible row count vs total when filter is on.
+            if !searchText.isEmpty {
+                Text("\(filteredFiles.count)/\(app.catalog.files.count)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color(NSColor.underPageBackgroundColor))
+    }
+
+    private var table: some View {
+        Table(filteredFiles, selection: $app.selectedFileIDs, sortOrder: $sortOrder) {
             TableColumn("") { (file: FileEntry) in
                 MarkCheckbox(isOn: app.markedFileIDs.contains(file.id)) {
                     app.toggleMark(file.id)
@@ -58,6 +123,32 @@ struct FileListView: View {
                 Text(file.name).font(.system(size: 12))
             }
 
+            // Sortable extension column — clicking groups SER together and
+            // raster images together when the user opened a mixed folder.
+            TableColumn("Type", value: \.typeKey) { (file: FileEntry) in
+                Text(file.typeKey.uppercased())
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            .width(48)
+
+            // Static-image sharpness (variance of Laplacian — higher = sharper).
+            // SER / AVI rows show "—" since they use a distribution scan
+            // exposed via the preview HUD instead.
+            TableColumn("Sharpness", value: \.sharpnessSortKey) { (file: FileEntry) in
+                if let s = file.sharpness {
+                    Text(Self.sharpnessString(s))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .help("Variance of Laplacian — higher = sharper image (more high-frequency detail).")
+                } else {
+                    Text(file.isFrameSequence ? "video" : "—")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary.opacity(0.6))
+                }
+            }
+            .width(80)
+
             TableColumn("Created", value: \.creationSortKey) { (file: FileEntry) in
                 Text(Self.dateString(file.creationDate))
                     .font(.system(size: 10, design: .monospaced))
@@ -72,6 +163,9 @@ struct FileListView: View {
             }
             .width(80)
 
+            // Flip column: show the icon only when the flag is on. Off-state
+            // is an empty placeholder so layout stays stable; toggling for
+            // an off-row goes through the context menu ("Toggle Meridian Flip").
             TableColumn("Flip") { (file: FileEntry) in
                 FlipCheckbox(isOn: file.meridianFlipped) {
                     app.toggleMeridianFlip(file.id)
@@ -168,6 +262,13 @@ struct FileListView: View {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
+    private static func sharpnessString(_ v: Float) -> String {
+        if !v.isFinite { return "—" }
+        let av = abs(v)
+        if av < 0.001 || av >= 1000 { return String(format: "%.2e", v) }
+        return String(format: "%.4f", v)
+    }
+
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm"
@@ -213,19 +314,30 @@ private struct ReferenceStar: View {
     }
 }
 
-/// Compact button for the meridian-flip toggle column.
+/// Compact button for the meridian-flip toggle column. Renders nothing
+/// visible when off — most files aren't post-meridian-flip and a row of
+/// grey icons just adds noise. Off-state cells stay clickable so users
+/// who know the column can still toggle on; the context menu remains the
+/// primary way to enable flip on a non-flipped row.
 private struct FlipCheckbox: View {
     let isOn: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: isOn ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath.circle")
-                .foregroundColor(isOn ? .orange : .secondary)
-                .font(.system(size: 14))
+            if isOn {
+                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                    .foregroundColor(.orange)
+                    .font(.system(size: 14))
+            } else {
+                // Invisible hit-target preserves row height + click-to-toggle.
+                Color.clear.frame(width: 14, height: 14)
+            }
         }
         .buttonStyle(.plain)
-        .help("Mark this file as 180°-flipped (post-meridian). Rotated in memory before all processing.")
+        .help(isOn
+              ? "Marked as 180°-flipped (post-meridian). Click to clear."
+              : "Click to mark this file as 180°-flipped (post-meridian).")
     }
 }
 

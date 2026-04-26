@@ -25,6 +25,20 @@ struct SerScrubBar: View {
                 .foregroundColor(.secondary)
                 .font(.system(size: 11))
 
+            // Play / pause auto-advances `previewSerFrameIndex` at the
+            // configured rate, so the user can preview the captured stream
+            // without manually scrubbing.
+            Button {
+                app.toggleSerPlayback()
+            } label: {
+                Image(systemName: app.serPlaybackActive ? "pause.fill" : "play.fill")
+                    .font(.system(size: 13))
+            }
+            .buttonStyle(.plain)
+            .disabled(!usable)
+            .keyboardShortcut("p", modifiers: [])
+            .help("Play / Pause frames inside this SER (P)")
+
             Button {
                 app.previewSerFrameIndex = max(0, app.previewSerFrameIndex - 1)
             } label: {

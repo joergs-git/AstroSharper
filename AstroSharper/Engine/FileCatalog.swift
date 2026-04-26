@@ -21,6 +21,17 @@ struct FileEntry: Identifiable, Hashable {
     /// a consistent orientation.
     var meridianFlipped: Bool = false
 
+    /// Cached sharpness (variance of Laplacian) for static images. nil for
+    /// SER / AVI — those use the distribution-based scan instead. Loaded
+    /// in the background after thumbnails so the column populates without
+    /// blocking the file list.
+    var sharpness: Float? = nil
+
+    /// Lower-cased file extension, exposed for table-column sorting so a
+    /// mixed bag of .ser / .tif / .png groups by type when the user clicks
+    /// the column header.
+    var typeKey: String { url.pathExtension.lowercased() }
+
     var isSER: Bool { url.pathExtension.lowercased() == FileCatalog.serExtension }
     var isAVI: Bool { url.pathExtension.lowercased() == FileCatalog.aviExtension }
     /// Any frame-sequence container (SER or AVI). Lucky-Stack and the
@@ -32,6 +43,13 @@ struct FileEntry: Identifiable, Hashable {
     /// against optional. Files with no date sort to the bottom.
     var creationSortKey: TimeInterval {
         creationDate?.timeIntervalSince1970 ?? .infinity
+    }
+
+    /// Sortable proxy for `sharpness`. SER / files-without-a-score sort to
+    /// the bottom on ascending order so the user sees them last when
+    /// looking for the sharpest static frames.
+    var sharpnessSortKey: Float {
+        sharpness ?? -.infinity
     }
 
     enum Status: Equatable, Hashable {

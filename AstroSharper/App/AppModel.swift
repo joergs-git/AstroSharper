@@ -140,6 +140,18 @@ final class AppModel: ObservableObject {
     @Published var blinkRate: Double = 18    // frames per second
     private var blinkTimer: Timer?
 
+    // SER in-file playback. When the user has a multi-frame SER selected,
+    // the play button advances `previewSerFrameIndex` (instead of cycling
+    // between files) so they can preview the captured stream.
+    @Published var serPlaybackActive: Bool = false
+    private var serPlaybackTimer: Timer?
+
+    // Preview HUD — translucent stats overlay shown on top of the preview.
+    // `previewStats` is filled by PreviewCoordinator as data becomes
+    // available (header → current frame → distribution).
+    @Published var previewStats: PreviewStats = PreviewStats()
+    @Published var hudVisible: Bool = true
+
     /// When ON, a folder/file open auto-detects Sun/Moon/Jupiter/Saturn/Mars
     /// from filenames + folder names and applies the matching default preset.
     @Published var autoDetectPresetOnOpen: Bool = true
@@ -320,7 +332,11 @@ final class AppModel: ObservableObject {
         $previewFileID
             .removeDuplicates()
             .sink { [weak self] id in
-                guard let self, self.displayedSection == .memory, let id else { return }
+                guard let self else { return }
+                // Switching the previewed file invalidates any running SER
+                // in-file playback; the new file may not even be a SER.
+                if self.serPlaybackActive { self.stopSerPlayback() }
+                guard self.displayedSection == .memory, let id else { return }
                 if let idx = self.playback.frames.firstIndex(where: { $0.id == id }) {
                     self.playback.currentIndex = idx
                 }
@@ -1326,8 +1342,48 @@ final class AppModel: ObservableObject {
         blinkTimer = nil
     }
     func setBlinkRate(_ rate: Double) {
-        blinkRate = max(0.5, min(30, rate))
+        blinkRate = max(0.5, min(60, rate))
         if blinkActive { startBlink() }   // reschedule with new interval
+        if serPlaybackActive { startSerPlayback() }
+    }
+
+    // MARK: - SER in-file player
+
+    /// True when the currently-previewed file is a SER with more than one
+    /// frame. Drives whether the play button auto-advances frames in the
+    /// file or blinks across files.
+    var canPlaySerFrames: Bool {
+        guard let id = previewFileID,
+              let entry = catalog.files.first(where: { $0.id == id }),
+              entry.isSER else { return false }
+        return previewSerFrameCount > 1
+    }
+
+    func toggleSerPlayback() {
+        serPlaybackActive ? stopSerPlayback() : startSerPlayback()
+    }
+    func startSerPlayback() {
+        guard canPlaySerFrames else { return }
+        serPlaybackActive = true
+        serPlaybackTimer?.invalidate()
+        let interval = 1.0 / max(0.5, blinkRate)
+        serPlaybackTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.advanceSerFrame() }
+        }
+    }
+    func stopSerPlayback() {
+        serPlaybackActive = false
+        serPlaybackTimer?.invalidate()
+        serPlaybackTimer = nil
+    }
+    private func advanceSerFrame() {
+        guard previewSerFrameCount > 0 else { stopSerPlayback(); return }
+        previewSerFrameIndex = (previewSerFrameIndex + 1) % previewSerFrameCount
+    }
+    func stepSerFrame(by delta: Int) {
+        guard previewSerFrameCount > 0 else { return }
+        let n = previewSerFrameCount
+        previewSerFrameIndex = ((previewSerFrameIndex + delta) % n + n) % n
     }
 
     /// Returns the IDs the blink player rotates through. Prefers row-
@@ -1366,12 +1422,60 @@ final class AppModel: ObservableObject {
         for entry in catalog.files {
             let id = entry.id
             let url = entry.url
+            let isFrameSeq = entry.isFrameSequence
             Task.detached(priority: .utility) { [weak self] in
                 let img = ThumbnailLoader.load(url: url, maxDimension: 48)
                 await MainActor.run {
                     guard let self, let idx = self.catalog.index(of: id) else { return }
                     self.catalog.files[idx].thumbnail = img
                 }
+                // Static-image sharpness — cheap, computed once. SER / AVI
+                // files use the on-demand video-quality scan instead.
+                guard !isFrameSeq else { return }
+                if let cached = await QualityCache.shared.lookup(url: url),
+                   let s = cached.sharpness {
+                    await MainActor.run {
+                        guard let self, let idx = self.catalog.index(of: id) else { return }
+                        self.catalog.files[idx].sharpness = s
+                    }
+                    return
+                }
+                let probe = SharpnessProbe(device: MetalDevice.shared.device)
+                guard let tex = try? ImageTexture.load(url: url, device: MetalDevice.shared.device) else { return }
+                let s = probe.compute(texture: tex)
+                await MainActor.run {
+                    guard let self, let idx = self.catalog.index(of: id) else { return }
+                    self.catalog.files[idx].sharpness = s
+                    QualityCache.shared.store(url: url, sharpness: s)
+                }
+            }
+        }
+    }
+
+    // MARK: - On-demand video quality scan
+
+    /// Scanner instance shared by the on-demand "Calculate Video Quality"
+    /// flow. Persists between calls so the previous scan can be cancelled
+    /// before a new one starts.
+    private let videoQualityScanner = SerQualityScanner()
+
+    /// Trigger a SER quality scan for the currently-previewed file. Result
+    /// lands on `previewStats.distribution` and is persisted to disk so the
+    /// next visit to the same file is instant.
+    func calculateVideoQualityForCurrentFile() {
+        guard let id = previewFileID,
+              let entry = catalog.files.first(where: { $0.id == id }),
+              entry.isSER else { return }
+        let url = entry.url
+        let seed = previewStats
+        videoQualityScanner.scan(url: url, seedStats: seed) { [weak self] updated in
+            guard let self else { return }
+            guard self.previewFileID == id else { return }
+            var merged = self.previewStats
+            merged.distribution = updated.distribution
+            self.previewStats = merged
+            if let dist = updated.distribution {
+                QualityCache.shared.store(url: url, distribution: dist)
             }
         }
     }

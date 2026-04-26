@@ -24,16 +24,40 @@ Every step runs on the GPU. The full pipeline — quality grading, alignment, lu
 
 ## Highlights
 
+### Stacking & alignment
 - **One-button lucky stack** with the Lightspeed / Balanced / Scientific quality modes. Multi-AP grid alignment for solar granulation and planetary detail.
 - **Three reference modes** for stabilization: full-frame phase correlation, **disc centroid** (locks onto the limb of the Sun / Moon — robust against thin cloud and seeing wobble), and **reference ROI** (pin alignment to a sunspot, prominence, or crater).
 - **Mark-as-Reference** with the **R** key. Gold-star the frame you want as anchor — alignment can't drift to a low-quality first frame anymore.
-- **Memory workflow**: stabilize, sharpen, tone-curve all in RAM, scrub through the result with the inline player, and only commit to disk when you're happy.
-- **Smart presets** that auto-detect target from the filename (`sun_*.ser`, `Jupiter_2026-04-26.ser`, etc.).
-- **iCloud-synced presets** so your Sun setup follows you between Macs.
-- **SER + Bayer (RGGB / GRBG / GBRG / BGGR)** native — no pre-conversion needed.
-- **AVI** files now appear in the catalog (full lucky-stack support shipping next).
+- **Apply ALL Stuff** (`⇧⌘A`) — single hero button that picks lucky-stack, in-memory ops, or file-batch depending on the section you're in.
+
+### Quality intelligence (new)
+- **Per-frame Sharpness HUD** — translucent overlay (bottom-left of the preview) shows filename, dimensions, bit-depth, Bayer pattern, file size, capture timestamp (read straight from the SER UTC header), `Frame N/M` for videos, and a live **variance-of-Laplacian** sharpness number for whatever frame you're looking at.
+- **Calculate Video Quality** — one click samples up to 64 frames across a SER, builds a sharpness distribution (`p10 / median / p90`), and **recommends a lucky-stack keep-percentage** based on the spread (tight → keep top 75 %, very turbulent → keep top 10 %).
+- **On-disk quality cache** at `~/Library/Application Support/AstroSharper/quality-cache.json`, fingerprinted by file size + mtime — re-opening a SER you've already scanned is instant, and per-image sharpness is computed once at import then cached forever.
+- **Sortable Sharpness column** for static images — click the header to find the sharpest TIFF / PNG in a folder of intermediates.
+- **Sortable Type column** — groups SERs together vs. raster images when you opened a mixed folder.
+
+### Preview & navigation (Photoshop-style)
+- **Anchored click-drag zoom** — drag right to zoom in, left to zoom out, with the pixel under the cursor staying put as the scale changes (~200 px ≈ 2×).
+- **⌥-drag pan** with hand-cursor; **double-click** to reset to fit + center; **pinch** to zoom anchored to the cursor; **scroll-wheel pan** when zoomed in.
 - **Cmd zoom shortcuts**: `⌘=` `⌘-` `⌘0` (fit) `⌘1` (1:1) `⌘2` (200 %).
-- **Apply ALL Stuff** (⇧⌘A) — single hero button that picks the right pipeline for the section you're in.
+- **Live filename filter** with **Include / Exclude** toggle — type `conv` and click 👁/👁‍🗨 to either show only `*conv*` rows or hide them all (great for stripping intermediates from a scratch folder).
+- **In-SER playback** — play / pause through the frames inside a single SER at any of 1…60 fps without leaving the file. Scrub feels instant: the raw frame paints immediately, the sharpened version replaces it as soon as the GPU pipeline catches up.
+- **Memory workflow**: stabilize, sharpen, tone-curve all in RAM, scrub through the result with the inline player, and only commit to disk when you're happy.
+
+### File handling
+- **SER + Bayer (RGGB / GRBG / GBRG / BGGR)** native — no pre-conversion needed.
+- **AVI** files appear in the catalog (full lucky-stack support shipping next).
+- **TIFF / PNG / JPEG** input, with sharpness scored on import.
+- **Smart presets** auto-detect target from filename (`sun_*.ser`, `Jupiter_2026-04-26.ser`, …).
+- **iCloud-synced presets** so your Sun setup follows you between Macs.
+- **Meridian-flip flag** stored per file — gets rotated 180° in memory before any processing, so post-meridian captures align with the rest of the session. Icon stays out of the way and only appears on rows that are actually flipped.
+
+### Performance
+- **End-to-end Metal** — every step (quality grading, alignment, lucky stacking, à-trous wavelets, Wiener / Lucy-Richardson deconvolution, tone-curve LUTs) lives in Metal compute kernels and `MPSGraph`. A 4K Sun frame goes through unsharp mask in **under 10 ms on an Apple M2**.
+- **Memory-mapped SER** — multi-GB captures cost zero RAM beyond the frames you actually touch.
+- **On-demand redraw** — preview MTKView only repaints when something changed; window-resize stays buttery even with a 4K SER loaded.
+- **`rgba16Float` end-to-end** — no precision lost between stages, no banding on tone-curved Sun shots.
 
 ## Why AstroSharper
 
@@ -78,9 +102,10 @@ SwiftUI on top, `MTKView` preview, `MPSGraph` and hand-written Metal compute ker
 
 - AVI demuxing for Lucky Stack (in progress)
 - Drizzle 1.5× / 2× reconstruction
-- 16-bit histogram overlay on preview
-- Mac App Store release with notarization pipeline
+- Frame-to-frame jitter score in the HUD recommendation
+- Per-AP sharpness map overlay
 - FITS / RAW / DNG input
+- Mac App Store release
 
 ## Support the project
 

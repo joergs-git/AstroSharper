@@ -3,6 +3,30 @@
 Notable changes per release. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows semantic versioning once it leaves 0.x.
 
+## [0.3.0] — 2026-04-26
+
+### Added
+- **Preview HUD overlay** (bottom-left of the preview): filename, dimensions, bit-depth, Bayer pattern, file size, capture timestamp, current frame index, and a live variance-of-Laplacian sharpness number for the displayed frame.
+- **SER quality scanner** with on-demand "Calculate Video Quality" button — samples up to 64 evenly-spaced frames, computes a sharpness distribution (`p10 / median / p90`), and recommends a lucky-stack keep-percentage based on the spread of the distribution.
+- **Disk-persistent quality cache** (`Application Support/AstroSharper/quality-cache.json`) keyed by file size + mtime, so re-opening a previously-scanned SER is instant and per-image sharpness scores survive across sessions.
+- **Sortable Type column** in the file list — groups SERs together vs. raster images.
+- **Sortable Sharpness column** — variance-of-Laplacian, computed in the background after thumbnail load. SER / AVI rows show "video" instead.
+- **Live filename filter** with Include / Exclude toggle — type a substring to either show only matches or hide them all.
+- **In-SER playback**: play / pause button on the SER scrub bar advances frames inside the file at the configured fps; stops automatically when switching files.
+- **Photoshop-style anchored zoom** ported from AstroBlinkV2: plain drag = anchored click-drag zoom, ⌥-drag = pan, double-click = fit + center, pinch = anchored zoom.
+- **Native macOS app icon** wired through the asset catalog (16 → 1024).
+- **Public GitHub repo** at <https://github.com/joergs-git/AstroSharper>.
+
+### Changed
+- Flip column shows the 180°-flip icon **only on rows that are actually flipped** — non-flipped rows render an invisible hit-target so the column still toggles on click.
+- Preview MTKView switched to `enableSetNeedsDisplay = true; isPaused = true` (was free-spinning at 60 fps). Window resize with a SER loaded is no longer sluggish.
+- Scrubbing a SER now drops the stale "after" texture immediately so the raw frame paints in ~16 ms instead of waiting for the full sharpen / deconv pipeline.
+- SER quality scanning is **opt-in** via the HUD's Calculate button (was auto-on-open) — browsing many SERs is no longer slowed by repeated background scans.
+
+### Fixed
+- SER play button was missing entirely from `SerScrubBar`; now present and bound to `P`.
+- Switching files mid-playback no longer leaves a runaway frame-advance timer.
+
 ## [Unreleased]
 
 ### Added
