@@ -31,6 +31,13 @@ final class AppModel: ObservableObject {
     @Published var selectedFileIDs: Set<FileEntry.ID> = []
     @Published var markedFileIDs: Set<FileEntry.ID> = []
     @Published var previewFileID: FileEntry.ID?
+    /// User-pinned reference frame for stabilization. Single-valued — only
+    /// one frame in the catalog can hold this marker at any time. Press R
+    /// in the file list (or use the toolbar) to set / clear it. The
+    /// Stabilize "Reference" picker defaults to this; if the user runs
+    /// Stabilize without one set we fall back to the first selected frame
+    /// and surface a one-time warning.
+    @Published var referenceFileID: FileEntry.ID?
     @Published var displayedSection: CatalogSection = .inputs
 
     /// Stashed state for every inactive section. The currently-displayed
@@ -130,7 +137,7 @@ final class AppModel: ObservableObject {
     // through the active selection (or all files if nothing selected) at the
     // configured rate so the user can quickly compare similar frames.
     @Published var blinkActive: Bool = false
-    @Published var blinkRate: Double = 4    // frames per second
+    @Published var blinkRate: Double = 18    // frames per second
     private var blinkTimer: Timer?
 
     /// When ON, a folder/file open auto-detects Sun/Moon/Jupiter/Saturn/Mars
@@ -596,6 +603,24 @@ final class AppModel: ObservableObject {
     }
     func markSelection() { markedFileIDs.formUnion(selectedFileIDs); clearStaleError() }
 
+    /// Pin a single frame as the stabilization reference. Pressing R when a
+    /// frame is already the reference clears the marker, so R behaves as
+    /// a sticky toggle on a single row.
+    func toggleReference(_ id: FileEntry.ID) {
+        if referenceFileID == id {
+            referenceFileID = nil
+        } else {
+            referenceFileID = id
+        }
+        clearStaleError()
+    }
+
+    /// Remove any reference marker — used when the marked file is removed
+    /// from the list or its section gets stashed.
+    func clearReferenceMarker() {
+        referenceFileID = nil
+    }
+
     // MARK: - Deletion from list (doesn't touch disk)
 
     func removeFromList(_ ids: Set<FileEntry.ID>) {
@@ -603,6 +628,22 @@ final class AppModel: ObservableObject {
         catalog.files.removeAll { ids.contains($0.id) }
         selectedFileIDs.subtract(ids)
         markedFileIDs.subtract(ids)
+        if let refID = referenceFileID, ids.contains(refID) { referenceFileID = nil }
+
+        // Memory section: keep playback frames in sync with the list. Without
+        // this the player's `currentIndex` points at a hole or an unrelated
+        // frame, causing the texture-mix-up artefacts at the border the user
+        // saw when scrubbing or deleting.
+        if displayedSection == .memory {
+            playback.frames.removeAll { ids.contains($0.id) }
+            if playback.frames.isEmpty {
+                playback.currentIndex = 0
+                playback.isPlaying = false
+            } else {
+                playback.currentIndex = min(playback.currentIndex, playback.frames.count - 1)
+            }
+        }
+
         if let preview = previewFileID, ids.contains(preview) {
             previewFileID = catalog.files.first?.id
         }
@@ -626,15 +667,97 @@ final class AppModel: ObservableObject {
             jobStatus = .error("Stabilize needs at least 2 files (mark or select them)")
             return
         }
+
+        // Pick the reference frame ID per the user's choice. `.marked`
+        // requires an explicit R-marker; if none is set we fall back to
+        // first-selected and surface a helpful warning so the user knows
+        // alignment may drift.
+        let orderedTargetIDs: [FileEntry.ID] = catalog.files
+            .filter { targets.contains($0.id) }
+            .map { $0.id }
+
+        var referenceID: FileEntry.ID = orderedTargetIDs.first!
+        var referenceWarning: String?
+        switch stabilize.referenceMode {
+        case .marked:
+            if let r = referenceFileID, orderedTargetIDs.contains(r) {
+                referenceID = r
+            } else {
+                referenceWarning = "No reference marked — using first selected. Press R on a row to pin one."
+            }
+        case .firstSelected:
+            referenceID = orderedTargetIDs.first!
+        case .brightestQuality:
+            // Best-quality frame is picked inside the Stabilizer (it has
+            // the texture handles). We pass `nil` to signal that; here we
+            // just leave the placeholder — Stabilizer will overwrite.
+            referenceID = orderedTargetIDs.first!
+        }
+
+        // (b) Pre-flight warning when running from Memory and prior in-
+        // memory edits exist. With (a) we *preserve* those edits — but the
+        // user should still know that re-aligning means "stabilizing on
+        // top of already-edited frames", which can re-introduce frame-to-
+        // frame alignment drift if the prior edits were spatial. Fast,
+        // synchronous confirm via NSAlert keeps the flow simple.
+        if displayedSection == .memory {
+            let dirty = playback.frames.contains { f in
+                let nontrivial = f.appliedOps.filter { $0 != "aligned" }
+                return !nontrivial.isEmpty
+            }
+            if dirty {
+                let alert = NSAlert()
+                alert.messageText = "Stabilize over edited frames?"
+                alert.informativeText = "Memory contains frames with already-applied operations (sharpen / tone). Stabilize will compute fresh shifts on the current — possibly edited — pixels and replace each frame's texture. The op trail is preserved."
+                alert.addButton(withTitle: "Stabilize")
+                alert.addButton(withTitle: "Cancel")
+                if alert.runModal() != .alertFirstButtonReturn {
+                    return
+                }
+            }
+        }
+
+        // Build inputs. In Memory tab we hand over the *current* memory
+        // textures (preserving any in-place sharpen/tone edits) instead of
+        // forcing a re-load from disk. In Inputs tab we just pass URLs and
+        // Stabilizer loads them itself.
+        let preloaded: [UUID: MTLTexture]
+        let priorOps: [UUID: [String]]
+        if displayedSection == .memory {
+            var px: [UUID: MTLTexture] = [:]
+            var ops: [UUID: [String]] = [:]
+            for frame in playback.frames where targets.contains(frame.id) {
+                px[frame.id] = frame.texture
+                ops[frame.id] = frame.appliedOps
+            }
+            preloaded = px
+            priorOps = ops
+        } else {
+            preloaded = [:]
+            priorOps = [:]
+        }
+
         let urls: [(id: FileEntry.ID, url: URL, meridianFlipped: Bool)] = catalog.files
             .filter { targets.contains($0.id) }
             .map { ($0.id, $0.url, $0.meridianFlipped) }
+
+        if let warn = referenceWarning {
+            // Non-fatal — surface as a status message. Cleared automatically
+            // when a job starts.
+            print("[stabilize] \(warn)")
+        }
 
         jobStatus = .running(processed: 0, total: urls.count)
         stopPlayback()
 
         Stabilizer.run(
-            inputs: .init(urls: urls, cropMode: stabilize.cropMode),
+            inputs: .init(urls: urls,
+                          cropMode: stabilize.cropMode,
+                          alignmentMode: stabilize.alignmentMode,
+                          referenceID: referenceID,
+                          pickBestReference: stabilize.referenceMode == .brightestQuality,
+                          roi: stabilize.roi?.asCGRect,
+                          preloadedTextures: preloaded),
             pipeline: stabilizerPipeline,
             onProgress: { [weak self] p in
                 guard let self else { return }
@@ -655,8 +778,13 @@ final class AppModel: ObservableObject {
                     self.jobStatus = .error("Stabilization cancelled or failed")
                     return
                 }
-                self.playback.frames = result.aligned.map {
-                    PlaybackFrame(id: $0.id, sourceURL: $0.url, texture: $0.texture)
+                // Preserve prior op trails — append "aligned" so the user
+                // can see the full processing history (e.g. ["sharp",
+                // "aligned"] when they sharpened first then re-stabilized).
+                self.playback.frames = result.aligned.map { res in
+                    let trail = (priorOps[res.id] ?? []) + ["aligned"]
+                    return PlaybackFrame(id: res.id, sourceURL: res.url,
+                                         texture: res.texture, appliedOps: trail)
                 }
                 self.playback.currentIndex = 0
                 self.playback.isPlaying = false
@@ -664,7 +792,11 @@ final class AppModel: ObservableObject {
                 // aligned frames as a list. They can scrub via the player
                 // and, when satisfied, click "Save All" to write to OUTPUTS.
                 self.switchToSection(.memory)
-                self.jobStatus = .idle
+                if let warn = referenceWarning {
+                    self.jobStatus = .error(warn)   // friendly post-run hint
+                } else {
+                    self.jobStatus = .idle
+                }
             }
         )
     }
@@ -685,11 +817,20 @@ final class AppModel: ObservableObject {
         guard !playback.frames.isEmpty else { return }
         let outputRoot = effectiveOutputFolder ?? sandboxDefaultOutputFolder()
         guard let root = outputRoot else { return }
-        let stabFolder = root.appendingPathComponent("stabilized", isDirectory: true)
+
+        // Smart subfolder pick: when the entire memory has the same op trail
+        // we drop everything into one named folder. Mixed trails go into the
+        // generic `processed/` subfolder; the suffix on each filename still
+        // disambiguates which ops ran on which frame.
+        let allOps = Set(playback.frames.map { $0.appliedOps.joined(separator: "_") })
+        let folderName = (allOps.count == 1 ? allOps.first! : "processed")
+            .replacingOccurrences(of: " ", with: "")
+        let outFolder = root.appendingPathComponent(folderName.isEmpty ? "raw" : folderName, isDirectory: true)
+
         do {
-            try FileManager.default.createDirectory(at: stabFolder, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: outFolder, withIntermediateDirectories: true)
         } catch {
-            jobStatus = .error("Cannot create 'stabilized' folder: \(error.localizedDescription)")
+            jobStatus = .error("Cannot create output subfolder: \(error.localizedDescription)")
             return
         }
 
@@ -697,7 +838,8 @@ final class AppModel: ObservableObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             for frame in frames {
                 let baseName = frame.sourceURL.deletingPathExtension().lastPathComponent
-                let outURL = stabFolder.appendingPathComponent("\(baseName)_aligned.tif")
+                let suffix = frame.appliedOps.isEmpty ? "" : "_" + frame.appliedOps.joined(separator: "_")
+                let outURL = outFolder.appendingPathComponent("\(baseName)\(suffix).tif")
                 try? ImageTexture.write(texture: frame.texture, to: outURL)
                 await MainActor.run {
                     self?.registerOutput(url: outURL, autoSwitch: false)
@@ -705,7 +847,6 @@ final class AppModel: ObservableObject {
             }
             await MainActor.run {
                 guard let self else { return }
-                // Auto-switch to OUTPUTS so the user finds the result.
                 if self.displayedSection != .outputs { self.switchToSection(.outputs) }
             }
         }
@@ -825,8 +966,17 @@ final class AppModel: ObservableObject {
     func runLuckyStackOnSelection() {
         let targets = batchTargetIDs
         let selectedSers = catalog.files.filter { targets.contains($0.id) && $0.isSER }
+        let selectedAvi  = catalog.files.filter { targets.contains($0.id) && $0.isAVI }
         guard !selectedSers.isEmpty else {
-            jobStatus = .error("Mark or select at least one .ser file in the list.")
+            if !selectedAvi.isEmpty {
+                // AVI files are recognised in the catalog but the lucky-stack
+                // engine still expects a SER reader; full AVI demuxing is on
+                // the roadmap. Surface the limitation explicitly instead of
+                // silently no-oping.
+                jobStatus = .error("AVI lucky-stack support is coming — please convert to SER for now.")
+            } else {
+                jobStatus = .error("Mark or select at least one .ser file in the list.")
+            }
             return
         }
 
@@ -1017,6 +1167,140 @@ final class AppModel: ObservableObject {
         updated.luckyMultiAPPatchHalf = luckyStack.multiAP.patchHalf
         updated.luckyVariants = luckyStack.variants
         presets.save(updated)
+    }
+
+    // MARK: - Per-section apply actions
+    //
+    // Hero buttons under Sharpening / Tone Curve route to these. Behaviour
+    // depends on which catalog section is active:
+    //   - Memory: process every in-memory frame in-place (or every marked
+    //     subset). Stays in memory; ops accumulate in PlaybackFrame.appliedOps
+    //     so the eventual Save All builds smart filenames.
+    //   - Inputs / Outputs: same as Apply-to-Selection — load → process →
+    //     write to a corresponding `_<op>` subfolder of the output root.
+
+    func runSharpenOnActiveSection() {
+        runMixedAction(name: "sharp", suffix: "_sharp",
+                       includeSharpen: true, includeTone: false)
+    }
+
+    func runToneOnActiveSection() {
+        runMixedAction(name: "tone", suffix: "_tone",
+                       includeSharpen: false, includeTone: true)
+    }
+
+    /// "Apply ALL Stuff" — single-button pipeline that picks the right path
+    /// based on the active section and which sections are enabled. Lucky
+    /// Stack inherently breaks the chain (it consumes a whole SER and
+    /// produces a single stacked frame), so if it's enabled and SER files
+    /// are present in the selection we run *only* lucky-stack — its bake-in
+    /// option already pulls sharpen / tone-curve into the stacked output.
+    /// Otherwise:
+    ///   - In Memory: apply sharpen + tone in-place to memory frames.
+    ///   - In Inputs: run the regular file batch (stabilize → sharpen →
+    ///     tone) which writes straight to the outputs folder.
+    func applyAllStuff() {
+        guard case .idle = jobStatus else { return }
+        let targets = batchTargetIDs
+        let serSelected = catalog.files.contains { targets.contains($0.id) && $0.isSER }
+
+        // Lucky Stack route — auto-engages whenever SER files are present in
+        // the selection. SER is the lucky-imaging input format, so this is
+        // what the user expects; non-SER input falls through to the regular
+        // file pipeline (stabilize / sharpen / tone).
+        if serSelected {
+            runLuckyStackOnSelection()
+            return
+        }
+
+        if displayedSection == .memory {
+            // Run both sharpen and tone in-place on memory frames. If
+            // neither is enabled there's nothing to do — surface a helpful
+            // status message instead of silently no-oping.
+            if !sharpen.enabled && !toneCurve.enabled {
+                jobStatus = .error("Nothing to apply — enable Sharpening or Tone Curve first.")
+                return
+            }
+            applyToMemoryFrames(opName: "all",
+                                includeSharpen: sharpen.enabled,
+                                includeTone: toneCurve.enabled)
+            return
+        }
+
+        // Inputs / Outputs section — the file-level pipeline. applyToSelection
+        // already honours each section's `enabled` flag so we can hand it the
+        // current settings unchanged.
+        applyToSelection()
+    }
+
+    private func runMixedAction(
+        name: String,
+        suffix: String,
+        includeSharpen: Bool,
+        includeTone: Bool
+    ) {
+        if displayedSection == .memory {
+            applyToMemoryFrames(opName: name,
+                                includeSharpen: includeSharpen,
+                                includeTone: includeTone)
+        } else {
+            applyToFileSelection(suffix: suffix,
+                                 includeSharpen: includeSharpen,
+                                 includeTone: includeTone)
+        }
+    }
+
+    private func applyToMemoryFrames(opName: String, includeSharpen: Bool, includeTone: Bool) {
+        guard !playback.frames.isEmpty else {
+            jobStatus = .error("Memory is empty — run Stabilize / Lucky-Stack first.")
+            return
+        }
+        // If the user marked specific memory rows we honour that; else apply
+        // to every in-memory frame.
+        let target: Set<UUID> = batchTargetIDs.isEmpty ? Set(playback.frames.map(\.id)) : batchTargetIDs
+
+        // Build a "no-op" sharpen settings struct rather than fight the
+        // memberwise init signature — clearer and resilient to field reorders.
+        var emptySharpen = SharpenSettings()
+        emptySharpen.enabled = false
+        let s = includeSharpen ? sharpen : emptySharpen
+        let t = includeTone ? toneCurve : ToneCurveSettings()
+        let lut: MTLTexture? = includeTone && toneCurve.enabled
+            ? ToneCurveLUT.build(points: toneCurve.controlPoints, device: MetalDevice.shared.device)
+            : nil
+
+        let device = MetalDevice.shared.device
+        let pipeline = self.stabilizerPipeline
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            for (i, frame) in await self.playback.frames.enumerated() where target.contains(frame.id) {
+                let processed = pipeline.process(input: frame.texture, sharpen: s,
+                                                  toneCurve: t, toneCurveLUT: lut)
+                await MainActor.run {
+                    self.playback.frames[i].texture = processed
+                    self.playback.frames[i].appliedOps.append(opName)
+                }
+            }
+            _ = device
+        }
+    }
+
+    private func applyToFileSelection(suffix: String, includeSharpen: Bool, includeTone: Bool) {
+        let targets = batchTargetIDs
+        guard !targets.isEmpty else {
+            jobStatus = .error("Select or mark files first.")
+            return
+        }
+        // Use the existing batch pipeline but override per-section settings.
+        let savedSharpen = sharpen
+        let savedTone = toneCurve
+        if !includeSharpen { sharpen.enabled = false }
+        if !includeTone   { toneCurve.enabled = false }
+        applyToSelection()
+        // Restore — applyToSelection captures current values into the job at
+        // start, so this restore doesn't cancel anything in flight.
+        sharpen = savedSharpen
+        toneCurve = savedTone
     }
 
     // MARK: - Blink player
@@ -1229,13 +1513,21 @@ struct SharpenSettings: Equatable, Codable {
 
 struct StabilizeSettings: Equatable, Codable {
     var enabled: Bool = false
-    var referenceMode: ReferenceMode = .firstSelected
-    var cropMode: CropMode = .pad
+    var referenceMode: ReferenceMode = .marked
+    var cropMode: CropMode = .crop
     var stackAverage: Bool = false
+    var alignmentMode: AlignmentMode = .fullFrame
+    /// User-defined region of interest in *normalised* reference-frame
+    /// coordinates (0…1, top-left origin). Only consulted when
+    /// `alignmentMode == .referenceROI`.
+    var roi: NormalisedRect? = nil
 
     enum ReferenceMode: String, CaseIterable, Identifiable, Codable {
+        /// Use the frame the user explicitly tagged with the gold-star
+        /// "Reference" marker. Default — clearest user intent.
+        case marked = "Marked Reference"
         case firstSelected = "First Selected"
-        case brightest = "Brightest Frame"
+        case brightestQuality = "Best-Quality Frame"
         var id: String { rawValue }
     }
 
@@ -1244,6 +1536,36 @@ struct StabilizeSettings: Equatable, Codable {
         case crop = "Crop to Intersection"     // output = overlap region of all frames
         var id: String { rawValue }
     }
+
+    /// Picks how the per-frame shift is computed. Each mode shines on a
+    /// different subject:
+    ///   - `.fullFrame`: phase-correlation on the whole image — robust for
+    ///     general scenes with widely-distributed detail.
+    ///   - `.discCentroid`: locks onto the bright disc's centre of mass
+    ///     against a dark background. Designed for full-disc Sun / Moon
+    ///     where surface detail is faint relative to the disc edge — the
+    ///     limb itself becomes the anchor and works even on featureless
+    ///     surfaces or thin clouds.
+    ///   - `.referenceROI`: phase-correlate only inside a user-drawn rect
+    ///     on the reference frame. Pin alignment to a specific feature —
+    ///     a sunspot group, prominence, lunar crater, planetary moon
+    ///     transit. Other parts of the frame are ignored entirely.
+    enum AlignmentMode: String, CaseIterable, Identifiable, Codable {
+        case fullFrame      = "Full Frame"
+        case discCentroid   = "Disc Centroid (Sun / Moon)"
+        case referenceROI   = "Reference ROI (feature lock)"
+        var id: String { rawValue }
+    }
+}
+
+/// Plain-Codable rect used for normalised ROI storage. CGRect isn't
+/// Codable directly, so we keep our own minimal type.
+struct NormalisedRect: Equatable, Codable {
+    var x: Double      // 0…1, left
+    var y: Double      // 0…1, top
+    var w: Double      // 0…1
+    var h: Double      // 0…1
+    var asCGRect: CGRect { CGRect(x: x, y: y, width: w, height: h) }
 }
 
 struct ToneCurveSettings: Equatable, Codable {
@@ -1366,13 +1688,17 @@ struct PlaybackFrame: Identifiable {
     let id: UUID         // matches FileEntry.id of the source file
     let sourceURL: URL
     var texture: MTLTexture
+    /// Trail of operations that have been applied to this in-memory frame.
+    /// Drives the smart filename suffixes when the user saves to disk —
+    /// e.g. ["aligned", "sharp", "tone"] → `<source>_aligned_sharp_tone.tif`.
+    var appliedOps: [String] = []
 }
 
 struct PlaybackState {
     var frames: [PlaybackFrame] = []
     var currentIndex: Int = 0
     var isPlaying: Bool = false
-    var fps: Double = 24
+    var fps: Double = 18
     var loop: Bool = true
 
     var hasFrames: Bool { !frames.isEmpty }

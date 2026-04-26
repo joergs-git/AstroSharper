@@ -31,6 +31,16 @@ enum Align {
               let frameLum = luminanceBuffer(from: frame, size: n)
         else { return nil }
 
+        // Remove DC before windowing. For solar/lunar imagery a bright disk
+        // against a black background creates a huge low-frequency component
+        // that dominates the cross-power spectrum and pushes the correlation
+        // peak around frame-to-frame as the disk's mean brightness changes.
+        // Subtracting the mean whitens the spectrum and makes the peak track
+        // surface detail (granulation, sunspots, limb edge) rather than the
+        // disk's overall luminance.
+        subtractMean(&refLum.wrappedValue)
+        subtractMean(&frameLum.wrappedValue)
+
         applyHannWindow(&refLum.wrappedValue, size: n)
         applyHannWindow(&frameLum.wrappedValue, size: n)
 
@@ -53,6 +63,185 @@ enum Align {
         let subY = peak.subY * scaleY
 
         return AlignShift(dx: Float(dxI) * scaleX + subX, dy: Float(dyI) * scaleY + subY)
+    }
+
+    // MARK: - Reference quality scoring
+
+    /// Cheap "is this frame sharp?" score. Sub-samples to 256² and
+    /// computes the variance of a 3×3 Laplacian — the same metric used by
+    /// the lucky-stack grader, just on a small sample. High score = lots
+    /// of high-frequency detail = a good reference candidate.
+    static func qualityScore(_ texture: MTLTexture) -> Float {
+        guard let buf = luminanceBuffer(from: texture, size: 256) else { return 0 }
+        let v = buf.wrappedValue
+        let n = 256
+        var sum: Double = 0, sumSq: Double = 0
+        var count: Double = 0
+        for j in 1..<(n - 1) {
+            for i in 1..<(n - 1) {
+                let c = v[j * n + i]
+                let l = (-4 * c
+                         + v[j * n + (i - 1)]
+                         + v[j * n + (i + 1)]
+                         + v[(j - 1) * n + i]
+                         + v[(j + 1) * n + i])
+                sum += Double(l); sumSq += Double(l * l); count += 1
+            }
+        }
+        guard count > 0 else { return 0 }
+        let mean = sum / count
+        return Float(sumSq / count - mean * mean)
+    }
+
+    // MARK: - ROI phase correlation
+
+    /// Phase correlation restricted to a normalised rect on the reference
+    /// frame. Both frames are *cropped* to the same rect (taken in the
+    /// reference's coordinate system) before windowing + FFT — so the
+    /// shift returned aligns the rect contents, ignoring everything else.
+    /// Perfect for pinning alignment to a sunspot, prominence or other
+    /// localised feature.
+    static func phaseCorrelateROI(reference: MTLTexture,
+                                  frame: MTLTexture,
+                                  normROI: CGRect) -> AlignShift? {
+        // Convert normalised → pixels in reference frame; clamp.
+        let refW = reference.width, refH = reference.height
+        let x = max(0, min(refW - 8, Int(round(normROI.minX * Double(refW)))))
+        let y = max(0, min(refH - 8, Int(round(normROI.minY * Double(refH)))))
+        let w = max(8, min(refW - x, Int(round(normROI.width * Double(refW)))))
+        let h = max(8, min(refH - y, Int(round(normROI.height * Double(refH)))))
+
+        // Choose working size = largest pow-2 ≤ min(w,h,1024).
+        let maxDim = min(w, h, 1024)
+        let log2n = Int(log2(Double(maxDim)))
+        let n = 1 << log2n
+        guard n >= 64 else { return nil }
+
+        guard let refLum = luminanceROI(from: reference, x: x, y: y, w: w, h: h, size: n),
+              let frmLum = luminanceROI(from: frame,    x: x, y: y, w: w, h: h, size: n)
+        else { return nil }
+
+        subtractMean(&refLum.wrappedValue)
+        subtractMean(&frmLum.wrappedValue)
+        applyHannWindow(&refLum.wrappedValue, size: n)
+        applyHannWindow(&frmLum.wrappedValue, size: n)
+
+        guard let peak = fft2dPhaseCorrelation(ref: refLum.wrappedValue, frame: frmLum.wrappedValue, log2n: log2n) else {
+            return nil
+        }
+
+        var dxI = peak.x, dyI = peak.y
+        if dxI > n / 2 { dxI -= n }
+        if dyI > n / 2 { dyI -= n }
+        // ROI scale: ROI was sampled from a w×h region into n×n. Shift
+        // measured inside the ROI maps back at scale w/n × h/n.
+        let scaleX = Float(w) / Float(n)
+        let scaleY = Float(h) / Float(n)
+        return AlignShift(dx: Float(dxI) * scaleX + peak.subX * scaleX,
+                          dy: Float(dyI) * scaleY + peak.subY * scaleY)
+    }
+
+    // MARK: - Disc centroid
+
+    /// Solar/lunar disc alignment. Threshold the luminance, compute the
+    /// centre of mass of the bright pixels, return the shift that brings
+    /// the frame's centroid onto the reference's. Fast (no FFT), robust
+    /// against thin clouds and seeing wobble — works as long as the disc
+    /// is bright relative to the surroundings, which is the entire point
+    /// of solar / lunar imaging.
+    static func discCentroidShift(reference: MTLTexture, frame: MTLTexture) -> AlignShift? {
+        guard let refC = discCentroid(of: reference) else { return nil }
+        guard let frmC = discCentroid(of: frame)     else { return nil }
+        // The shift that aligns `frame` to `reference` is (refC − frmC).
+        return AlignShift(dx: Float(refC.x - frmC.x), dy: Float(refC.y - frmC.y))
+    }
+
+    /// Compute the centroid of bright pixels in a downsampled luminance
+    /// view of the texture. Threshold = 25 % of max — generous enough to
+    /// catch the limb on overexposed shots without bleeding into the dark
+    /// background. Returned in original-texture pixel coordinates.
+    private static func discCentroid(of texture: MTLTexture) -> (x: Double, y: Double)? {
+        // 256² downsample is plenty for centroid precision (≤ ~ 0.01 px
+        // when scaled back to a 4k image).
+        let n = 256
+        guard let ref = luminanceBuffer(from: texture, size: n) else { return nil }
+        let buf = ref.wrappedValue
+        var maxV: Float = 0
+        for v in buf where v > maxV { maxV = v }
+        guard maxV > 0 else { return nil }
+        let threshold: Float = 0.25 * maxV
+
+        var sumX: Double = 0, sumY: Double = 0, sumW: Double = 0
+        for j in 0..<n {
+            for i in 0..<n {
+                let v = buf[j * n + i]
+                if v > threshold {
+                    let w = Double(v - threshold)
+                    sumX += Double(i) * w
+                    sumY += Double(j) * w
+                    sumW += w
+                }
+            }
+        }
+        guard sumW > 0 else { return nil }
+        // luminanceBuffer sampled the centre nativeN×nativeN crop. Scale
+        // back: x_native = (sumX/sumW) * (nativeN/n), then add offX.
+        let srcW = texture.width, srcH = texture.height
+        let nativeN = min(srcW, srcH)
+        let offX = (srcW - nativeN) / 2
+        let offY = (srcH - nativeN) / 2
+        let s = Double(nativeN) / Double(n)
+        return (Double(offX) + (sumX / sumW) * s,
+                Double(offY) + (sumY / sumW) * s)
+    }
+
+    // MARK: - Luminance ROI extraction
+
+    private static func luminanceROI(from texture: MTLTexture,
+                                     x: Int, y: Int, w: Int, h: Int,
+                                     size n: Int) -> Ref<[Float]>? {
+        let srcW = texture.width, srcH = texture.height
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float, width: srcW, height: srcH, mipmapped: false
+        )
+        desc.usage = [.shaderRead]
+        desc.storageMode = .shared
+        guard let staging = MetalDevice.shared.device.makeTexture(descriptor: desc) else { return nil }
+        guard let cmdBuf = MetalDevice.shared.commandQueue.makeCommandBuffer(),
+              let blit = cmdBuf.makeBlitCommandEncoder() else { return nil }
+        blit.copy(from: texture, to: staging)
+        blit.endEncoding()
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+
+        let bytesPerPixel = 8
+        let bytesPerRow = srcW * bytesPerPixel
+        var rgba = [UInt16](repeating: 0, count: srcW * srcH * 4)
+        rgba.withUnsafeMutableBufferPointer { buf in
+            staging.getBytes(
+                buf.baseAddress!,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: srcW, height: srcH, depth: 1)),
+                mipmapLevel: 0
+            )
+        }
+        var out = [Float](repeating: 0, count: n * n)
+        let stepX = Double(w) / Double(n)
+        let stepY = Double(h) / Double(n)
+        for j in 0..<n {
+            let sy = y + Int(Double(j) * stepY)
+            let syc = min(srcH - 1, max(0, sy))
+            for i in 0..<n {
+                let sx = x + Int(Double(i) * stepX)
+                let sxc = min(srcW - 1, max(0, sx))
+                let base = (syc * srcW + sxc) * 4
+                let r = Float(Float16(bitPattern: rgba[base + 0]))
+                let g = Float(Float16(bitPattern: rgba[base + 1]))
+                let b = Float(Float16(bitPattern: rgba[base + 2]))
+                out[j * n + i] = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            }
+        }
+        return Ref(out)
     }
 
     // MARK: - Luminance extraction
@@ -112,6 +301,16 @@ enum Align {
             }
         }
         return Ref(out)
+    }
+
+    // MARK: - DC removal
+
+    private static func subtractMean(_ buffer: inout [Float]) {
+        guard !buffer.isEmpty else { return }
+        var mean: Float = 0
+        vDSP_meanv(buffer, 1, &mean, vDSP_Length(buffer.count))
+        var negMean = -mean
+        vDSP_vsadd(buffer, 1, &negMean, &buffer, 1, vDSP_Length(buffer.count))
     }
 
     // MARK: - Hann window

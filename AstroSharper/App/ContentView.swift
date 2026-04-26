@@ -7,7 +7,7 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PathBar()
+            BrandHeader()
             Divider()
             ToolbarView()
             Divider()
@@ -16,6 +16,7 @@ struct ContentView: View {
             StatusBar()
         }
         .background(Color(NSColor.windowBackgroundColor))
+        .tint(AppPalette.accent)
         .onDrop(of: [.fileURL], delegate: FolderDropDelegate(app: app))
     }
 
@@ -41,7 +42,7 @@ struct ContentView: View {
                     SectionToggleBar()
                     FileListView()
                 }
-                .frame(minHeight: 160, idealHeight: 260)
+                .frame(minHeight: 180, idealHeight: 280)
             }
             .frame(minWidth: 500)
         }
@@ -85,68 +86,63 @@ private struct PathBar: View {
 }
 
 // MARK: - Toolbar
+//
+// Single row, no redundant section-enable toggles (those live in the
+// settings panel section headers themselves) and no separate path bar
+// (its content moved up into this row so the chrome shrinks by 24 pt).
 
 private struct ToolbarView: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
+            // "Apply ALL Stuff" — single hero entry point. Picks lucky-stack,
+            // memory in-place, or file-batch depending on context (see
+            // AppModel.applyAllStuff).
+            Button { app.applyAllStuff() } label: {
+                Label("Apply ALL Stuff", systemImage: "wand.and.stars")
+                    .labelStyle(.titleAndIcon)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .tint(AppPalette.accent)
+            .keyboardShortcut("a", modifiers: [.command, .shift])
+            .disabled(!app.canApply)
+            .help("Run every enabled operation on the current selection (⇧⌘A). Lucky Stack short-circuits the chain because it consumes whole SER files.")
+
+            Divider().frame(height: 18)
+
             PresetMenu()
 
             Divider().frame(height: 18)
 
-            Toggle("Sharpen", isOn: $app.sharpen.enabled)
-                .toggleStyle(.button)
-            Toggle("Stabilize", isOn: $app.stabilize.enabled)
-                .toggleStyle(.button)
-            Toggle("Tone", isOn: $app.toneCurve.enabled)
-                .toggleStyle(.button)
-
-            Divider().frame(height: 18)
-
-            Button {
-                app.applyToSelection()
-            } label: {
-                Label("Apply to Selection", systemImage: "play.fill")
+            // Folder context. Replaces the old grey path bar — the open
+            // button is the leading icon, the path follows.
+            Button { app.promptOpenFolder() } label: {
+                Label("Open", systemImage: "folder.badge.plus")
             }
-            .disabled(!app.canApply)
-            .help("Apply current settings to all selected files (⌘R)")
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Open folder or files (⌘O)")
+
+            if app.catalog.rootURL == nil {
+                Text("No folder opened — drag a folder here or press ⌘O")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
 
             Spacer()
 
-            // Blink player — cycles previewFileID through the current
-            // selection (or all rows if nothing selected) at configurable
-            // rate. AstroTriage-style A/B blink for picking the best frame.
-            HStack(spacing: 4) {
-                Button {
-                    app.toggleBlink()
-                } label: {
-                    Label(app.blinkActive ? "Stop Blink" : "Blink", systemImage: app.blinkActive ? "stop.fill" : "rays")
-                }
-                .help("Blink-cycle through the selected (or all) files. Useful for spotting the sharpest frame in a series.")
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .keyboardShortcut("l", modifiers: [])
-
-                if app.blinkActive {
-                    Picker("", selection: Binding(
-                        get: { app.blinkRate },
-                        set: { app.setBlinkRate($0) }
-                    )) {
-                        ForEach([1.0, 2.0, 4.0, 8.0, 16.0], id: \.self) { v in
-                            Text("\(Int(v))/s").tag(v)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .controlSize(.small)
-                    .frame(width: 70)
-                    .labelsHidden()
-                }
+            Button { openWindow(id: "howto") } label: {
+                Label("Howto", systemImage: "questionmark.circle")
             }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Open the workflow guide in a movable, non-blocking window — keep it on screen while you work.")
 
-            Divider().frame(height: 18)
-
-            // Before/After compare toggle (hold B or click).
+            // Before / After compare (B) — single, prominent.
             Toggle(isOn: $app.showAfter) {
                 Label(app.showAfter ? "After" : "Before", systemImage: app.showAfter ? "eye.fill" : "eye.slash")
             }

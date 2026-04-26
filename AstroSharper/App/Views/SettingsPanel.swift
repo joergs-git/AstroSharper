@@ -9,11 +9,12 @@ struct SettingsPanel: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
+                // Workflow order: capture → stack → align → sharpen → tone → save.
                 LuckyStackSection()
                 Divider()
-                SharpeningSection()
-                Divider()
                 StabilizeSection()
+                Divider()
+                SharpeningSection()
                 Divider()
                 ToneCurveSection()
                 Divider()
@@ -87,6 +88,26 @@ struct SharpeningSection: View {
             .disabled(!app.sharpen.lrEnabled)
             LabeledSlider(label: "PSF σ", value: $app.sharpen.lrSigma, range: 0.3...5, format: "%.2f px")
                 .disabled(!app.sharpen.lrEnabled)
+
+            Divider().padding(.vertical, 4)
+
+            LuckyRunButton(
+                disabled: false,
+                title: "Apply Sharpening",
+                subtitle: applyTargetSubtitle,
+                icon: "wand.and.stars"
+            ) {
+                app.runSharpenOnActiveSection()
+            }
+            .help("Apply the current Sharpening settings to the active section: in Memory it edits frames in-place (ops accumulate), in Inputs/Outputs it writes a sharpened TIFF to the output folder.")
+        }
+    }
+
+    private var applyTargetSubtitle: String {
+        switch app.displayedSection {
+        case .memory:  return "🧠  edit memory frames in-place"
+        case .inputs:  return "📥  process selection → OUTPUTS"
+        case .outputs: return "🔁  re-process outputs → OUTPUTS"
         }
     }
 }
@@ -97,13 +118,37 @@ struct StabilizeSection: View {
     @EnvironmentObject private var app: AppModel
 
     var body: some View {
-        SectionContainer(title: "Stabilize", icon: "scope", isOn: $app.stabilize.enabled) {
+        SectionContainer(title: "Stabilize / Align", icon: "scope", isOn: $app.stabilize.enabled) {
             Picker("Reference", selection: $app.stabilize.referenceMode) {
                 ForEach(StabilizeSettings.ReferenceMode.allCases) { mode in
                     Text(mode.rawValue).tag(mode)
                 }
             }
             .pickerStyle(.menu)
+            .help("Marked: use the row tagged with the gold star (press R on a row). First selected: use whatever's first in the selection. Best-quality: auto-pick the sharpest frame as reference.")
+
+            // Reference-marker status. Three states:
+            //   • marked & in current section → show name in green
+            //   • marked but not in this section → orange hint
+            //   • not marked → red call-to-action
+            referenceStatusBanner
+
+            Picker("Alignment", selection: $app.stabilize.alignmentMode) {
+                ForEach(StabilizeSettings.AlignmentMode.allCases) { m in
+                    Text(m.rawValue).tag(m)
+                }
+            }
+            .pickerStyle(.menu)
+            .help("""
+                  Full Frame: phase-correlation on the whole image (general use).
+                  Disc Centroid: locks onto the bright disc's centre of mass — ideal for full-disc Sun / Moon, robust against thin clouds and seeing wobble.
+                  Reference ROI: phase-correlate only inside a user-defined rect on the reference. Pin alignment to a specific feature like a sunspot group, prominence, or crater.
+                  """)
+
+            // ROI controls — only visible when ROI mode is active.
+            if app.stabilize.alignmentMode == .referenceROI {
+                roiControls
+            }
 
             Picker("Boundary", selection: $app.stabilize.cropMode) {
                 ForEach(StabilizeSettings.CropMode.allCases) { m in
@@ -117,13 +162,15 @@ struct StabilizeSection: View {
 
             Divider().padding(.vertical, 4)
 
-            Button {
+            LuckyRunButton(
+                disabled: false,
+                title: "Run Stabilize",
+                subtitle: "🛰️  align frames in memory → Memory tab",
+                icon: "scope"
+            ) {
                 app.runStabilizationInMemory()
-            } label: {
-                Label("Run Stabilize (in memory)", systemImage: "memorychip")
             }
-            .controlSize(.small)
-            .help("Loads all marked / selected frames, computes shifts, applies them in memory. Use the player to scrub. Export when satisfied.")
+            .help("Loads all marked / selected frames, computes shifts, applies them in memory. Switches to the Memory tab automatically. Save All from there to write them to OUTPUTS.")
 
             if app.playback.hasFrames {
                 Label("\(app.playback.frames.count) aligned frames in memory", systemImage: "checkmark.circle.fill")
@@ -136,6 +183,70 @@ struct StabilizeSection: View {
                 .foregroundColor(.secondary)
         }
     }
+
+    @ViewBuilder
+    private var referenceStatusBanner: some View {
+        if let id = app.referenceFileID,
+           let entry = app.catalog.files.first(where: { $0.id == id }) {
+            Label("Reference: \(entry.name)", systemImage: "star.fill")
+                .font(.caption2)
+                .foregroundColor(.yellow)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        } else if app.stabilize.referenceMode == .marked {
+            Label("No reference pinned — press R on a row to pick one", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundColor(.orange)
+        }
+    }
+
+    @ViewBuilder
+    private var roiControls: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Button {
+                    // Capture the current preview viewport rect as the
+                    // ROI. The user zooms / pans to frame the feature
+                    // they want pinned, then locks it in. Stored as a
+                    // normalised rect so it survives zoom changes.
+                    NotificationCenter.default.post(name: .stabilizeCaptureROI, object: nil)
+                } label: {
+                    Label("Lock current view as ROI", systemImage: "rectangle.dashed.badge.record")
+                        .font(.caption2)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Use the area currently visible in the preview as the alignment region. Zoom into the sunspot / prominence / feature you want, then click here.")
+
+                if app.stabilize.roi != nil {
+                    Button("Clear") { app.stabilize.roi = nil }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .foregroundColor(.secondary)
+                }
+            }
+            if let r = app.stabilize.roi {
+                Text(String(format: "ROI %.0f×%.0f%% at (%.0f%%, %.0f%%)",
+                            r.w * 100, r.h * 100, r.x * 100, r.y * 100))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.secondary)
+            } else {
+                Text("No ROI set — defaults to centre 50 %")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.08)))
+    }
+}
+
+extension Notification.Name {
+    /// Posted by the Stabilize section's "Lock current view as ROI"
+    /// button — the preview coordinator listens, snapshots its current
+    /// viewport rect into normalised reference-frame coordinates, and
+    /// writes back into AppModel.stabilize.roi.
+    static let stabilizeCaptureROI = Notification.Name("AstroSharper.stabilizeCaptureROI")
 }
 
 // MARK: - Tone Curve
@@ -150,6 +261,24 @@ struct ToneCurveSection: View {
                 histogram: app.previewHistogram,
                 logHistogram: $app.histogramLogScale
             )
+            Divider().padding(.vertical, 4)
+            LuckyRunButton(
+                disabled: false,
+                title: "Apply Tone Curve",
+                subtitle: toneApplySubtitle,
+                icon: "waveform.path"
+            ) {
+                app.runToneOnActiveSection()
+            }
+            .help("Apply the current tone curve to the active section: Memory edits in-place (ops accumulate), Inputs/Outputs writes a toned TIFF to the output folder.")
+        }
+    }
+
+    private var toneApplySubtitle: String {
+        switch app.displayedSection {
+        case .memory:  return "🧠  edit memory frames in-place"
+        case .inputs:  return "📥  process selection → OUTPUTS"
+        case .outputs: return "🔁  re-process outputs → OUTPUTS"
         }
     }
 }
@@ -221,24 +350,41 @@ private struct SectionContainer<Content: View>: View {
     let icon: String
     @Binding var isOn: Bool
     @ViewBuilder let content: () -> Content
-    @State private var expanded: Bool = true
+    /// All sections start collapsed at launch for a clean panel; the user
+    /// expands what they need. A toggle-on later auto-expands the section,
+    /// and a toggle-off resets so the next on-click feels predictable.
+    @State private var userExpanded: Bool? = false
+
+    private var expanded: Bool {
+        userExpanded ?? isOn
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
+                // Whole title row toggles collapse — feels more discoverable
+                // than only the small chevron being clickable.
                 Button {
-                    withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        userExpanded = !expanded
+                    }
                 } label: {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.secondary)
+                    HStack(spacing: 6) {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .frame(width: 12)
+                        Image(systemName: icon)
+                            .foregroundColor(.accentColor)
+                        Text(title)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.primary)
+                    }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .help(expanded ? "Collapse section" : "Expand section")
 
-                Image(systemName: icon)
-                    .foregroundColor(.accentColor)
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Toggle("", isOn: $isOn)
                     .labelsHidden()
@@ -256,6 +402,11 @@ private struct SectionContainer<Content: View>: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .onChange(of: isOn) { _, _ in
+            // Reset user override so toggle on/off restores the default
+            // expand/collapse behaviour (no surprise sticky state).
+            userExpanded = nil
+        }
     }
 }
 

@@ -22,6 +22,17 @@ struct FileEntry: Identifiable, Hashable {
     var meridianFlipped: Bool = false
 
     var isSER: Bool { url.pathExtension.lowercased() == FileCatalog.serExtension }
+    var isAVI: Bool { url.pathExtension.lowercased() == FileCatalog.aviExtension }
+    /// Any frame-sequence container (SER or AVI). Lucky-Stack and the
+    /// auto-batch flow both branch on this — the underlying reader is
+    /// chosen by the consumer.
+    var isFrameSequence: Bool { isSER || isAVI }
+
+    /// Sortable proxy for `creationDate` — Date isn't directly Comparable
+    /// against optional. Files with no date sort to the bottom.
+    var creationSortKey: TimeInterval {
+        creationDate?.timeIntervalSince1970 ?? .infinity
+    }
 
     enum Status: Equatable, Hashable {
         case idle
@@ -42,8 +53,10 @@ struct FileCatalog {
     static let supportedExtensions: Set<String> = [
         "tif", "tiff", "png", "jpg", "jpeg",
         "ser",
+        "avi",
     ]
     static let serExtension = "ser"
+    static let aviExtension = "avi"
 
     mutating func load(from folder: URL) {
         rootURL = folder
@@ -92,13 +105,40 @@ enum ThumbnailLoader {
         if url.pathExtension.lowercased() == FileCatalog.serExtension {
             return loadSER(url: url, maxDimension: maxDimension)
         }
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        // Allow float-component sources — without this, 16-bit RGBA Float
+        // TIFFs (which AstroSharper itself writes) can come back saturated
+        // white because ImageIO's default thumbnail path skips the tone
+        // conversion for float sources.
+        let srcOpts: [CFString: Any] = [
+            kCGImageSourceShouldAllowFloat: true,
+        ]
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, srcOpts as CFDictionary) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceThumbnailMaxPixelSize: maxDimension * 2,
             kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldAllowFloat: true,
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+
+        // Re-render through an 8-bit RGB context to normalise the dynamic
+        // range. CGImage thumbnails of float TIFFs sometimes preserve the
+        // raw sample values (e.g. >1.0) and display saturated; rendering
+        // into an 8-bit context implicitly clamps to [0,1].
+        let w = cg.width, h = cg.height
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue
+        if let ctx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: cs, bitmapInfo: info
+        ) {
+            ctx.interpolationQuality = .low
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            if let normalised = ctx.makeImage() {
+                return NSImage(cgImage: normalised, size: NSSize(width: maxDimension, height: maxDimension))
+            }
+        }
         return NSImage(cgImage: cg, size: NSSize(width: maxDimension, height: maxDimension))
     }
 

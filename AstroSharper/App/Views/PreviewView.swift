@@ -132,6 +132,15 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         app.$previewFileID.removeDuplicates()
             .sink { [weak self] _ in self?.loadCurrentFile() }
             .store(in: &cancellables)
+        // Section switch: force a preview refresh so leaving the Memory tab
+        // immediately shows the file-list-selected file from Inputs/Outputs
+        // (otherwise the last in-memory texture lingers).
+        app.$displayedSection.removeDuplicates()
+            .sink { [weak self] _ in
+                self?.currentFileID = nil   // bypass the cache check
+                self?.loadCurrentFile()
+            }
+            .store(in: &cancellables)
         app.$showAfter
             .sink { [weak self] _ in self?.view?.needsDisplay = true }
             .store(in: &cancellables)
@@ -153,6 +162,93 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         trigger
             .sink { [weak self] in self?.reprocess() }
             .store(in: &cancellables)
+
+        // Zoom shortcuts (⌘+ ⌘- ⌘0 ⌘1 ⌘2). The View menu posts a
+        // PreviewZoomCommand value; we apply it here so the menu code
+        // never has to know about the MTKView at all.
+        NotificationCenter.default.publisher(for: .previewZoomCommand)
+            .compactMap { $0.object as? PreviewZoomCommand }
+            .sink { [weak self] cmd in self?.applyZoomCommand(cmd) }
+            .store(in: &cancellables)
+
+        // ROI-capture handler. The Stabilize section's "Lock current view
+        // as ROI" button posts this; we snapshot the current viewport
+        // (zoom + pan) into normalised reference-frame coordinates and
+        // write it back into AppModel.stabilize.roi.
+        NotificationCenter.default.publisher(for: .stabilizeCaptureROI)
+            .sink { [weak self] _ in self?.captureCurrentViewportAsROI() }
+            .store(in: &cancellables)
+    }
+
+    /// Convert the current zoom + pan state into a normalised rect on the
+    /// reference image. The display shader fits the texture to the view
+    /// at `zoomScale = 1`; visible texture rect = full image / zoom,
+    /// shifted by panPx (in drawable pixels). We invert that to get the
+    /// portion of the source actually shown, then divide by tex size for
+    /// normalised coords.
+    private func captureCurrentViewportAsROI() {
+        guard let beforeTex else { return }
+        let texW = Float(beforeTex.width), texH = Float(beforeTex.height)
+        let z = max(zoomScale, 0.0001)
+        // Visible texture span (in tex pixels) = tex / zoom. Centred unless panPx != 0.
+        let visW = texW / z
+        let visH = texH / z
+        // panPx is expressed in drawable pixels; convert to texture pixels
+        // using the fit ratio. At z=1 the texture covers the full view, so
+        // 1 drawable px = (texW / viewW) tex px (axis-wise). Approximated
+        // with the smaller side fit ratio for symmetry.
+        let view = self.view
+        let viewW = Float(view?.drawableSize.width ?? 1)
+        let viewH = Float(view?.drawableSize.height ?? 1)
+        let fit = min(viewW / texW, viewH / texH)
+        let panTexX = panPx.x / max(fit, 1e-6) / z
+        let panTexY = panPx.y / max(fit, 1e-6) / z
+        let cx = texW * 0.5 - panTexX
+        let cy = texH * 0.5 - panTexY
+        let originX = max(0, cx - visW * 0.5)
+        let originY = max(0, cy - visH * 0.5)
+        let nx = Double(originX / texW)
+        let ny = Double(originY / texH)
+        let nw = Double(min(visW, texW) / texW)
+        let nh = Double(min(visH, texH) / texH)
+        DispatchQueue.main.async {
+            self.app.stabilize.roi = NormalisedRect(x: nx, y: ny, w: nw, h: nh)
+        }
+    }
+
+    private func applyZoomCommand(_ cmd: PreviewZoomCommand) {
+        guard let view = self.view else { return }
+        let texW = Float(beforeTex?.width ?? 0)
+        let texH = Float(beforeTex?.height ?? 0)
+        let viewW = Float(view.drawableSize.width)
+        let viewH = Float(view.drawableSize.height)
+
+        // The display shader treats `zoomScale = 1` as "fit-to-view" already
+        // (vertex stage scales texSize → viewSize). So 1:1 means we have to
+        // ask "how much do we need to multiply the fit so one tex pixel maps
+        // to one drawable pixel?" — that's `min(texW/viewW, texH/viewH)`'s
+        // inverse, which is `max(viewW/texW, viewH/texH)`.
+        func oneToOneScale() -> Float {
+            guard texW > 0, texH > 0, viewW > 0, viewH > 0 else { return 1 }
+            return max(viewW / texW, viewH / texH)
+        }
+
+        switch cmd {
+        case .zoomIn:
+            zoomScale = min(zoomScale * 1.25, 64)
+        case .zoomOut:
+            zoomScale = max(zoomScale / 1.25, 0.1)
+        case .fit:
+            zoomScale = 1
+            panPx = .zero
+        case .oneToOne:
+            zoomScale = oneToOneScale()
+            panPx = .zero
+        case .twoHundred:
+            zoomScale = 2 * oneToOneScale()
+            panPx = .zero
+        }
+        view.needsDisplay = true
     }
 
     private func onPlaybackFrameChanged() {
@@ -171,9 +267,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     // MARK: - Loading
 
     private func loadCurrentFile() {
-        // While in-memory playback has frames the preview is owned by the
-        // transport — file-list selection no longer affects what's shown.
-        if app.playback.hasFrames { return }
+        // Memory tab owns the preview via the playback transport; let it
+        // drive there. In Inputs/Outputs we always reload from the
+        // file-system entry the user clicked — even if memory still holds
+        // aligned frames, the current section's preview must update.
+        if app.displayedSection == .memory && app.playback.hasFrames { return }
 
         currentFileID = app.previewFileID
         guard let id = app.previewFileID,

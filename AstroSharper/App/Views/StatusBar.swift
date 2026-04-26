@@ -1,4 +1,6 @@
-// Bottom status bar: selection counter, job progress, ready/error message.
+// Bottom status bar: selection counter, job progress, ready/error message,
+// plus the active folder path on the right at slightly larger type — moved
+// down here from the toolbar so the top chrome stays compact.
 import SwiftUI
 
 struct StatusBar: View {
@@ -10,6 +12,21 @@ struct StatusBar: View {
                 .font(.system(size: 11, design: .monospaced))
 
             Divider().frame(height: 14)
+
+            // Active section's folder path. Larger than the rest of the
+            // status bar so it's actually readable when paths get long.
+            if let pathText = activePathText {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(AppPalette.accent)
+                Text(pathText)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .help(pathText)
+                Divider().frame(height: 14)
+            }
 
             switch app.jobStatus {
             case .idle:
@@ -55,6 +72,14 @@ struct StatusBar: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(Color(NSColor.underPageBackgroundColor))
+    }
+
+    private var activePathText: String? {
+        if app.displayedSection == .outputs, let url = app.outputsRootURL {
+            return url.path
+        }
+        if let url = app.catalog.rootURL { return url.path }
+        return nil
     }
 
     private var countsLabel: String {

@@ -6,7 +6,7 @@ import SwiftUI
 
 struct LuckyStackSection: View {
     @EnvironmentObject private var app: AppModel
-    @State private var expanded = true
+    @State private var expanded = false   // start collapsed for a clean panel
 
     private var serTargets: [FileEntry] {
         let ids = app.batchTargetIDs
@@ -14,30 +14,45 @@ struct LuckyStackSection: View {
     }
     private var serCount: Int { serTargets.count }
     private var allSerInCatalog: Int { app.catalog.files.filter { $0.isSER }.count }
+    /// Lucky Stack is meaningless without SER input. We disable both the
+    /// header chevron and the run button so the section can't accidentally
+    /// be expanded on an empty / TIFF-only folder.
+    private var disabled: Bool { allSerInCatalog == 0 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+                    if !disabled {
+                        withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+                    }
                 } label: {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
+                .disabled(disabled)
 
                 Image(systemName: "sparkles.tv.fill")
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(disabled ? .secondary : .accentColor)
                 Text("Lucky Stack")
                     .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(disabled ? .secondary : .primary)
+                if disabled {
+                    Text("· no .ser files")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
                 Spacer()
                 Text(targetCountLabel)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
             }
+            .opacity(disabled ? 0.55 : 1.0)
+            .help(disabled ? "Lucky Stack runs on .ser video files. Open a folder containing SharpCap / FireCapture .ser captures to enable." : "")
 
-            if expanded {
+            if expanded && !disabled {
                 Picker("Mode", selection: $app.luckyStack.mode) {
                     ForEach(LuckyStackMode.allCases) { mode in
                         Text(mode.rawValue).tag(mode)
@@ -271,20 +286,35 @@ private struct VariantField: View {
     }
 }
 
-/// The hero button for kicking off a Lucky Stack run. Uses a layered SF
-/// Symbol composition (3D stack + sparkles) plus a prominent purple-pink
-/// gradient and a tiny smiley accent in the label so it's impossible to
-/// miss in the panel.
+/// Generic hero "run" button — used by both Lucky Stack and Run Stabilize.
+/// A layered SF-Symbol icon + sparkles overlay + purple→pink gradient.
 struct LuckyRunButton: View {
     let disabled: Bool
+    let title: String
+    let subtitle: String
+    let icon: String
     let action: () -> Void
     @State private var hover = false
+
+    init(
+        disabled: Bool,
+        title: String = "Run Lucky Stack",
+        subtitle: String = "✨  best frames → one stacked TIFF",
+        icon: String = "square.3.layers.3d.top.filled",
+        action: @escaping () -> Void
+    ) {
+        self.disabled = disabled
+        self.title = title
+        self.subtitle = subtitle
+        self.icon = icon
+        self.action = action
+    }
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
                 ZStack {
-                    Image(systemName: "square.3.layers.3d.top.filled")
+                    Image(systemName: icon)
                         .font(.system(size: 18, weight: .heavy))
                         .foregroundStyle(.white)
                     Image(systemName: "sparkles")
@@ -295,10 +325,10 @@ struct LuckyRunButton: View {
                 .frame(width: 28, height: 22)
 
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("Run Lucky Stack")
+                    Text(title)
                         .font(.system(size: 13, weight: .heavy))
                         .foregroundStyle(.white)
-                    Text("✨  best frames → one stacked TIFF")
+                    Text(subtitle)
                         .font(.system(size: 9))
                         .foregroundStyle(.white.opacity(0.85))
                 }

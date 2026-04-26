@@ -21,7 +21,8 @@ struct TransportBar: View {
                     .font(.system(size: 16))
             }
             .buttonStyle(.plain)
-            .help("Play / Pause (Space)")
+            .keyboardShortcut("p", modifiers: [])
+            .help("Play / Pause (P)")
 
             Button {
                 app.stepFrame(by: 1)
@@ -53,7 +54,7 @@ struct TransportBar: View {
                 get: { app.playback.fps },
                 set: { app.setFPS($0) }
             )) {
-                ForEach([12.0, 18.0, 24.0, 30.0, 60.0], id: \.self) { v in
+                ForEach([1.0, 3.0, 6.0, 12.0, 18.0, 24.0, 30.0, 60.0], id: \.self) { v in
                     Text("\(Int(v)) fps").tag(v)
                 }
             }

@@ -14,6 +14,45 @@ enum Stabilizer {
         /// see a consistent orientation across the whole session.
         let urls: [(id: UUID, url: URL, meridianFlipped: Bool)]
         let cropMode: StabilizeSettings.CropMode
+        /// How shifts are computed. Full-frame phase correlation, disc
+        /// centroid (solar/lunar with bright disc on dark sky), or phase
+        /// correlation restricted to a normalised ROI on the reference.
+        let alignmentMode: StabilizeSettings.AlignmentMode
+        /// User-selected reference frame ID. Must match one of the entries
+        /// in `urls`. If `pickBestReference` is true this is overridden
+        /// after a quality-grading pass.
+        let referenceID: UUID
+        /// When true, the Stabilizer scores every input by Laplacian-
+        /// variance and uses the sharpest frame as reference instead of
+        /// the supplied `referenceID`.
+        let pickBestReference: Bool
+        /// Optional ROI rect in *normalised* reference-frame coordinates
+        /// (0…1, top-left origin). Only consulted when
+        /// `alignmentMode == .referenceROI`.
+        let roi: CGRect?
+        /// Pre-loaded textures keyed by ID. When present for an entry,
+        /// Stabilizer uses the texture directly instead of reading the
+        /// file from disk — this is what preserves any in-memory edits
+        /// (sharpen / tone) when stabilizing from the Memory tab.
+        let preloadedTextures: [UUID: MTLTexture]
+
+        // Convenience initialiser preserving the historical call-site
+        // ergonomics; new code goes through the full memberwise init.
+        init(urls: [(id: UUID, url: URL, meridianFlipped: Bool)],
+             cropMode: StabilizeSettings.CropMode,
+             alignmentMode: StabilizeSettings.AlignmentMode = .fullFrame,
+             referenceID: UUID? = nil,
+             pickBestReference: Bool = false,
+             roi: CGRect? = nil,
+             preloadedTextures: [UUID: MTLTexture] = [:]) {
+            self.urls = urls
+            self.cropMode = cropMode
+            self.alignmentMode = alignmentMode
+            self.referenceID = referenceID ?? urls.first?.id ?? UUID()
+            self.pickBestReference = pickBestReference
+            self.roi = roi
+            self.preloadedTextures = preloadedTextures
+        }
     }
 
     struct Result {
@@ -45,31 +84,56 @@ enum Stabilizer {
 
             await onProgress(.loadingReference)
             let device = MetalDevice.shared.device
-            // Reference: load + apply flip if flagged.
-            var refTex0: MTLTexture? = try? ImageTexture.load(url: urls[0].url, device: device)
-            if urls[0].meridianFlipped, let t = refTex0 {
-                refTex0 = RotateTexture.rotate180(t, device: device)
+
+            // Helper: fetch texture for one entry. Prefers a preloaded
+            // memory texture, falls back to disk-load + meridian-flip.
+            func fetchTexture(for entry: (id: UUID, url: URL, meridianFlipped: Bool)) -> MTLTexture? {
+                if let pre = inputs.preloadedTextures[entry.id] { return pre }
+                guard var t = try? ImageTexture.load(url: entry.url, device: device) else { return nil }
+                if entry.meridianFlipped {
+                    t = RotateTexture.rotate180(t, device: device)
+                }
+                return t
             }
-            guard let refTex = refTex0 else {
+
+            // Pick the reference: either user-pinned, or auto-best by
+            // Laplacian variance score across all candidates.
+            var refIdx: Int = urls.firstIndex { $0.id == inputs.referenceID } ?? 0
+            if inputs.pickBestReference {
+                var bestScore: Float = -.infinity
+                for (i, entry) in urls.enumerated() {
+                    guard let t = fetchTexture(for: entry) else { continue }
+                    let s = Align.qualityScore(t)
+                    if s > bestScore { bestScore = s; refIdx = i }
+                }
+            }
+
+            guard let refTex = fetchTexture(for: urls[refIdx]) else {
                 await completion(nil)
                 return
             }
 
-            // Compute shifts.
-            var shifts: [UUID: AlignShift] = [urls[0].id: AlignShift(dx: 0, dy: 0)]
-            for i in 1..<urls.count {
+            // Compute shifts. The reference shift is always (0,0).
+            var shifts: [UUID: AlignShift] = [urls[refIdx].id: AlignShift(dx: 0, dy: 0)]
+            for i in 0..<urls.count where i != refIdx {
                 if Task.isCancelled { await completion(nil); return }
-                guard var tex = try? ImageTexture.load(url: urls[i].url, device: device) else {
+                guard let tex = fetchTexture(for: urls[i]) else {
                     shifts[urls[i].id] = AlignShift(dx: 0, dy: 0)
                     continue
                 }
-                if urls[i].meridianFlipped {
-                    tex = RotateTexture.rotate180(tex, device: device)
+                let s: AlignShift
+                switch inputs.alignmentMode {
+                case .fullFrame:
+                    s = Align.phaseCorrelate(reference: refTex, frame: tex) ?? AlignShift(dx: 0, dy: 0)
+                case .discCentroid:
+                    s = Align.discCentroidShift(reference: refTex, frame: tex) ?? AlignShift(dx: 0, dy: 0)
+                case .referenceROI:
+                    let roi = inputs.roi ?? CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
+                    s = Align.phaseCorrelateROI(reference: refTex, frame: tex, normROI: roi)
+                        ?? AlignShift(dx: 0, dy: 0)
                 }
-                let s = Align.phaseCorrelate(reference: refTex, frame: tex) ?? AlignShift(dx: 0, dy: 0)
                 shifts[urls[i].id] = s
-                let done = i
-                await onProgress(.computingShifts(done: done, total: urls.count))
+                await onProgress(.computingShifts(done: i + 1, total: urls.count))
             }
 
             // Crop rectangle (if mode = crop).
@@ -98,10 +162,7 @@ enum Stabilizer {
             let queue = MetalDevice.shared.commandQueue
             for (idx, item) in urls.enumerated() {
                 if Task.isCancelled { await completion(nil); return }
-                guard var srcTex = try? ImageTexture.load(url: item.url, device: device) else { continue }
-                if item.meridianFlipped {
-                    srcTex = RotateTexture.rotate180(srcTex, device: device)
-                }
+                guard let srcTex = fetchTexture(for: item) else { continue }
                 let shift = shifts[item.id] ?? AlignShift(dx: 0, dy: 0)
 
                 // Allocate a private-storage destination at output size.

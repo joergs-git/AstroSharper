@@ -37,6 +37,7 @@ targets:
         MARKETING_VERSION: "0.2.0"
         PRODUCT_NAME: AstroSharper
         PRODUCT_MODULE_NAME: AstroSharper
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_APP_SANDBOX: YES
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: AstroSharper/AstroSharper.entitlements
