@@ -1,0 +1,44 @@
+name: AstroSharper
+options:
+  bundleIdPrefix: com.joergsflow
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+schemes:
+  AstroSharper:
+    build:
+      targets:
+        AstroSharper: all
+    run:
+      config: Debug
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+targets:
+  AstroSharper:
+    type: application
+    platform: macOS
+    sources:
+      - path: AstroSharper
+        excludes:
+          - "**/.DS_Store"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.joergsflow.AstroSharper
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: AstroSharper/Info.plist
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: "0.2.0"
+        PRODUCT_NAME: AstroSharper
+        PRODUCT_MODULE_NAME: AstroSharper
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: AstroSharper/AstroSharper.entitlements
+        DEVELOPMENT_TEAM: FDSVBU33S8
+        CODE_SIGN_STYLE: Automatic

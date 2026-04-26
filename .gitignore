@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Build / IDE
+build/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+
+# Test data — large binaries shouldn't go to the repo
+TESTIMAGES/
+
+# Generated output
+**/_AstroSharper/
+**/_processed/
+**/_luckystack/
+**/.astrosharper-probe-*
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+.swiftpm/
