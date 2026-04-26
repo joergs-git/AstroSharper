@@ -18,9 +18,9 @@ Feedback welcome too.
 
 ## What it does
 
-**AstroSharper** turns long SER/AVI capture sessions into crisp final images in three clicks. Drop a folder of SER captures, hit **Apply ALL Stuff** (⇧⌘A), and walk away with a stacked, aligned, deconvolved, tone-curved master file.
+**AstroSharper** turns long SER/AVI capture sessions into crisp final images in three clicks. Drop a folder of SER captures, hit **Apply ALL Stuff** (⇧⌘A), and walk away with a stacked, aligned, deconvolved, tone-curved master file. But not only that. If you have already images e.g. .TIFF Files from sun or other solar system objects you can just use it to do all the sharpening stuff and create even animated images - timelapse animations etc. All in one go. So a comparison to Autostakkert or imppg and such is not really fully possible even. However, try it out by yourself and help making it better.
 
-Every step runs on the GPU. The full pipeline — quality grading, alignment, lucky stacking, à-trous wavelets, Wiener / Lucy-Richardson deconvolution, tone-curve LUTs — lives in Metal compute kernels and `MPSGraph`. A 4K Sun frame goes through unsharp mask in under 10 ms on an M2.
+Every step runs on the GPU. The full pipeline — quality grading, alignment, lucky stacking, à-trous wavelets, Wiener / Lucy-Richardson deconvolution, tone-curve LUTs — lives in Metal compute kernels and `MPSGraph`. A 4K Sun frame goes through unsharp mask in under 10 ms on an Apple M2.
 
 ## Highlights
 
