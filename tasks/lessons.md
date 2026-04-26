@@ -2,6 +2,16 @@
 
 Patterns and gotchas captured from this project. Read at session start; append after every correction.
 
+## [2026-04-27] — Anchored-zoom math is per-axis, not isotropic
+- **Mistake:** Ported AstroTriage's `anchoredZoom` using a single `baseFit = min(viewW/texW, viewH/texH)` for both axes. The display shader uses **per-axis** `fitScale.x` / `fitScale.y` (different when image and view aspect ratios differ), so the pan-compensation has the wrong magnitude on at least one axis — large enough that the user perceives it as a sign flip ("left is right, up is down").
+- **Rule:** Any anchor-preserving viewport math must read the SAME fit-scale convention the shader uses. Compute `tex pixels per view pixel` per axis as `tpv_axis = texSize_axis / (viewSize_axis * fitScale_axis)`, then `panPx_new = panPx_old + relAxis * tpv_axis * (1/oldZ − 1/newZ)`.
+- **Applies to:** `App/Views/PreviewView.swift::ZoomableMTKView.anchoredZoom`. Sign convention notes already in place in the file's comments.
+
+## [2026-04-27] — Lucky-keep-% can't be a pure spread heuristic
+- **Mistake:** `SerQualityScanner.makeDistribution` derived the recommended keep fraction from `p90/p10` alone, defaulted to 75% for "tight" distributions. Result: even objectively bad SERs got a 75% recommendation, which contradicts every lucky-imaging best practice.
+- **Rule:** The recommendation must (a) anchor in scientific-lucky-imaging norms (planetary 1–15%, solar 10–30%, lunar 5–25%), (b) enforce an absolute floor on the *kept frame count* (~100 frames; SNR ∝ √N), and (c) detect the sharpness "knee" via percentile, not just `p90/p10`. Always display both the percentage AND the absolute frame count so the user can sanity-check.
+- **Applies to:** `Engine/Pipeline/QualityProbe.swift::SerQualityScanner.makeDistribution`. Validate against `TESTIMAGES/` before declaring the formula correct.
+
 ## [2026-04-26] — Share GPU helpers, cache temp textures by shape
 - **Mistake:** `SharpnessProbe` was instantiated **per file** in the thumbnail loader. Importing 500 TIFFs created 500 probes + 500 Metal command queues + 500 destination-texture allocations. Per-call allocation in `compute()` also allocated fresh Laplacian-dest + stats-dest textures every single call — even though all SER frames in a scan share the same shape.
 - **Rule:** For any small GPU helper used at high frequency (probe, stats, etc.), expose a `static let shared` singleton with its own command queue. Cache scratch textures by shape `(w, h, pixelFormat)` so the inner loop reuses allocations. Wrap the cache in `NSLock` if the shared instance can be touched from multiple `Task.detached` workers.

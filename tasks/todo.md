@@ -66,7 +66,24 @@ A running record of where we are, what's done, and what's next. Update at the en
 ## Pending — roadmap
 
 ### Near-term
-- [ ] AVI demuxing for Lucky Stack (`AVAssetReader` → frame buffer adapter)
+- [ ] **Anchored-zoom drift on click-drag (BUG — open)** — During plain drag (Photoshop click-drag zoom), the image pixel under the cursor doesn't stay locked. User reports it as "left is right, up is down" — actually a magnitude error in the pan-compensation, possibly large enough to feel like a sign flip when texPerView ≠ baseFit.
+  - **Root cause:** `anchoredZoom` in `App/Views/PreviewView.swift::ZoomableMTKView` uses an isotropic `baseFit = min(viewW/texW, viewH/texH)` and applies it equally to X and Y. The display shader (`Engine/Shaders/Shaders.metal`'s `display_fragment`) actually uses **per-axis** `fitScale.x` / `fitScale.y` — so `tex pixels per view pixel` differs from `baseFit` whenever the image+view aspect ratios mismatch.
+  - **Correct math** (already derived; just needs implementation): For each axis define `tpv = texSize / (viewSize * fitScale_axis)` where the fitScale matches the shader's branch. Then for a zoom from `oldZ → newZ` with anchor offset `relX, relY` from view center: `panPx_new = panPx_old + relAxis * tpv * (1/oldZ − 1/newZ)`.
+  - Reuses my existing sign convention (`+panPx.x` shifts image LEFT on screen; `+panPx.y` shifts image UP). ⌥-pan is correct, no change there.
+  - Test cases: zoom in / out / in / out cycle on (a) large SER ≈3000² in landscape view, (b) tall TIFF 2000×4000 in landscape view — anchor should stay locked in both.
+
+- [ ] **Lucky-stack keep-% recommendation is too lenient** — `Engine/Pipeline/QualityProbe.swift::SerQualityScanner.makeDistribution` always returns 75% even for bad captures. The current `spread = p90/p10` heuristic overweights tight distributions. Replace with a scientific-lucky-imaging-aware formula that also considers frame count.
+  - **Research first:** AutoStakkert / Registax / scientific-lucky-imaging literature recommendations. Rough starting points to validate:
+    - Planetary (Mars/Jupiter/Saturn): 1–15 % typically; high-resolution work uses 1–5 %.
+    - Solar (Hα / WL): 10–30 % when seeing is steady; 5–15 % when turbulent.
+    - Lunar high-res: 5–25 %.
+  - **Frame-count floor:** stack SNR is √N — keeping 5 % of 100 frames = 5 frames is unusable. Recommendation must enforce a minimum kept-frame count (≥ 100 typical, ≥ 50 absolute floor) — formula: `keepCount = max(absoluteFloor, ceil(idealFraction * total))`, then `keepFraction = keepCount / total`.
+  - **Distribution-aware:** instead of bare p90/p10 ratio, compute the percentile threshold where sharpness drops sharply — e.g., the percentile *p* where `score(p) ≤ 0.5 × p90`. That's the meaningful "keep above this" cutoff.
+  - **Jitter consideration:** keep current "tighten by one band on jitter > 15 px" but recalibrate the threshold against real captures.
+  - **Display:** show both the percentage AND the absolute frame count (e.g. *"Recommend: keep top 8 % (160 of 2000 frames) — sharp tail well-defined."*).
+  - **Validation:** run against the SERs in `TESTIMAGES/` before claiming the formula is right.
+
+- [ ] AVI lucky-stack engine — currently the demuxer (`Engine/IO/AviReader.swift`) only feeds the preview / scrub / quality scanner. Lucky-Stack needs a `SourceReader` protocol abstraction over `SerReader` / `AviReader` so the tight read-loop in `Engine/Pipeline/LuckyStack.swift` can consume either.
 - [ ] 16-bit histogram overlay on preview (currently using basic Histogram)
 - [ ] Drizzle 1.5×, 2× reconstruction (C5 task)
 - [ ] CompiledFFT path: re-enable MPSGraph phase correlator (currently disabled, vDSP CPU path is the active route)
