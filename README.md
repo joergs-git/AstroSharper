@@ -2,15 +2,18 @@
 
 ### Lucky imaging helper for macOS
 
-A native, GPU-accelerated lucky-imaging companion for solar, lunar and planetary astrophotographers — built from the ground up in **Swift + Metal** for Apple Silicon.
+A native, GPU-accelerated lucky-imaging companion for solar, lunar and planetary astrophotographers — built from the ground up in **Swift + Metal** for GPU speeded Apple Silicon (no lame python stuff).
 
-> Faster than AutoStakkert! · Easier than ImPPG · Higher quality output
+> You used AutoStakkert and ImPPG and Windows Stuff? - and you've always had this secret wish. If there wouldnt be a native MacOS version with much more speed, comfort and quality output?
+So,here it comes finally and you are welcome to give it a try.
+Feedback welcome too.
 
 [![macOS](https://img.shields.io/badge/macOS-14%2B-blue)](https://www.apple.com/macos/)
 [![Swift](https://img.shields.io/badge/Swift-5.9-orange)](https://swift.org)
 [![Metal](https://img.shields.io/badge/Metal-3-black)](https://developer.apple.com/metal/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
+![AstroSharper Stacking, Sharpening, Aligning ](AstroSharper1.png)
 ---
 
 ## What it does
@@ -40,24 +43,13 @@ The lucky-imaging tool landscape on Mac is a wasteland: AutoStakkert! and Regist
 
 AstroSharper is preparing for **Mac App Store** release. While we wait for review, you can build from source or grab the latest signed/notarized release from the [Releases](https://github.com/joergsflow/astrosharper/releases) page.
 
-If AstroSharper saves you time, [**buy me a coffee**](https://buymeacoffee.com/joergsflow) ☕️ — every cup keeps a feature shipping. Thank you.
+If you like AstroSharper and maybe it even saves you time or you just prefer using it , [**buy me a coffee**](https://buymeacoffee.com/joergsflow) ☕️ — every cup keeps a feature shipping. Thank you.
 
-## Install
-
-### From source (today)
-
-```bash
-git clone https://github.com/joergsflow/astrosharper.git
-cd astrosharper
-xcodegen generate            # regenerates AstroSharper.xcodeproj
-open AstroSharper.xcodeproj  # build & run from Xcode
-```
-
-Requires Xcode 15+ and macOS 14 (Sonoma) or newer.
+Requires macOS 14 (Sonoma) or newer.
 
 ### From the App Store (soon)
 
-Coming. Watch the repo or follow [@joergsflow on AstroBin](https://app.astrobin.com/u/joergsflow) for the announcement.
+Coming. Watch the repo for the announcement. Or open a thread on cloudynights or so and I will answer :-) 
 
 ## Quick workflow
 
