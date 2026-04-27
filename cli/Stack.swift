@@ -24,6 +24,8 @@ enum Stack {
         var sigmaThreshold: Float?
         var drizzleScale = 1
         var drizzlePixfrac: Float = 0.7
+        var useTwoStage = false
+        var twoStageGrid = 8
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -75,6 +77,19 @@ enum Stack {
                     return 64
                 }
                 drizzlePixfrac = v
+                i += 2
+            case "--two-stage":
+                useTwoStage = true
+                i += 1
+            case "--two-stage-grid":
+                guard i + 1 < args.count, let v = Int(args[i + 1]),
+                      v >= 2, v <= 32
+                else {
+                    cliStderr("stack: --two-stage-grid requires an integer in [2, 32] (default 8)")
+                    return 64
+                }
+                twoStageGrid = v
+                useTwoStage = true
                 i += 2
             case "--quiet", "-q":
                 quiet = true
@@ -149,6 +164,8 @@ enum Stack {
             options.sigmaThreshold = sigmaThreshold
             options.drizzleScale = drizzleScale
             options.drizzlePixfrac = drizzlePixfrac
+            options.useTwoStageQuality = useTwoStage
+            options.twoStageAPGrid = twoStageGrid
 
             let started = Date()
             if !quiet, keepPercents.count > 1 {

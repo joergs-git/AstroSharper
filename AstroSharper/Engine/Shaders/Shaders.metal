@@ -722,6 +722,161 @@ kernel void lucky_accumulate_local(
     accum.write(a + v * p.weight, gid);
 }
 
+// MARK: - Per-AP quality grading (A.2)
+//
+// Two-stage quality: pass 1 grades each frame's whole-image LAPD
+// variance (existing `quality_partials` kernel), pass 2 grades each
+// AP cell separately. Different cells pick different "best" frames
+// — the limb-sharp / band-blurred / surface-detail-good frame each
+// land in their respective AP keep sets. Output is one variance
+// score per (frame, AP) pair, written into a flat buffer.
+//
+// Buffer layout (frame-major, AP-minor):
+//   perAPVariance[frameIndex * apGridSize² + apY * apGridSize + apX]
+//
+// CPU then sorts per-AP, picks top-k frames per AP, and emits a
+// keep-mask buffer the per-AP accumulator consumes.
+//
+// One threadgroup per AP cell. Each thread strides over a slice of
+// the cell's pixels, computing LAPD per pixel and contributing to a
+// threadgroup-local sum + sumSq for variance reduction. tgSize must
+// be ≤ 256 (matches the threadgroup-local arrays).
+
+struct PerAPQualityParams {
+    uint frameIndex;
+    uint apGridSize;
+    uint pad0;
+    uint pad1;
+};
+
+kernel void quality_partials_per_ap(
+    texture2d<float, access::read> src [[texture(0)]],
+    device float* perAPVariance        [[buffer(0)]],
+    constant PerAPQualityParams& p     [[buffer(1)]],
+    uint  apLinear [[threadgroup_position_in_grid]],
+    uint  tIndex   [[thread_index_in_threadgroup]],
+    uint  tgSize   [[threads_per_threadgroup]]
+) {
+    // 1D dispatch over linear AP index — Metal requires the
+    // [[threadgroup_position_in_grid]] and [[thread_index_in_threadgroup]]
+    // attributes to share dimensionality, and `compute_ap_shifts` in
+    // this file already established the 1D convention. Decode (x, y)
+    // from the linear index here.
+    uint W = src.get_width(), H = src.get_height();
+    uint apTotal = p.apGridSize * p.apGridSize;
+    if (apLinear >= apTotal) return;
+    uint apX = apLinear % p.apGridSize;
+    uint apY = apLinear / p.apGridSize;
+    uint cellW = W / p.apGridSize;
+    uint cellH = H / p.apGridSize;
+    uint x0 = apX * cellW;
+    uint y0 = apY * cellH;
+
+    threadgroup float sumStore[256];
+    threadgroup float sumSqStore[256];
+    threadgroup uint  countStore[256];
+
+    float localSum = 0;
+    float localSumSq = 0;
+    uint  localCount = 0;
+
+    uint cellPixels = cellW * cellH;
+    for (uint i = tIndex; i < cellPixels; i += tgSize) {
+        uint cx = i % cellW;
+        uint cy = i / cellW;
+        uint2 gid(x0 + cx, y0 + cy);
+        // laplacian_at returns 0 on the 1-px border so we don't have
+        // to pre-filter here.
+        float v = laplacian_at(src, gid);
+        localSum   += v;
+        localSumSq += v * v;
+        localCount += 1;
+    }
+
+    // Initialise every slot so the stride-128 reduction is well-
+    // defined for tgSize values smaller than 256.
+    for (uint i = tIndex; i < 256; i += tgSize) {
+        sumStore[i]   = 0;
+        sumSqStore[i] = 0;
+        countStore[i] = 0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tIndex < 256) {
+        sumStore[tIndex]   = localSum;
+        sumSqStore[tIndex] = localSumSq;
+        countStore[tIndex] = localCount;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tIndex < stride) {
+            sumStore[tIndex]   += sumStore[tIndex + stride];
+            sumSqStore[tIndex] += sumSqStore[tIndex + stride];
+            countStore[tIndex] += countStore[tIndex + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tIndex == 0) {
+        float n = float(countStore[0]);
+        float variance = 0;
+        if (n > 0) {
+            float mean = sumStore[0] / n;
+            variance = (sumSqStore[0] / n) - mean * mean;
+            if (variance < 0) variance = 0;
+        }
+        uint outIdx = p.frameIndex * apTotal + apLinear;
+        perAPVariance[outIdx] = variance;
+    }
+}
+
+// Per-AP keep-mask weighted accumulator (A.2). Same shape as
+// `lucky_accumulate` but reads a (apIndex × frameIndex) keep-mask
+// buffer; pixels outside their AP's keep set don't contribute. A
+// per-pixel weight texture tracks how many frames each output pixel
+// drew from, so the final divide produces a clean mean even when
+// neighbouring APs picked very different frame counts. Hard-edge AP
+// boundaries here; B.2 (feathered AP blending) softens them later.
+
+struct LuckyPerAPParams {
+    float  weight;
+    uint   apGridSize;
+    uint   frameIndex;
+    uint   frameCount;
+    float2 shift;
+    float2 pad0;
+};
+
+kernel void lucky_accumulate_per_ap_keep(
+    texture2d<float, access::sample>     frame    [[texture(0)]],
+    texture2d<float, access::read_write> accum    [[texture(1)]],
+    texture2d<float, access::read_write> wtTex    [[texture(2)]],
+    device const float*                  keepMask [[buffer(0)]],
+    constant LuckyPerAPParams&           p        [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint W = accum.get_width(), H = accum.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+    if (p.apGridSize == 0) return;
+
+    uint cellW = max(1u, W / p.apGridSize);
+    uint cellH = max(1u, H / p.apGridSize);
+    uint apX = min(p.apGridSize - 1, gid.x / cellW);
+    uint apY = min(p.apGridSize - 1, gid.y / cellH);
+    uint apLinearIdx = apY * p.apGridSize + apX;
+
+    uint maskIdx = apLinearIdx * p.frameCount + p.frameIndex;
+    float keep = keepMask[maskIdx];
+    if (keep <= 0.0) return;
+
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float2 uv = (float2(gid) + 0.5 - p.shift) / float2(W, H);
+    float4 v = frame.sample(s, uv);
+    accum.write(accum.read(gid) + v * p.weight, gid);
+    wtTex.write(wtTex.read(gid) + float4(p.weight), gid);
+}
+
 // MARK: - Sigma-clipped stacking (B.1)
 //
 // Two-pass robust outlier rejection. Cosmic rays, hot pixels, the

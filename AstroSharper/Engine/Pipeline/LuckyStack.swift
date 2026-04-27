@@ -107,6 +107,27 @@ struct LuckyStackOptions {
     /// the cost of coverage gaps in the output (handled by the
     /// per-pixel weight texture).
     var drizzlePixfrac: Float = 0.7
+
+    /// Per-AP local quality re-ranking (PSS / AS!4 two-stage grading).
+    /// false = single global ranking (existing); true = each AP cell
+    /// picks its own top-k frames independently. Directly addresses
+    /// the "Jupiter limb dented because band-sharp frames dominated
+    /// the global ranking and limb-sharp frames lost out" failure
+    /// mode by giving each region its own keep set.
+    var useTwoStageQuality: Bool = false
+
+    /// AP grid edge length when `useTwoStageQuality` is on. 8 → 8×8 =
+    /// 64 cells. Matches the multi-AP grid convention; bigger grids
+    /// give finer regional adaptivity but reduce the per-cell sample
+    /// count (a 16×16 grid on a 640×640 frame = 40×40 px cells, close
+    /// to the LAPD stencil's effective scale).
+    var twoStageAPGrid: Int = 8
+
+    /// Per-AP keep fraction (0..1). Defaults to `keepPercent / 100`
+    /// when nil — same selectivity as the global path. Pass a
+    /// smaller value to be picky per-AP independently of the global
+    /// keep slider.
+    var twoStageKeepFraction: Double? = nil
 }
 
 enum LuckyStackProgress {
@@ -204,6 +225,9 @@ private final class LuckyRunner {
     lazy var perPixelNormPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_normalize_per_pixel")
     // B.6 drizzle splat — only built when options.drizzleScale > 1.
     lazy var drizzlePSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_drizzle_splat")
+    // A.2 two-stage quality kernels — only built when useTwoStageQuality is on.
+    lazy var perAPGradePSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "quality_partials_per_ap")
+    lazy var perAPAccumPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_accumulate_per_ap_keep")
 
     let W: Int, H: Int
     let bytesPerPlane: Int
@@ -395,16 +419,32 @@ private final class LuckyRunner {
             referenceTex = refTex
         }
 
-        // Stage 3: weighted accumulation. Three paths, picked in order:
-        //   - drizzleScale > 1   : per-output reverse-map splatter onto
-        //                          an upsampled grid. v0 is integer-only
-        //                          (2× / 3×) and ignores sigmaThreshold.
-        //   - sigmaThreshold ≠ nil: two-pass Welford → clipped re-accumulate.
-        //                          Multi-AP off in this path for v0.
-        //   - else                : existing single-pass quality-weighted
-        //                          mean + optional multi-AP refinement.
+        // Stage 3: weighted accumulation. Four paths, picked in order:
+        //   - useTwoStageQuality : per-AP local quality re-rank,
+        //                          per-AP keep-mask accumulator. PSS /
+        //                          AS!4 two-stage grading. Directly
+        //                          targets the "limb dented because the
+        //                          global ranking favoured band-sharp
+        //                          frames" failure mode.
+        //   - drizzleScale > 1   : per-output reverse-map splatter
+        //                          onto an upsampled grid. v0 integer
+        //                          scales only.
+        //   - sigmaThreshold ≠ nil: two-pass Welford → clipped re-
+        //                          accumulate.
+        //   - else                : existing single-pass quality-
+        //                          weighted mean + optional multi-AP.
         let stacked: MTLTexture
-        if options.drizzleScale > 1 {
+        if options.useTwoStageQuality {
+            stacked = try await accumulateAlignedTwoStage(
+                indices: kept,
+                scores: scores,
+                shifts: referenceShifts,
+                apGrid: options.twoStageAPGrid,
+                keepFractionPerAP: options.twoStageKeepFraction
+                    ?? Double(options.keepPercent) / 100.0,
+                progress: progress
+            )
+        } else if options.drizzleScale > 1 {
             stacked = try await accumulateAlignedDrizzled(
                 indices: kept,
                 scores: scores,
@@ -897,6 +937,199 @@ private final class LuckyRunner {
         return device.makeTexture(descriptor: desc)!
     }
 
+    /// Two-stage quality accumulation (A.2).
+    ///
+    /// Pass 1 grades every kept frame on a per-AP-cell basis: each
+    /// AP cell gets its own LAPD-variance score per frame, written
+    /// to a flat buffer indexed `[frameIdx × apCount + apLinear]`.
+    ///
+    /// Between passes, on the CPU, we sort each AP's scores
+    /// descending and pick the top `keepFractionPerAP × keptCount`
+    /// frames per AP. The result is a `[apCount × frameCount]`
+    /// keep-mask buffer (1 = keep, 0 = drop).
+    ///
+    /// Pass 2 runs the per-AP-keep accumulator on every kept frame.
+    /// The kernel reads the mask at (apIndex(gid), currentFrame)
+    /// and only contributes when the mask is 1; a per-pixel weight
+    /// texture tracks how many frames each output pixel drew from.
+    /// Final divide yields the per-AP locally-best stack.
+    ///
+    /// Hard-edge AP boundaries in v0; B.2 GPU feathered blending
+    /// softens the transitions later. Multi-AP shifts are NOT
+    /// engaged on this path for v0 (combining per-AP grading and
+    /// per-AP local shifts is the C.3 "tiled" mode).
+    private func accumulateAlignedTwoStage(
+        indices: [Int],
+        scores: [Float],
+        shifts: [Int: SIMD2<Float>],
+        apGrid: Int,
+        keepFractionPerAP: Double,
+        progress: @escaping (LuckyStackProgress) -> Void
+    ) async throws -> MTLTexture {
+        let safeGrid = max(1, apGrid)
+        let apCount = safeGrid * safeGrid
+        let frameCount = indices.count
+        guard frameCount > 0 else {
+            return Self.makeAccumulator(device: device, w: W, h: H)
+        }
+
+        // Pass 1: per-AP grading.
+        // Buffer layout: [frameIdx × apCount + apLinear].
+        let perAPBytes = MemoryLayout<Float>.stride * apCount * frameCount
+        guard let perAPBuf = device.makeBuffer(length: perAPBytes, options: .storageModeShared) else {
+            throw NSError(domain: "Lucky", code: 10)
+        }
+        // Zero-init.
+        memset(perAPBuf.contents(), 0, perAPBytes)
+
+        progress(.stacking(done: 0, total: frameCount * 2))
+        for (i, idx) in indices.enumerated() {
+            stagingSemaphore.wait()
+            let slot = i % options.stagingPoolSize
+            let staging = stagingTextures[slot]
+            let frameTex = frameTextures[slot]
+
+            reader.withFrameBytes(at: idx) { ptr, _ in
+                staging.replace(
+                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
+                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
+                )
+            }
+            guard let cmd = queue.makeCommandBuffer() else {
+                stagingSemaphore.signal()
+                continue
+            }
+            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+
+            if let enc = cmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(perAPGradePSO)
+                enc.setTexture(frameTex, index: 0)
+                enc.setBuffer(perAPBuf, offset: 0, index: 0)
+                var p = PerAPQualityParamsCPU(
+                    frameIndex: UInt32(i),
+                    apGridSize: UInt32(safeGrid),
+                    pad0: 0, pad1: 0
+                )
+                enc.setBytes(&p, length: MemoryLayout<PerAPQualityParamsCPU>.stride, index: 1)
+                // 1D dispatch over `apCount` linear AP cells; the
+                // shader decodes (x, y) internally. Metal requires
+                // matching dimensionality between the threadgroup-
+                // position and thread-index attributes.
+                let tgSize = MTLSize(width: 256, height: 1, depth: 1)
+                let tgCount = MTLSize(width: apCount, height: 1, depth: 1)
+                enc.dispatchThreadgroups(tgCount, threadsPerThreadgroup: tgSize)
+                enc.endEncoding()
+            }
+            cmd.addCompletedHandler { [weak self] _ in self?.stagingSemaphore.signal() }
+            cmd.commit()
+
+            if i % 32 == 0 || i == frameCount - 1 {
+                progress(.stacking(done: i + 1, total: frameCount * 2))
+            }
+        }
+        for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
+        for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+
+        // CPU: per-AP top-k selection → keep mask.
+        let perAPRaw = perAPBuf.contents().assumingMemoryBound(to: Float.self)
+        var perAPScores = Array(UnsafeBufferPointer(start: perAPRaw, count: apCount * frameCount))
+        let perAPKeepCount = max(1, Int((Double(frameCount) * max(0.01, min(1.0, keepFractionPerAP))).rounded(.up)))
+
+        var keepMask = [Float](repeating: 0, count: apCount * frameCount)
+        for ap in 0..<apCount {
+            // Gather frame scores for this AP (frame-major buffer).
+            var frameAndScore: [(frameIdx: Int, score: Float)] = []
+            frameAndScore.reserveCapacity(frameCount)
+            for f in 0..<frameCount {
+                let bufIdx = f * apCount + ap
+                frameAndScore.append((f, perAPScores[bufIdx]))
+            }
+            frameAndScore.sort { $0.score > $1.score }
+            let kept = min(perAPKeepCount, frameAndScore.count)
+            for k in 0..<kept {
+                let f = frameAndScore[k].frameIdx
+                keepMask[ap * frameCount + f] = 1.0
+            }
+        }
+        _ = perAPScores  // silence unused warning
+
+        guard let keepBuf = device.makeBuffer(
+            bytes: keepMask,
+            length: MemoryLayout<Float>.stride * keepMask.count,
+            options: .storageModeShared
+        ) else {
+            throw NSError(domain: "Lucky", code: 11)
+        }
+
+        // Pass 2: per-AP keep accumulator + per-pixel weight tracking.
+        let accum = Self.makeAccumulator(device: device, w: W, h: H)
+        let wtTex = Self.makeFloatBuffer(device: device, w: W, h: H, format: .rgba32Float)
+
+        for (i, idx) in indices.enumerated() {
+            stagingSemaphore.wait()
+            let slot = i % options.stagingPoolSize
+            let staging = stagingTextures[slot]
+            let frameTex = frameTextures[slot]
+
+            reader.withFrameBytes(at: idx) { ptr, _ in
+                staging.replace(
+                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
+                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
+                )
+            }
+            guard let cmd = queue.makeCommandBuffer() else {
+                stagingSemaphore.signal()
+                continue
+            }
+            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+
+            let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
+            if let enc = cmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(perAPAccumPSO)
+                enc.setTexture(frameTex, index: 0)
+                enc.setTexture(accum, index: 1)
+                enc.setTexture(wtTex, index: 2)
+                enc.setBuffer(keepBuf, offset: 0, index: 0)
+                var p = LuckyPerAPParamsCPU(
+                    weight: 1.0,            // uniform within keep set; v1 adds per-AP quality weighting
+                    apGridSize: UInt32(safeGrid),
+                    frameIndex: UInt32(i),
+                    frameCount: UInt32(frameCount),
+                    shift: shift,
+                    pad0: SIMD2<Float>(0, 0)
+                )
+                enc.setBytes(&p, length: MemoryLayout<LuckyPerAPParamsCPU>.stride, index: 1)
+                let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: perAPAccumPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            cmd.addCompletedHandler { [weak self] _ in self?.stagingSemaphore.signal() }
+            cmd.commit()
+
+            if i % 32 == 0 || i == frameCount - 1 {
+                progress(.stacking(done: frameCount + i + 1, total: frameCount * 2))
+            }
+        }
+        for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
+        for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+
+        // Final per-pixel divide.
+        if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
+            enc.setComputePipelineState(perPixelNormPSO)
+            enc.setTexture(accum, index: 0)
+            enc.setTexture(wtTex, index: 1)
+            var p = LuckyDivideParamsCPU(weightFloor: 1e-6)
+            enc.setBytes(&p, length: MemoryLayout<LuckyDivideParamsCPU>.stride, index: 0)
+            let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: perPixelNormPSO)
+            enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+            enc.endEncoding()
+            cmd.commit()
+            cmd.waitUntilCompleted()
+        }
+
+        return accum
+    }
+
     /// Drizzle accumulation (Fruchter & Hook 2002, B.6).
     ///
     /// Allocates an upsampled accumulator + per-pixel weight texture
@@ -1281,6 +1514,24 @@ private func nextPow2(_ n: Int) -> Int {
 
 private struct LuckyNormalizeParams {
     var invTotalWeight: Float
+}
+
+// MARK: - Two-stage quality CPU param structs (A.2)
+
+private struct PerAPQualityParamsCPU {
+    var frameIndex: UInt32
+    var apGridSize: UInt32
+    var pad0: UInt32
+    var pad1: UInt32
+}
+
+private struct LuckyPerAPParamsCPU {
+    var weight: Float
+    var apGridSize: UInt32
+    var frameIndex: UInt32
+    var frameCount: UInt32
+    var shift: SIMD2<Float>
+    var pad0: SIMD2<Float>
 }
 
 // MARK: - Drizzle CPU param struct (B.6)
