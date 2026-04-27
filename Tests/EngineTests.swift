@@ -584,6 +584,154 @@ struct FitsTests {
     }
 }
 
+// MARK: - Drizzle splat math
+
+@Suite("Drizzle — splat + finalize")
+struct DrizzleTests {
+
+    @Test("makeAccumulator scales output dims correctly")
+    func accumulatorDims() {
+        let a = Drizzle.makeAccumulator(inputWidth: 10, inputHeight: 6, scale: 2)
+        #expect(a.outWidth  == 20)
+        #expect(a.outHeight == 12)
+        #expect(a.sum.count == 240)
+        #expect(a.weight.count == 240)
+    }
+
+    @Test("scale=1, pixfrac=1, no shift = identity")
+    func identityCase() {
+        // scale 1 + pixfrac 1 + no shift = each input pixel exactly fills
+        // the corresponding output pixel.
+        let input: [Float] = [1, 2, 3, 4]
+        var a = Drizzle.makeAccumulator(inputWidth: 2, inputHeight: 2, scale: 1)
+        Drizzle.splat(&a, input: input, inputWidth: 2, inputHeight: 2,
+                      pixfrac: 1.0, shiftX: 0, shiftY: 0)
+        let out = Drizzle.finalize(a)
+        for (a, b) in zip(out, input) {
+            #expect(abs(a - b) < 1e-5)
+        }
+    }
+
+    @Test("2× drizzle with pixfrac=1 produces 2×2 block of input value")
+    func twoXFullCoverage() {
+        // 1×1 input, scale=2, pixfrac=1 → drop covers a full 2×2 region.
+        let input: [Float] = [5.0]
+        var a = Drizzle.makeAccumulator(inputWidth: 1, inputHeight: 1, scale: 2)
+        Drizzle.splat(&a, input: input, inputWidth: 1, inputHeight: 1,
+                      pixfrac: 1.0)
+        let out = Drizzle.finalize(a)
+        // Every output pixel weighted by area 1 → result = 5.0.
+        for v in out {
+            #expect(abs(v - 5.0) < 1e-5)
+        }
+    }
+
+    @Test("2× drizzle with pixfrac=0.5 covers a 1×1 inner block")
+    func smallPixfrac() {
+        // 1×1 input value 1.0, scale=2, pixfrac=0.5 → drop is 1×1 in
+        // output coords centred at (1, 1). Each of the 4 output pixels
+        // gets a 0.5×0.5 = 0.25 overlap; sum = weight × 1.0; result = 1.0.
+        let input: [Float] = [1.0]
+        var a = Drizzle.makeAccumulator(inputWidth: 1, inputHeight: 1, scale: 2)
+        Drizzle.splat(&a, input: input, inputWidth: 1, inputHeight: 1,
+                      pixfrac: 0.5)
+        let out = Drizzle.finalize(a)
+        // All 4 output pixels covered with weight 0.25 each → result 1.0.
+        for v in out {
+            #expect(abs(v - 1.0) < 1e-5)
+        }
+        // Total weight should be exactly drop area (1 × 1 = 1.0).
+        let totalWeight = a.weight.reduce(0, +)
+        #expect(abs(totalWeight - 1.0) < 1e-5)
+    }
+
+    @Test("zero pixfrac is a no-op (no contribution)")
+    func zeroPixfracNoOp() {
+        let input: [Float] = [1.0, 2.0, 3.0, 4.0]
+        var a = Drizzle.makeAccumulator(inputWidth: 2, inputHeight: 2, scale: 2)
+        Drizzle.splat(&a, input: input, inputWidth: 2, inputHeight: 2,
+                      pixfrac: 0)
+        let out = Drizzle.finalize(a)
+        // Nothing was deposited → all pixels should be 0.
+        #expect(out.allSatisfy { $0 == 0 })
+    }
+
+    @Test("pixels with value 0 are skipped (perf shortcut)")
+    func zeroValuesSkipped() {
+        // Sparse input: only the centre pixel has a value. Verify the
+        // surrounding output pixels (well outside the drop) stay at 0.
+        var input = [Float](repeating: 0, count: 25)
+        input[12] = 10.0   // centre
+        var a = Drizzle.makeAccumulator(inputWidth: 5, inputHeight: 5, scale: 2)
+        Drizzle.splat(&a, input: input, inputWidth: 5, inputHeight: 5,
+                      pixfrac: 1.0)
+        let out = Drizzle.finalize(a)
+        // Far corner of the output grid must stay 0 — the drop centred
+        // at (5.5, 5.5) covers only pixels [5..6] × [5..6].
+        #expect(out[0] == 0)
+    }
+
+    @Test("multiple frames with shifts accumulate correctly")
+    func multiFrameStacking() {
+        // Two identical 1×1 inputs, value 1.0. First splat at no shift,
+        // second at shift (0.5, 0). Both deposits land in the same 2×2
+        // output region (since pixfrac=1.0 covers the whole upsampled
+        // block) but the shifted one occupies the centre. Finalised
+        // output should still be 1.0 everywhere it has weight.
+        let input: [Float] = [1.0]
+        var a = Drizzle.makeAccumulator(inputWidth: 1, inputHeight: 1, scale: 2)
+        Drizzle.splat(&a, input: input, inputWidth: 1, inputHeight: 1,
+                      pixfrac: 1.0, shiftX: 0, shiftY: 0)
+        Drizzle.splat(&a, input: input, inputWidth: 1, inputHeight: 1,
+                      pixfrac: 1.0, shiftX: 0.5, shiftY: 0)
+        let out = Drizzle.finalize(a)
+        for v in out {
+            // Wherever weight exists, value averages back to 1.0.
+            #expect(abs(v - 1.0) < 1e-5)
+        }
+    }
+
+    @Test("pixels outside the input bounds get zero weight (no spill)")
+    func outOfBoundsHandling() {
+        // Splat with a large shift so most drops fall outside the
+        // output buffer. The function must silently clip; no crash.
+        let input: [Float] = [1.0, 2.0, 3.0, 4.0]
+        var a = Drizzle.makeAccumulator(inputWidth: 2, inputHeight: 2, scale: 2)
+        Drizzle.splat(&a, input: input, inputWidth: 2, inputHeight: 2,
+                      pixfrac: 1.0, shiftX: 100, shiftY: 100)
+        let out = Drizzle.finalize(a)
+        #expect(out.allSatisfy { $0 == 0 })
+    }
+
+    @Test("non-finite shift is a no-op")
+    func nonFiniteShiftNoOp() {
+        let input: [Float] = [5.0]
+        var a = Drizzle.makeAccumulator(inputWidth: 1, inputHeight: 1, scale: 2)
+        Drizzle.splat(&a, input: input, inputWidth: 1, inputHeight: 1,
+                      pixfrac: 1.0, shiftX: .nan, shiftY: 0)
+        let out = Drizzle.finalize(a)
+        #expect(out.allSatisfy { $0 == 0 })
+    }
+
+    @Test("finalize divides sum by weight per pixel")
+    func finalizeMath() {
+        // Hand-build an accumulator: 2×2 output where each pixel got
+        // sum=12, weight=4. After finalize each pixel = 3.
+        var a = Drizzle.makeAccumulator(inputWidth: 1, inputHeight: 1, scale: 2)
+        for i in 0..<a.sum.count {
+            a.sum[i]    = 12
+            a.weight[i] = 4
+        }
+        let out = Drizzle.finalize(a)
+        for v in out { #expect(v == 3.0) }
+    }
+
+    @Test("default pixfrac matches BiggSky guidance (0.7)")
+    func defaultPixfracIsBiggSkyAligned() {
+        #expect(Drizzle.defaultPixfrac == 0.7)
+    }
+}
+
 // MARK: - AP feather weights
 
 @Suite("APFeather — raised-cosine blend weights")
