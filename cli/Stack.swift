@@ -21,6 +21,7 @@ enum Stack {
         var keepPercents: [Int] = [25]
         var metricsPath: String?
         var quiet = false
+        var sigmaThreshold: Float?
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -46,6 +47,15 @@ enum Stack {
                 }
                 metricsPath = args[i + 1]
                 i += 2
+            case "--sigma":
+                guard i + 1 < args.count, let v = Float(args[i + 1]),
+                      v.isFinite, v > 0
+                else {
+                    cliStderr("stack: --sigma requires a positive number (e.g. 2.5 for AS!4 default)")
+                    return 64
+                }
+                sigmaThreshold = v
+                i += 2
             case "--quiet", "-q":
                 quiet = true
                 i += 1
@@ -67,7 +77,7 @@ enum Stack {
 
         guard let input = inputPath, let output = outputPath else {
             cliStderr("stack: missing input or output path")
-            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--metrics file.json] [--quiet]")
+            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--sigma N] [--metrics file.json] [--quiet]")
             return 64
         }
 
@@ -116,6 +126,7 @@ enum Stack {
         for plan in outputPlan {
             var options = LuckyStackOptions()
             options.keepPercent = plan.percent
+            options.sigmaThreshold = sigmaThreshold
 
             let started = Date()
             if !quiet, keepPercents.count > 1 {

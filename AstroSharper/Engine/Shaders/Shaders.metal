@@ -722,6 +722,126 @@ kernel void lucky_accumulate_local(
     accum.write(a + v * p.weight, gid);
 }
 
+// MARK: - Sigma-clipped stacking (B.1)
+//
+// Two-pass robust outlier rejection. Cosmic rays, hot pixels, the
+// occasional satellite trail or wind-jolted frame all produce per-
+// pixel outliers that contaminate a plain weighted mean. Sigma-
+// clipping rejects them.
+//
+//   Pass 1 (Welford): for each kept frame, update a per-pixel
+//     running mean μ and sum-of-squared-deviations M2 in two rgba32-
+//     Float scratch textures. After N frames, the per-pixel
+//     population variance σ² = M2 / N.
+//
+//   Pass 2 (clipped accumulate): for each frame, sample v at the
+//     same shift used in pass 1; per channel, include v in the
+//     output only when (v - μ)² ≤ k²·σ². Quality-weighted just like
+//     the existing accumulator, but a per-pixel weight texture
+//     tracks how many frames actually contributed.
+//
+// Final normalize: out = clippedAccum / clippedWeight per pixel,
+// clamped to [0, 1] for display. Pixels never written to (extreme
+// edge case where every frame's contribution clipped) fall back to
+// 0 via the tiny weightFloor epsilon.
+//
+// CPU reference: Engine/Pipeline/SigmaClip.swift::clippedMean.
+
+struct LuckyWelfordParams {
+    uint   frameNumber;   // 1-based count of this Welford step
+    float  pad0;
+    float2 shift;
+};
+
+kernel void lucky_welford_step(
+    texture2d<float, access::sample>     frame   [[texture(0)]],
+    texture2d<float, access::read_write> meanTex [[texture(1)]],
+    texture2d<float, access::read_write> m2Tex   [[texture(2)]],
+    constant LuckyWelfordParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint W = meanTex.get_width(), H = meanTex.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float2 uv = (float2(gid) + 0.5 - p.shift) / float2(W, H);
+    float4 v = frame.sample(s, uv);
+
+    float4 mOld  = meanTex.read(gid);
+    float4 m2Old = m2Tex.read(gid);
+    float n = float(p.frameNumber);
+    float4 delta = v - mOld;
+    float4 mNew  = mOld + delta / n;
+    float4 dn    = v - mNew;
+    float4 m2New = m2Old + delta * dn;
+    meanTex.write(mNew, gid);
+    m2Tex.write(m2New, gid);
+}
+
+struct LuckyClipParams {
+    float  weight;
+    float  sigmaThreshold;
+    uint   frameCount;       // total frames in pass 1 — σ² = M2 / N
+    float  pad0;
+    float2 shift;
+    float2 pad1;
+};
+
+kernel void lucky_accumulate_clipped(
+    texture2d<float, access::sample>     frame   [[texture(0)]],
+    texture2d<float, access::read>       meanTex [[texture(1)]],
+    texture2d<float, access::read>       m2Tex   [[texture(2)]],
+    texture2d<float, access::read_write> accum   [[texture(3)]],
+    texture2d<float, access::read_write> wtTex   [[texture(4)]],
+    constant LuckyClipParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint W = accum.get_width(), H = accum.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float2 uv = (float2(gid) + 0.5 - p.shift) / float2(W, H);
+    float4 v = frame.sample(s, uv);
+
+    float4 m  = meanTex.read(gid);
+    float4 m2 = m2Tex.read(gid);
+    float n = max(1.0, float(p.frameCount));
+    float4 var = m2 / n;
+    // Per-channel cutoff: (v - m)² ≤ k²·σ²
+    float kSq = p.sigmaThreshold * p.sigmaThreshold;
+    float4 cutoffSq = kSq * var;
+    float4 dev = v - m;
+    float4 devSq = dev * dev;
+    // mask = 1 where keep (devSq ≤ cutoffSq), 0 where clip. step()
+    // returns 1 at the boundary, so a sample exactly k·σ away is kept.
+    // When σ² = 0 (all samples identical), cutoffSq = 0; only samples
+    // exactly equal to m pass — that's the right behaviour for a
+    // degenerate-variance pixel.
+    float4 mask = step(devSq, cutoffSq);
+
+    float4 contribution = mask * v * p.weight;
+    float4 weightAdd    = mask * p.weight;
+    accum.write(accum.read(gid) + contribution, gid);
+    wtTex.write(wtTex.read(gid) + weightAdd, gid);
+}
+
+struct LuckyDivideParams {
+    float weightFloor;   // tiny epsilon to avoid /0 on never-written pixels
+};
+
+kernel void lucky_normalize_per_pixel(
+    texture2d<float, access::read_write> accum [[texture(0)]],
+    texture2d<float, access::read>       wtTex [[texture(1)]],
+    constant LuckyDivideParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint W = accum.get_width(), H = accum.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+    float4 a = accum.read(gid);
+    float4 w = wtTex.read(gid);
+    float4 wSafe = max(w, float4(p.weightFloor));
+    float4 norm = a / wSafe;
+    accum.write(float4(clamp(norm.rgb, 0.0, 1.0), 1.0), gid);
+}
+
 // MARK: - Stack accumulation (running average)
 
 struct StackParams {

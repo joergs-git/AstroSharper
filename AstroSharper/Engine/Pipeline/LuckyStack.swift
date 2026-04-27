@@ -79,6 +79,17 @@ struct LuckyStackOptions {
     /// When set, the stacked output is post-processed through the standard
     /// pipeline (sharpen + wavelet + tone-curve) before being written.
     var bakeIn: LuckyStackBakeIn? = nil
+
+    /// Sigma-clipped outlier rejection during accumulation. nil = the
+    /// existing single-pass quality-weighted mean; non-nil triggers a
+    /// two-pass Welford → clipped re-accumulate path that rejects
+    /// per-pixel samples > k·σ from the running mean. AS!4 ships a
+    /// k=2.5 default; values below 1.5 reject too aggressively, above
+    /// 3.5 nothing meaningful gets clipped. Pass-1 + pass-2 doubles
+    /// the disk read and GPU time of the accumulation phase.
+    ///
+    /// CPU reference: Engine/Pipeline/SigmaClip.swift.
+    var sigmaThreshold: Float? = nil
 }
 
 enum LuckyStackProgress {
@@ -170,6 +181,10 @@ private final class LuckyRunner {
     let normalizePSO: MTLComputePipelineState
     let apShiftPSO: MTLComputePipelineState
     let accumLocalPSO: MTLComputePipelineState
+    // B.1 sigma-clip kernels — only built when options.sigmaThreshold is set.
+    lazy var welfordPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_welford_step")
+    lazy var clippedAccumPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_accumulate_clipped")
+    lazy var perPixelNormPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_normalize_per_pixel")
 
     let W: Int, H: Int
     let bytesPerPlane: Int
@@ -361,16 +376,31 @@ private final class LuckyRunner {
             referenceTex = refTex
         }
 
-        // Stage 3: weighted accumulation. Multi-AP refinement is conditional
-        // on options.useMultiAP and only fires in Scientific mode (the runner
-        // checks).
-        let stacked = try await accumulateAligned(
-            indices: kept,
-            scores: scores,
-            shifts: referenceShifts,
-            referenceTex: referenceTex,
-            progress: progress
-        )
+        // Stage 3: weighted accumulation. Two paths:
+        //   - sigmaThreshold == nil: existing single-pass quality-weighted
+        //     mean + optional multi-AP local refinement.
+        //   - sigmaThreshold != nil: two-pass Welford → clipped accumulate,
+        //     rejecting per-pixel samples > k·σ from the running mean.
+        //     Multi-AP refinement is OFF in this path for v0; the per-AP
+        //     work meets sigma-clip in a later block.
+        let stacked: MTLTexture
+        if let sigma = options.sigmaThreshold {
+            stacked = try await accumulateAlignedSigmaClipped(
+                indices: kept,
+                scores: scores,
+                shifts: referenceShifts,
+                sigmaThreshold: sigma,
+                progress: progress
+            )
+        } else {
+            stacked = try await accumulateAligned(
+                indices: kept,
+                scores: scores,
+                shifts: referenceShifts,
+                referenceTex: referenceTex,
+                progress: progress
+            )
+        }
 
         _ = referenceIndex
         _ = outputSize
@@ -821,6 +851,179 @@ private final class LuckyRunner {
         return device.makeTexture(descriptor: desc)!
     }
 
+    /// Allocate a write-able floating-point texture matching the
+    /// stack's frame dimensions. Used by the sigma-clipped path for
+    /// the Welford state (rgba32Float for precision on the M2
+    /// accumulator) and the clipped-pass weight accumulator.
+    static func makeFloatBuffer(
+        device: MTLDevice,
+        w: Int, h: Int,
+        format: MTLPixelFormat
+    ) -> MTLTexture {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: format, width: w, height: h, mipmapped: false
+        )
+        desc.storageMode = .private
+        desc.usage = [.shaderRead, .shaderWrite]
+        return device.makeTexture(descriptor: desc)!
+    }
+
+    /// Two-pass sigma-clipped accumulation.
+    ///
+    /// Pass 1 builds a per-pixel running (mean, M2) via Welford. Pass
+    /// 2 re-reads each kept frame, samples at the same shift, and
+    /// only adds the sample to the output when its per-channel
+    /// deviation is within `sigmaThreshold · σ` of the running mean.
+    /// A per-pixel weight texture tracks how many frames actually
+    /// contributed; the final pass divides accum by weight per pixel.
+    ///
+    /// Multi-AP refinement is OFF in this path for v0 — combining
+    /// sigma-clip with per-AP local quality lands in a later block.
+    /// Quality-weighted contributions are preserved (`qualityWeight`
+    /// shaping mirrors the standard accumulator).
+    private func accumulateAlignedSigmaClipped(
+        indices: [Int],
+        scores: [Float],
+        shifts: [Int: SIMD2<Float>],
+        sigmaThreshold: Float,
+        progress: @escaping (LuckyStackProgress) -> Void
+    ) async throws -> MTLTexture {
+        // Allocate scratch buffers. mean / M2 stay in rgba32Float for
+        // precision on the squared-deviation accumulator; the actual
+        // accum + weightTex match the existing rgba16Float / rgba32Float
+        // pipeline shape so the final divide writes back into the
+        // same accum that callers expect to receive.
+        let meanTex = Self.makeFloatBuffer(device: device, w: W, h: H, format: .rgba32Float)
+        let m2Tex   = Self.makeFloatBuffer(device: device, w: W, h: H, format: .rgba32Float)
+        let accum   = Self.makeAccumulator(device: device, w: W, h: H)
+        let wtTex   = Self.makeFloatBuffer(device: device, w: W, h: H, format: .rgba32Float)
+
+        // ---- Pass 1: Welford ----
+        progress(.stacking(done: 0, total: indices.count * 2))
+        for (i, idx) in indices.enumerated() {
+            stagingSemaphore.wait()
+            let slot = i % options.stagingPoolSize
+            let staging = stagingTextures[slot]
+            let frameTex = frameTextures[slot]
+
+            reader.withFrameBytes(at: idx) { ptr, _ in
+                staging.replace(
+                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
+                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
+                )
+            }
+            guard let cmd = queue.makeCommandBuffer() else {
+                stagingSemaphore.signal()
+                continue
+            }
+            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+
+            let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
+            if let enc = cmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(welfordPSO)
+                enc.setTexture(frameTex, index: 0)
+                enc.setTexture(meanTex, index: 1)
+                enc.setTexture(m2Tex, index: 2)
+                var p = LuckyWelfordParamsCPU(
+                    frameNumber: UInt32(i + 1),
+                    pad0: 0,
+                    shift: shift
+                )
+                enc.setBytes(&p, length: MemoryLayout<LuckyWelfordParamsCPU>.stride, index: 0)
+                let (tgC, tgS) = dispatchThreadgroups(for: meanTex, pso: welfordPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            cmd.addCompletedHandler { [weak self] _ in self?.stagingSemaphore.signal() }
+            cmd.commit()
+
+            if i % 32 == 0 || i == indices.count - 1 {
+                progress(.stacking(done: i + 1, total: indices.count * 2))
+            }
+        }
+        // Drain in-flight slots so the Welford state is fully realised.
+        for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
+        for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+
+        // ---- Pass 2: Clipped accumulate ----
+        let keptScores = indices.map { scores[$0] }
+        let lo = keptScores.min() ?? 0
+        let hi = keptScores.max() ?? 1
+        let span = max(1e-6, hi - lo)
+        @inline(__always) func qualityWeight(_ score: Float) -> Float {
+            let t = (score - lo) / span
+            let shaped = t * t
+            return 0.05 + shaped * 1.45
+        }
+
+        let frameCount = UInt32(indices.count)
+        for (i, idx) in indices.enumerated() {
+            stagingSemaphore.wait()
+            let slot = i % options.stagingPoolSize
+            let staging = stagingTextures[slot]
+            let frameTex = frameTextures[slot]
+
+            reader.withFrameBytes(at: idx) { ptr, _ in
+                staging.replace(
+                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
+                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
+                )
+            }
+            guard let cmd = queue.makeCommandBuffer() else {
+                stagingSemaphore.signal()
+                continue
+            }
+            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+
+            let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
+            let weight = qualityWeight(scores[idx])
+            if let enc = cmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(clippedAccumPSO)
+                enc.setTexture(frameTex, index: 0)
+                enc.setTexture(meanTex, index: 1)
+                enc.setTexture(m2Tex, index: 2)
+                enc.setTexture(accum, index: 3)
+                enc.setTexture(wtTex, index: 4)
+                var p = LuckyClipParamsCPU(
+                    weight: weight,
+                    sigmaThreshold: sigmaThreshold,
+                    frameCount: frameCount,
+                    pad0: 0,
+                    shift: shift,
+                    pad1: SIMD2<Float>(0, 0)
+                )
+                enc.setBytes(&p, length: MemoryLayout<LuckyClipParamsCPU>.stride, index: 0)
+                let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: clippedAccumPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            cmd.addCompletedHandler { [weak self] _ in self?.stagingSemaphore.signal() }
+            cmd.commit()
+
+            if i % 32 == 0 || i == indices.count - 1 {
+                progress(.stacking(done: indices.count + i + 1, total: indices.count * 2))
+            }
+        }
+        for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
+        for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+
+        // ---- Pass 3: per-pixel divide ----
+        if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
+            enc.setComputePipelineState(perPixelNormPSO)
+            enc.setTexture(accum, index: 0)
+            enc.setTexture(wtTex, index: 1)
+            var p = LuckyDivideParamsCPU(weightFloor: 1e-6)
+            enc.setBytes(&p, length: MemoryLayout<LuckyDivideParamsCPU>.stride, index: 0)
+            let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: perPixelNormPSO)
+            enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+            enc.endEncoding()
+            cmd.commit()
+            cmd.waitUntilCompleted()
+        }
+
+        return accum
+    }
+
     private func topNIndices(scores: [Float], percent: Int) -> [Int] {
         topNIndices(scores: scores, count: max(1, scores.count * percent / 100))
     }
@@ -945,6 +1148,32 @@ private func nextPow2(_ n: Int) -> Int {
 
 private struct LuckyNormalizeParams {
     var invTotalWeight: Float
+}
+
+// MARK: - Sigma-clipped CPU param structs (B.1)
+//
+// Exactly mirror the LuckyWelfordParams / LuckyClipParams /
+// LuckyDivideParams structs in Shaders.metal. Keep field order, sizes,
+// and pad slots identical so the GPU sees the same byte layout the
+// CPU writes via setBytes().
+
+private struct LuckyWelfordParamsCPU {
+    var frameNumber: UInt32
+    var pad0: Float
+    var shift: SIMD2<Float>
+}
+
+private struct LuckyClipParamsCPU {
+    var weight: Float
+    var sigmaThreshold: Float
+    var frameCount: UInt32
+    var pad0: Float
+    var shift: SIMD2<Float>
+    var pad1: SIMD2<Float>
+}
+
+private struct LuckyDivideParamsCPU {
+    var weightFloor: Float
 }
 
 // MARK: - Phase correlation (CPU FFT on small luma buffers)
