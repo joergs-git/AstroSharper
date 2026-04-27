@@ -119,9 +119,10 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     private var afterTex: MTLTexture?
     private var currentFileID: UUID?
 
-    // HUD support — sharpness probe (called on every loaded preview frame)
-    // and SER distribution scanner (kicked once per opened SER file).
-    private let sharpnessProbe = SharpnessProbe.shared
+    // HUD support — opt-in SER distribution scanner only. The previous
+    // per-frame sharpness probe was removed in favour of explicit "Calculate
+    // Video Quality" because at full source resolution it spent 5-30 ms on
+    // every file/frame switch and made browsing large SERs feel laggy.
     private let qualityScanner = SerQualityScanner()
 
     /// Texture pixel dimensions of the currently-shown preview, exposed so
@@ -430,9 +431,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             // Skip the on-disk histogram path for any frame-sequence file —
             // Histogram.compute reads via ImageIO which doesn't grok SER/AVI.
             let hist = (isSER || isAVI) ? [] : Histogram.compute(url: url)
-            // Sharpness for the displayed frame — runs on this background
-            // queue so the main thread stays responsive even on 4K SERs.
-            let sharpness: Float? = tex.map { self.sharpnessProbe.compute(texture: $0) }
+            // Sharpness probe deliberately NOT auto-run on file open — at full
+            // source resolution it adds 5-30 ms per click, which becomes
+            // unbearable when the user is fanning through a folder of large
+            // SERs. The "Calculate Video Quality" button below the HUD is the
+            // explicit opt-in that runs the per-frame probe + distribution.
             DispatchQueue.main.async {
                 self.beforeTex = tex
                 self.afterTex = nil
@@ -442,7 +445,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 if let dim = tex.map({ ($0.width, $0.height) }) {
                     self.app.previewStats.dimensions = dim
                 }
-                self.app.previewStats.currentSharpness = sharpness
+                self.app.previewStats.currentSharpness = nil
                 self.view?.needsDisplay = true
                 self.reprocess()
             }
@@ -505,9 +508,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             if flipped, let t = tex {
                 tex = RotateTexture.rotate180(t, device: MetalDevice.shared.device)
             }
-            // Probe sharpness on the same background queue so the HUD updates
-            // in lock-step with what the user sees.
-            let sharpness: Float? = tex.map { self.sharpnessProbe.compute(texture: $0) }
+            // Same rationale as `loadCurrentFile`: no auto-probe on scrub.
+            // Holding next/prev or dragging the scrubber across thousands of
+            // frames must stay snappy. The HUD's currentSharpness goes blank
+            // during scrub; the "Calculate Video Quality" button populates
+            // the sampled distribution when the user opts in.
             DispatchQueue.main.async {
                 guard let tex else { return }
                 // Drop the stale sharpened texture so the raw frame paints
@@ -519,7 +524,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 self.afterTex = nil
                 self.beforeTex = tex
                 self.app.previewStats.currentFrame = frameIndex + 1
-                self.app.previewStats.currentSharpness = sharpness
+                self.app.previewStats.currentSharpness = nil
                 self.view?.needsDisplay = true
                 self.reprocess()
             }
