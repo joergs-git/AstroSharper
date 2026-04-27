@@ -584,6 +584,144 @@ struct FitsTests {
     }
 }
 
+// MARK: - Bilinear sub-pixel shift
+
+@Suite("BilinearShift — sub-pixel channel translation")
+struct BilinearShiftTests {
+
+    @Test("identity shift returns input unchanged")
+    func identityShift() {
+        let pixels: [Float] = [0.1, 0.5, 0.9,
+                               0.3, 0.7, 0.2,
+                               0.4, 0.8, 0.6]
+        let out = BilinearShift.apply(
+            channel: pixels, width: 3, height: 3,
+            shift: AlignShift(dx: 0, dy: 0)
+        )
+        #expect(out == pixels)
+    }
+
+    @Test("integer +1 right shift moves columns right and zero-fills first column")
+    func integerRightShift() {
+        let pixels: [Float] = [1, 2, 3,
+                               4, 5, 6,
+                               7, 8, 9]
+        let out = BilinearShift.apply(
+            channel: pixels, width: 3, height: 3,
+            shift: AlignShift(dx: 1, dy: 0)
+        )
+        // out[0] should be 0 (came from x = -1, OOB).
+        // out[1] should be 1 (came from x = 0).
+        // out[2] should be 2 (came from x = 1).
+        #expect(out == [0, 1, 2,
+                        0, 4, 5,
+                        0, 7, 8])
+    }
+
+    @Test("integer +1 down shift moves rows down and zero-fills first row")
+    func integerDownShift() {
+        let pixels: [Float] = [1, 2, 3,
+                               4, 5, 6,
+                               7, 8, 9]
+        let out = BilinearShift.apply(
+            channel: pixels, width: 3, height: 3,
+            shift: AlignShift(dx: 0, dy: 1)
+        )
+        // First row reads from y = -1 → 0.
+        // Second row reads from y = 0 → original first row.
+        #expect(out == [0, 0, 0,
+                        1, 2, 3,
+                        4, 5, 6])
+    }
+
+    @Test("half-pixel shift averages neighbors (bilinear math)")
+    func halfPixelShift() {
+        // 2 columns of distinct values: [10, 20] across the width.
+        // Half-pixel shift of dx = 0.5 should produce out[x] read from
+        // src x = x - 0.5, lerp of neighbours.
+        // For x = 0: srcX = -0.5; floor = -1; OOB samples → 0; fx = 0.5.
+        //   v00=v10 = 0,0 → 0 contribution; v01=v11 use OOB → 0
+        //   Wait, this depends on the column. Let me actually compute:
+        //   For x=0, srcX = -0.5, x0 = -1, x1 = 0, fx = 0.5
+        //   v00 (x0=-1) = 0, v10 (x1=0) = 10
+        //   top = 0 * 0.5 + 10 * 0.5 = 5
+        //   For x=1, srcX = 0.5, x0=0, x1=1, fx=0.5
+        //   v00 = 10, v10 = 20
+        //   top = 10 * 0.5 + 20 * 0.5 = 15
+        let pixels: [Float] = [10, 20]
+        let out = BilinearShift.apply(
+            channel: pixels, width: 2, height: 1,
+            shift: AlignShift(dx: 0.5, dy: 0)
+        )
+        #expect(abs(out[0] -  5.0) < 1e-5)
+        #expect(abs(out[1] - 15.0) < 1e-5)
+    }
+
+    @Test("uniform input is preserved on interior pixels for sub-pixel shifts")
+    func uniformIsPreservedInterior() {
+        // Use a 5×5 buffer so the centre pixel's bilinear neighbours
+        // all stay in-bounds for shifts up to ~1 px in either axis.
+        // Larger shifts can pull OOB samples into the centre's lerp
+        // and bleed the zero-pad floor inward — that's correct
+        // behaviour, just out of scope for this "interior pixel is
+        // preserved" check.
+        let pixels: [Float] = Array(repeating: 0.42, count: 25)
+        for s in [(0.3, 0.7), (-0.4, 0.2), (0.8, -0.6)] {
+            let out = BilinearShift.apply(
+                channel: pixels, width: 5, height: 5,
+                shift: AlignShift(dx: Float(s.0), dy: Float(s.1))
+            )
+            #expect(abs(out[12] - 0.42) < 1e-5)  // centre pixel of 5×5
+        }
+    }
+
+    @Test("huge shift produces all-zero output")
+    func hugeShiftAllZero() {
+        let pixels: [Float] = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        let out = BilinearShift.apply(
+            channel: pixels, width: 3, height: 3,
+            shift: AlignShift(dx: 100, dy: 100)
+        )
+        #expect(out.allSatisfy { $0 == 0 })
+    }
+
+    @Test("non-finite shift returns input unchanged")
+    func nonFiniteShiftPassThrough() {
+        let pixels: [Float] = [1, 2, 3, 4]
+        let nan = BilinearShift.apply(
+            channel: pixels, width: 2, height: 2,
+            shift: AlignShift(dx: .nan, dy: 0)
+        )
+        let inf = BilinearShift.apply(
+            channel: pixels, width: 2, height: 2,
+            shift: AlignShift(dx: 0, dy: .infinity)
+        )
+        #expect(nan == pixels)
+        #expect(inf == pixels)
+    }
+
+    @Test("negative shift moves content the other way")
+    func negativeShift() {
+        let pixels: [Float] = [1, 2, 3]
+        // dx = -1 → out[x] = in[x + 1]: shifts left.
+        let out = BilinearShift.apply(
+            channel: pixels, width: 3, height: 1,
+            shift: AlignShift(dx: -1, dy: 0)
+        )
+        #expect(out == [2, 3, 0])
+    }
+
+    @Test("output buffer always matches input size")
+    func sizePreserved() {
+        let pixels: [Float] = Array(repeating: 1, count: 10 * 7)
+        let out = BilinearShift.apply(
+            channel: pixels, width: 10, height: 7,
+            shift: AlignShift(dx: 1.5, dy: -0.7)
+        )
+        #expect(out.count == pixels.count)
+    }
+}
+
 // MARK: - AP planner
 
 @Suite("APPlanner — adaptive alignment-point mask")
