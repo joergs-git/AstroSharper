@@ -584,6 +584,150 @@ struct FitsTests {
     }
 }
 
+// MARK: - Saturn auto-bbox ROI
+
+@Suite("SaturnROI — bbox of bright pixels for ringed bodies")
+struct SaturnROITests {
+
+    private static func buffer(width: Int, height: Int, _ f: (Int, Int) -> Float) -> [Float] {
+        var out = [Float](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                out[y * width + x] = f(x, y)
+            }
+        }
+        return out
+    }
+
+    @Test("single bright pixel becomes a tight bbox + padding")
+    func singlePixelBbox() {
+        var buf = Self.buffer(width: 32, height: 32) { _, _ in 0 }
+        buf[16 * 32 + 16] = 1.0
+        let roi = SaturnROI.bestROI(
+            luma: buf, width: 32, height: 32,
+            brightnessThreshold: 0.5,
+            padding: 4
+        )
+        // Pixel at (16, 16) → bbox (16..16) → with 4px padding (12..20).
+        #expect(roi?.x == 12)
+        #expect(roi?.y == 12)
+        #expect(roi?.width  == 9)   // 20-12+1
+        #expect(roi?.height == 9)
+    }
+
+    @Test("bright disc bbox covers the disc")
+    func brightDiscBbox() {
+        let W = 64, H = 64
+        let cx = 31.5, cy = 31.5, R: Double = 12
+        let buf = Self.buffer(width: W, height: H) { x, y in
+            let dx = Double(x) - cx, dy = Double(y) - cy
+            return (dx * dx + dy * dy) <= R * R ? 1.0 : 0.0
+        }
+        let roi = SaturnROI.bestROI(
+            luma: buf, width: W, height: H,
+            brightnessThreshold: 0.5,
+            padding: 0
+        )
+        #expect(roi != nil)
+        // Disc centred at (31.5, 31.5) radius 12 → bbox roughly
+        // [20..43] × [20..43] (24×24 with discrete sampling).
+        if let r = roi {
+            #expect(r.x >= 18 && r.x <= 22)
+            #expect(r.width  >= 22 && r.width  <= 28)
+            #expect(r.height >= 22 && r.height <= 28)
+        }
+    }
+
+    @Test("Saturn-like globe + rings → bbox covers both")
+    func saturnLikeBbox() {
+        // Bright globe at (16, 32) radius 6, plus separate bright
+        // rings (just two horizontal bars) on either side at y=32,
+        // x in [4..10] and x in [22..28]. The bbox must cover the
+        // full extent x ∈ [4..28], y ∈ [26..38].
+        let W = 64, H = 64
+        var buf = Self.buffer(width: W, height: H) { _, _ in 0 }
+        // Globe.
+        for y in 26...38 {
+            for x in 10...22 {
+                let dx = x - 16, dy = y - 32
+                if dx * dx + dy * dy <= 36 { buf[y * W + x] = 1.0 }
+            }
+        }
+        // Left ring.
+        for x in 4...10 {
+            buf[32 * W + x] = 0.7
+        }
+        // Right ring.
+        for x in 22...28 {
+            buf[32 * W + x] = 0.7
+        }
+
+        let roi = SaturnROI.bestROI(
+            luma: buf, width: W, height: H,
+            brightnessThreshold: 0.5,
+            padding: 0
+        )
+        #expect(roi != nil)
+        guard let r = roi else { return }
+        #expect(r.x <= 4)
+        #expect(r.x + r.width  - 1 >= 28)
+        #expect(r.y >= 25 && r.y <= 27)
+    }
+
+    @Test("all-zero buffer returns nil")
+    func allZeroNil() {
+        let buf = Self.buffer(width: 32, height: 32) { _, _ in 0 }
+        let roi = SaturnROI.bestROI(luma: buf, width: 32, height: 32)
+        #expect(roi == nil)
+    }
+
+    @Test("threshold 0.1 picks up faint pixels")
+    func lowThresholdIncludesFaint() {
+        // Bright pixel at (16, 16) value 1.0 plus faint pixel at
+        // (4, 4) value 0.15. With threshold 0.5 only the bright one
+        // contributes; with 0.1 the bbox extends to include the faint.
+        var buf = Self.buffer(width: 32, height: 32) { _, _ in 0 }
+        buf[16 * 32 + 16] = 1.0
+        buf[4 * 32 + 4] = 0.15
+        let strict = SaturnROI.bestROI(
+            luma: buf, width: 32, height: 32,
+            brightnessThreshold: 0.5, padding: 0
+        )
+        let lenient = SaturnROI.bestROI(
+            luma: buf, width: 32, height: 32,
+            brightnessThreshold: 0.1, padding: 0
+        )
+        // Strict bbox is just the bright pixel → 1×1.
+        #expect(strict?.width == 1)
+        // Lenient bbox extends to (4..16) × (4..16) → 13×13.
+        #expect(lenient != nil)
+        #expect(lenient?.width == 13)
+        #expect(lenient?.height == 13)
+    }
+
+    @Test("padding clamps to image bounds")
+    func paddingClampsToBounds() {
+        var buf = Self.buffer(width: 16, height: 16) { _, _ in 0 }
+        buf[0] = 1.0   // top-left pixel
+        let roi = SaturnROI.bestROI(
+            luma: buf, width: 16, height: 16,
+            brightnessThreshold: 0.5, padding: 100
+        )
+        // Bbox is [0..0]; padding 100 would go negative; clamped to 0.
+        #expect(roi?.x == 0)
+        #expect(roi?.y == 0)
+        #expect(roi?.width  == 16)
+        #expect(roi?.height == 16)
+    }
+
+    @Test("zero or negative threshold returns nil")
+    func badThresholdNil() {
+        let buf = Self.buffer(width: 16, height: 16) { _, _ in 0.5 }
+        #expect(SaturnROI.bestROI(luma: buf, width: 16, height: 16, brightnessThreshold: 0) == nil)
+        #expect(SaturnROI.bestROI(luma: buf, width: 16, height: 16, brightnessThreshold: -0.5) == nil)
+    }
+}
+
 // MARK: - Auto ROI
 
 @Suite("AutoROI — best high-contrast window")
