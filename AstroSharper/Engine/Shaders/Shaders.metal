@@ -760,6 +760,40 @@ kernel void compute_ap_shifts(
         int wyi = winnerIdx / range;
         int wx = wxi - p.searchRadius;
         int wy = wyi - p.searchRadius;
+        float winnerSAD = bestSAD[0];
+
+        // AP-confidence gate. On smooth subjects (Jupiter cloud bands away
+        // from the GRS, planetary disc interior) every SAD candidate has
+        // a similar value because there's no high-frequency feature for
+        // SAD to lock onto — the "winner" is just the offset that
+        // happened to minimise pixel-difference noise. Trusting that
+        // shift adds noise to the accumulator rather than refining the
+        // alignment, which is exactly the v4_C-worse-than-v4_B regression
+        // we saw on this Jupiter SER.
+        //
+        // Compute the mean SAD across all valid candidates; if the
+        // winner isn't at least `minDepth` below the mean, write a zero
+        // local shift (the AP cell has no usable signal — fall back to
+        // the global phase-corr alignment). This is exactly PSS / AS!4's
+        // AP rejection rule.
+        float meanSAD = 0.0;
+        int validCount = 0;
+        for (int i = 0; i < total; i++) {
+            float s = sadGrid[i];
+            if (s < 1e29) { meanSAD += s; validCount++; }
+        }
+        meanSAD = (validCount > 0) ? (meanSAD / float(validCount)) : 1.0;
+        // confidence = how much deeper the winner is vs mean SAD.
+        // 0.10 = winner at least 10% below mean. Smooth Jupiter cells
+        // typically score < 0.05 → rejected; lunar-surface cells with
+        // craters score > 0.30 → kept. Threshold gentle enough that
+        // strong-feature regions still benefit from local refinement.
+        const float minDepth = 0.10;
+        float depth = (meanSAD > 1e-6) ? (1.0 - winnerSAD / meanSAD) : 0.0;
+        if (depth < minDepth) {
+            shiftMap.write(float4(0, 0, 0, 0), uint2(apX, apY));
+            return;
+        }
 
         // Sub-pixel parabolic refinement of the integer SAD minimum. The
         // SAD surface in a small neighbourhood of the true offset is well-
