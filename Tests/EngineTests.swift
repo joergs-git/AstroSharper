@@ -221,6 +221,125 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - Strehl-style concentration metric
+
+@Suite("Strehl — central-concentration analogue")
+struct StrehlTests {
+
+    private static func buffer(width: Int, height: Int, _ f: (Int, Int) -> Float) -> [Float] {
+        var out = [Float](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                out[y * width + x] = f(x, y)
+            }
+        }
+        return out
+    }
+
+    @Test("delta-function peak yields concentration = 1.0")
+    func deltaIsOne() {
+        // Single bright pixel at the centre of an otherwise-empty
+        // buffer. The 17×17 window around the peak contains only one
+        // non-zero pixel → ratio = peak / peak = 1.0.
+        var buf = Self.buffer(width: 32, height: 32) { _, _ in 0 }
+        buf[16 * 32 + 16] = 1.0
+        let s = Strehl.computeConcentration(
+            luma: buf, width: 32, height: 32, windowRadius: 8
+        )
+        #expect(s == 1.0)
+    }
+
+    @Test("uniform field with centred peak has 1/area concentration")
+    func uniformIsInverseArea() {
+        // Constant 1.0 with a tiny ε bump in the middle so the peak
+        // finder deterministically lands at (16,16); the 17×17 window
+        // then doesn't clip at any edge. Ratio ≈ 1/289 ≈ 0.00346.
+        // Without the bump the first pixel ties (Float v > Float v ==
+        // false), peakIdx stays at 0, the window clips to 9×9 and the
+        // ratio jumps to 1/81 — that's the corner-peak scenario covered
+        // by edgePeakClips above.
+        var buf = Self.buffer(width: 32, height: 32) { _, _ in 1.0 }
+        buf[16 * 32 + 16] = 1.0001
+        let s = Strehl.computeConcentration(
+            luma: buf, width: 32, height: 32, windowRadius: 8
+        )
+        let expected: Float = 1.0 / Float(17 * 17)
+        // Wider tolerance (1e-3) than the delta test because the
+        // ε-bump perturbs the ratio fractionally.
+        #expect(abs(s - expected) < 1e-3)
+    }
+
+    @Test("sharp Gaussian peak scores higher than blurred peak")
+    func sharperBeatsBlurred() {
+        let cx = 16, cy = 16
+        let sharp = Self.buffer(width: 32, height: 32) { x, y in
+            let dx = Float(x - cx), dy = Float(y - cy)
+            return exp(-(dx * dx + dy * dy) / 2.0)        // sigma = 1.0
+        }
+        let blurred = Self.buffer(width: 32, height: 32) { x, y in
+            let dx = Float(x - cx), dy = Float(y - cy)
+            return exp(-(dx * dx + dy * dy) / 32.0)       // sigma = 4.0
+        }
+        let sSharp   = Strehl.computeConcentration(
+            luma: sharp,   width: 32, height: 32, windowRadius: 8
+        )
+        let sBlurred = Strehl.computeConcentration(
+            luma: blurred, width: 32, height: 32, windowRadius: 8
+        )
+        #expect(sSharp > sBlurred)
+        #expect(sSharp > 0.1)
+        #expect(sBlurred < 0.1)
+    }
+
+    @Test("all-zero buffer returns zero (no peak)")
+    func allZeroIsZero() {
+        let buf = Self.buffer(width: 16, height: 16) { _, _ in 0 }
+        let s = Strehl.computeConcentration(
+            luma: buf, width: 16, height: 16, windowRadius: 4
+        )
+        #expect(s == 0)
+    }
+
+    @Test("peak at the edge clips the window correctly")
+    func edgePeakClips() {
+        // Bright pixel at (0,0); window cannot extend below 0,0. With
+        // surrounding zeros the ratio is still 1.0 but the test guards
+        // against indexing crashes.
+        var buf = Self.buffer(width: 16, height: 16) { _, _ in 0 }
+        buf[0] = 0.7
+        let s = Strehl.computeConcentration(
+            luma: buf, width: 16, height: 16, windowRadius: 8
+        )
+        #expect(s == 1.0)
+    }
+
+    @Test("negative values are ignored (luminance must be non-negative)")
+    func negativesIgnored() {
+        // Pre-deconv stages can produce negative pixel values via Wiener
+        // ringing; the metric clamps those out so noise can't push the
+        // ratio above 1.0.
+        var buf = Self.buffer(width: 16, height: 16) { _, _ in -0.5 }
+        buf[8 * 16 + 8] = 1.0
+        let s = Strehl.computeConcentration(
+            luma: buf, width: 16, height: 16, windowRadius: 4
+        )
+        #expect(s == 1.0)
+    }
+
+    @Test("full-frame variant matches windowed when window covers image")
+    func fullFrameMatchesWideWindow() {
+        var buf = Self.buffer(width: 16, height: 16) { _, _ in 0.1 }
+        buf[8 * 16 + 8] = 1.0   // peak in the middle
+        let windowed = Strehl.computeConcentration(
+            luma: buf, width: 16, height: 16, windowRadius: 99
+        )
+        let full = Strehl.computeConcentrationFullFrame(
+            luma: buf, width: 16, height: 16
+        )
+        #expect(abs(windowed - full) < 1e-6)
+    }
+}
+
 // MARK: - Lucky keep-% recommendation
 
 @Suite("Lucky keep-% formula — frame-count floor + knee detection")
