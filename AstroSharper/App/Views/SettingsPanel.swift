@@ -283,6 +283,13 @@ struct ToneCurveSection: View {
 
     var body: some View {
         SectionContainer(title: "Tone Curve", icon: "waveform.path.ecg", isOn: $app.toneCurve.enabled) {
+            // Auto white balance — independent of the Tone Curve toggle.
+            // Runs as the FIRST step of the post-stack pipeline (before
+            // any sharpening) so saturation / unsharp don't amplify a
+            // green cast that's invisible at neutral colour.
+            Toggle("Auto White Balance (gray-world)", isOn: $app.toneCurve.autoWB)
+                .help("Computes a per-channel offset+scale on the input so the three channels share a neutral mean. Critical for OSC stacks — Bayer green is naturally amplified by 2× photosite count, so post-stack OSC images otherwise look greenish once saturation > 1. Mono / pre-balanced sources are unaffected.")
+            Divider().padding(.vertical, 4)
             ToneCurveEditor(
                 points: $app.toneCurve.controlPoints,
                 histogram: app.previewHistogram,

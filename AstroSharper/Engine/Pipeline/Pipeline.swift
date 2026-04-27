@@ -20,6 +20,7 @@ final class Pipeline {
     private lazy var tonePSO    = makeComputePSO(function: "apply_tone_curve")
     private lazy var satPSO     = makeComputePSO(function: "apply_saturation")
     private lazy var nrPSO      = makeComputePSO(function: "noise_reduce_bilateral")
+    private lazy var wbPSO      = makeComputePSO(function: "apply_white_balance")
     private lazy var shiftPSO   = makeComputePSO(function: "sub_pixel_shift")
     private lazy var stackPSO   = makeComputePSO(function: "stack_accumulate")
     private lazy var subPSO     = makeComputePSO(function: "subtract_textures")
@@ -104,6 +105,33 @@ final class Pipeline {
         // is unsafe — the command buffer still references those textures.
         var current: MTLTexture = input
         var borrowed: [MTLTexture] = []
+
+        // Step 0: Auto white balance (gray-world). MUST run BEFORE any
+        // sharpen step because sharpen amplifies channel imbalance into
+        // coloured halos. On mono / pre-balanced sources the gray-world
+        // correction collapses to identity (all three channels share the
+        // same statistics) so this is a no-op there.
+        if toneCurve.autoWB {
+            let wb = computeAutoWB(input: current)
+            if wb != .identity {
+                let result = borrow(width: w, height: h, format: input.pixelFormat)
+                borrowed.append(result)
+                if let enc = cmdBuf.makeComputeCommandEncoder() {
+                    enc.setComputePipelineState(wbPSO)
+                    enc.setTexture(current, index: 0)
+                    enc.setTexture(result, index: 1)
+                    var p = WhiteBalanceParamsCPU(
+                        offsets: SIMD3<Float>(wb.redOffset,  wb.greenOffset, wb.blueOffset),
+                        scales:  SIMD3<Float>(wb.redScale,   wb.greenScale,  wb.blueScale)
+                    )
+                    enc.setBytes(&p, length: MemoryLayout<WhiteBalanceParamsCPU>.stride, index: 0)
+                    let (tgC, tgS) = dispatchThreadgroups(for: result, pso: wbPSO)
+                    enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                    enc.endEncoding()
+                }
+                current = result
+            }
+        }
 
         // Step 1: L-R deconvolution
         if sharpen.enabled && sharpen.lrEnabled {
@@ -240,6 +268,75 @@ final class Pipeline {
 
     // MARK: - Helpers
 
+    /// Compute a gray-world white-balance correction for `input`. Downsamples
+    /// to a small staging texture (256-ish along the longest side), reads
+    /// back to CPU, and reuses the existing `WhiteBalance.computeGrayWorld`
+    /// math. Cost is dominated by the sync GPU→CPU readback (~1 ms on the
+    /// downsampled buffer); cheap enough to do on every Pipeline.process
+    /// call, which the live preview triggers on every frame change.
+    private func computeAutoWB(input: MTLTexture) -> WhiteBalanceCorrection {
+        let w = input.width, h = input.height
+        guard w > 0, h > 0 else { return .identity }
+
+        // Downsample target along the longest edge. 256 is enough for the
+        // gray-world stats — we just want per-channel mean of mid-range
+        // pixels.
+        let targetMax = 256
+        let scale = max(1, max(w, h) / targetMax)
+        let dwsW = max(1, w / scale)
+        let dwsH = max(1, h / scale)
+
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba32Float, width: dwsW, height: dwsH, mipmapped: false
+        )
+        desc.storageMode = .shared
+        desc.usage = [.shaderRead, .shaderWrite]
+        guard let staging = device.makeTexture(descriptor: desc),
+              let cmd = commandQueue.makeCommandBuffer() else {
+            return .identity
+        }
+
+        let scaler = MPSImageBilinearScale(device: device)
+        var transform = MPSScaleTransform(
+            scaleX: Double(dwsW) / Double(w),
+            scaleY: Double(dwsH) / Double(h),
+            translateX: 0, translateY: 0
+        )
+        withUnsafePointer(to: &transform) { ptr in
+            scaler.scaleTransform = ptr
+            scaler.encode(commandBuffer: cmd, sourceTexture: input, destinationTexture: staging)
+        }
+        cmd.commit()
+        cmd.waitUntilCompleted()
+
+        let pixelCount = dwsW * dwsH
+        var rgba = [Float](repeating: 0, count: pixelCount * 4)
+        rgba.withUnsafeMutableBufferPointer { buf in
+            staging.getBytes(
+                buf.baseAddress!,
+                bytesPerRow: dwsW * MemoryLayout<Float>.size * 4,
+                from: MTLRegionMake2D(0, 0, dwsW, dwsH),
+                mipmapLevel: 0
+            )
+        }
+
+        var red   = [Float](repeating: 0, count: pixelCount)
+        var green = [Float](repeating: 0, count: pixelCount)
+        var blue  = [Float](repeating: 0, count: pixelCount)
+        for i in 0..<pixelCount {
+            red[i]   = rgba[i * 4 + 0]
+            green[i] = rgba[i * 4 + 1]
+            blue[i]  = rgba[i * 4 + 2]
+        }
+
+        return WhiteBalance.computeGrayWorld(
+            red: red, green: green, blue: blue,
+            width: dwsW, height: dwsH,
+            reference: .green,
+            backgroundPercentile: 0.05
+        )
+    }
+
     @discardableResult
     private func copyTexture(_ src: MTLTexture, into dst: MTLTexture) -> MTLTexture {
         if let cmd = commandQueue.makeCommandBuffer(), let blit = cmd.makeBlitCommandEncoder() {
@@ -273,6 +370,15 @@ struct NoiseReduceParamsCPU {
     var spatialSigma: Float
     var rangeSigma: Float
     var radius: Int32
+}
+
+/// Mirror of the Metal `WhiteBalanceParams` struct. Metal `float3` is
+/// 16-byte aligned (sizeof = 16); Swift `SIMD3<Float>` matches that
+/// layout exactly so a setBytes copy lands the right bits in the right
+/// slots.
+struct WhiteBalanceParamsCPU {
+    var offsets: SIMD3<Float>
+    var scales: SIMD3<Float>
 }
 
 // Utility for dispatch sizing.

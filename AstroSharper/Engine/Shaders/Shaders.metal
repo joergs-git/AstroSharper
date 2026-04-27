@@ -163,6 +163,32 @@ kernel void apply_tone_curve(
     output.write(float4(r, g, b, c.a), gid);
 }
 
+// MARK: - Auto white balance (gray-world correction)
+//
+// Applies a per-channel offset + scale: out.rgb = (in.rgb - offset) * scale.
+// Offsets/scales are computed CPU-side via WhiteBalance.computeGrayWorld
+// on a downsampled luminance readback of the input texture. The kernel
+// itself is a single-pass per-pixel transform; the actual WB intelligence
+// lives in the CPU helper.
+
+struct WhiteBalanceParams {
+    float3 offsets;
+    float3 scales;
+};
+
+kernel void apply_white_balance(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    constant WhiteBalanceParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    float3 v = (c.rgb - p.offsets) * p.scales;
+    v = max(v, float3(0.0));
+    output.write(float4(v, c.a), gid);
+}
+
 // MARK: - Bilateral noise reduction
 //
 // Edge-preserving smoother that runs as the LAST step of the sharpening

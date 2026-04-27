@@ -262,6 +262,17 @@ struct ToneCurveSettings: Equatable, Codable {
     /// small boost (1.2–1.5) on planetary captures.
     var saturation: Double = 1.0
 
+    /// Auto-white-balance (gray-world) applied at the START of the post-
+    /// stack pipeline, BEFORE any sharpening. Independent of `enabled` —
+    /// this fires whenever the toggle is on, regardless of whether the
+    /// tone-curve sub-step is active. Default ON because OSC stacks
+    /// otherwise come out with a green cast that surfaces visibly the
+    /// moment saturation > 1 (Bayer-green has 2× the photosite count of
+    /// red/blue, so its mean is consistently higher post-stack).
+    /// On mono / pre-balanced sources the gray-world correction collapses
+    /// to identity because all three channels share the same statistics.
+    var autoWB: Bool = true
+
     // MARK: - Codable
     /// Backwards-compatible decoder so older preset JSON keeps loading. The
     /// synthesised encoder is fine — new files always carry the field.
@@ -274,6 +285,7 @@ struct ToneCurveSettings: Equatable, Codable {
             CGPoint(x: 1.0, y: 1.0),
         ]
         self.saturation    = try c.decodeIfPresent(Double.self,    forKey: .saturation)    ?? 1.0
+        self.autoWB        = try c.decodeIfPresent(Bool.self,      forKey: .autoWB)        ?? true
     }
 
     init(
@@ -283,10 +295,12 @@ struct ToneCurveSettings: Equatable, Codable {
             CGPoint(x: 0.5, y: 0.5),
             CGPoint(x: 1.0, y: 1.0),
         ],
-        saturation: Double = 1.0
+        saturation: Double = 1.0,
+        autoWB: Bool = true
     ) {
         self.enabled = enabled
         self.controlPoints = controlPoints
         self.saturation = saturation
+        self.autoWB = autoWB
     }
 }
