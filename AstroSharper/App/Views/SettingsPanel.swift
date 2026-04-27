@@ -289,6 +289,8 @@ struct ToneCurveSection: View {
             // green cast that's invisible at neutral colour.
             Toggle("Auto White Balance (gray-world)", isOn: $app.toneCurve.autoWB)
                 .help("Computes a per-channel offset+scale on the input so the three channels share a neutral mean. Critical for OSC stacks — Bayer green is naturally amplified by 2× photosite count, so post-stack OSC images otherwise look greenish once saturation > 1. Mono / pre-balanced sources are unaffected.")
+            Toggle("Atmospheric Chromatic Dispersion Correction", isOn: $app.toneCurve.chromaticAlignment)
+                .help("Phase-correlates R and B against G on the post-stack output and applies sub-pixel shifts so the three channels re-align (G stays anchored). Atmospheric refraction shifts blue more than red, so OSC planets at low altitude show coloured limb fringes; ACDC removes them. No-op on mono / pre-aligned sources because the offsets come out near zero.")
             Divider().padding(.vertical, 4)
             ToneCurveEditor(
                 points: $app.toneCurve.controlPoints,

@@ -87,6 +87,42 @@ enum Align {
         return phaseCorrelate(refFFT: r, frameFFT: f)
     }
 
+    /// Phase-correlate two raw float buffers of size n×n (n = 1 << log2n).
+    /// Used by chromatic-dispersion correction which extracts per-channel
+    /// (R/G/B) planes from a stacked texture and aligns them against the
+    /// green reference. The buffers should already be DC-removed and Hann-
+    /// windowed by the caller — both are done by `prepareBuffer(_:)` below.
+    /// Returns the shift in pixel units of the n×n grid.
+    static func phaseCorrelateBuffers(
+        reference: [Float],
+        frame: [Float],
+        log2n: Int
+    ) -> AlignShift? {
+        let n = 1 << log2n
+        guard reference.count == n * n, frame.count == n * n else { return nil }
+        guard let r = fft2dForwardOnce(input: reference, log2n: log2n),
+              let f = fft2dForwardOnce(input: frame, log2n: log2n),
+              let peak = fft2dPhaseCorrelation(
+                refReal: r.real, refImag: r.imag,
+                frmReal: f.real, frmImag: f.imag,
+                log2n: log2n
+              ) else {
+            return nil
+        }
+        var dxI = peak.x, dyI = peak.y
+        if dxI > n / 2 { dxI -= n }
+        if dyI > n / 2 { dyI -= n }
+        return AlignShift(dx: Float(dxI) + peak.subX, dy: Float(dyI) + peak.subY)
+    }
+
+    /// Prepare a raw plane for phase correlation: subtract the mean and
+    /// apply a 2-D Hann window in place. Caller passes the buffer to
+    /// `phaseCorrelateBuffers` afterwards.
+    static func prepareBuffer(_ buffer: inout [Float], size n: Int) {
+        subtractMean(&buffer)
+        applyHannWindow(&buffer, size: n)
+    }
+
     // MARK: - Reference quality scoring
 
     /// Cheap "is this frame sharp?" score. Sub-samples to 256² and

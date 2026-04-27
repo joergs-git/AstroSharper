@@ -21,6 +21,7 @@ final class Pipeline {
     private lazy var satPSO     = makeComputePSO(function: "apply_saturation")
     private lazy var nrPSO      = makeComputePSO(function: "noise_reduce_bilateral")
     private lazy var wbPSO      = makeComputePSO(function: "apply_white_balance")
+    private lazy var acdcPSO    = makeComputePSO(function: "shift_rb_channels")
     private lazy var shiftPSO   = makeComputePSO(function: "sub_pixel_shift")
     private lazy var stackPSO   = makeComputePSO(function: "stack_accumulate")
     private lazy var subPSO     = makeComputePSO(function: "subtract_textures")
@@ -126,6 +127,36 @@ final class Pipeline {
                     )
                     enc.setBytes(&p, length: MemoryLayout<WhiteBalanceParamsCPU>.stride, index: 0)
                     let (tgC, tgS) = dispatchThreadgroups(for: result, pso: wbPSO)
+                    enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                    enc.endEncoding()
+                }
+                current = result
+            }
+        }
+
+        // Step 0.5: Atmospheric chromatic dispersion correction (Path A).
+        // Runs AFTER WB so per-channel statistics are normalised before
+        // the alignment search. Phase-correlates R/G and B/G on a 256×256
+        // downsample of the current texture; applies sub-pixel shifts to
+        // R and B (G stays anchored). On mono / pre-aligned sources both
+        // offsets come out near zero and the GPU pass is skipped.
+        if toneCurve.chromaticAlignment {
+            let offsets = ChromaticDispersion.compute(
+                input: current, device: device, commandQueue: commandQueue
+            )
+            if !offsets.isIdentity() {
+                let result = borrow(width: w, height: h, format: input.pixelFormat)
+                borrowed.append(result)
+                if let enc = cmdBuf.makeComputeCommandEncoder() {
+                    enc.setComputePipelineState(acdcPSO)
+                    enc.setTexture(current, index: 0)
+                    enc.setTexture(result, index: 1)
+                    var p = ChannelShiftParamsCPU(
+                        redOffset:  offsets.red,
+                        blueOffset: offsets.blue
+                    )
+                    enc.setBytes(&p, length: MemoryLayout<ChannelShiftParamsCPU>.stride, index: 0)
+                    let (tgC, tgS) = dispatchThreadgroups(for: result, pso: acdcPSO)
                     enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
                     enc.endEncoding()
                 }
@@ -379,6 +410,12 @@ struct NoiseReduceParamsCPU {
 struct WhiteBalanceParamsCPU {
     var offsets: SIMD3<Float>
     var scales: SIMD3<Float>
+}
+
+/// Mirror of the Metal `ChannelShiftParams` struct (two float2 = 16 bytes).
+struct ChannelShiftParamsCPU {
+    var redOffset:  SIMD2<Float>
+    var blueOffset: SIMD2<Float>
 }
 
 // Utility for dispatch sizing.

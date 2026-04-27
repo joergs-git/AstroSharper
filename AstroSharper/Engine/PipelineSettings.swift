@@ -273,6 +273,15 @@ struct ToneCurveSettings: Equatable, Codable {
     /// to identity because all three channels share the same statistics.
     var autoWB: Bool = true
 
+    /// Atmospheric chromatic dispersion correction. Phase-correlates R
+    /// and B against G on the stacked output, applies the resulting
+    /// sub-pixel shifts so the three channels re-align (green stays
+    /// anchored). Default ON for OSC; collapses to a no-op on mono /
+    /// pre-aligned sources because the channel offsets come out near
+    /// zero. Runs AFTER auto-WB so channel statistics are normalised
+    /// before the alignment search.
+    var chromaticAlignment: Bool = true
+
     // MARK: - Codable
     /// Backwards-compatible decoder so older preset JSON keeps loading. The
     /// synthesised encoder is fine — new files always carry the field.
@@ -284,8 +293,9 @@ struct ToneCurveSettings: Equatable, Codable {
             CGPoint(x: 0.5, y: 0.5),
             CGPoint(x: 1.0, y: 1.0),
         ]
-        self.saturation    = try c.decodeIfPresent(Double.self,    forKey: .saturation)    ?? 1.0
-        self.autoWB        = try c.decodeIfPresent(Bool.self,      forKey: .autoWB)        ?? true
+        self.saturation         = try c.decodeIfPresent(Double.self, forKey: .saturation)         ?? 1.0
+        self.autoWB             = try c.decodeIfPresent(Bool.self,   forKey: .autoWB)             ?? true
+        self.chromaticAlignment = try c.decodeIfPresent(Bool.self,   forKey: .chromaticAlignment) ?? true
     }
 
     init(
@@ -296,11 +306,13 @@ struct ToneCurveSettings: Equatable, Codable {
             CGPoint(x: 1.0, y: 1.0),
         ],
         saturation: Double = 1.0,
-        autoWB: Bool = true
+        autoWB: Bool = true,
+        chromaticAlignment: Bool = true
     ) {
         self.enabled = enabled
         self.controlPoints = controlPoints
         self.saturation = saturation
         self.autoWB = autoWB
+        self.chromaticAlignment = chromaticAlignment
     }
 }

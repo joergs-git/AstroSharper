@@ -163,6 +163,44 @@ kernel void apply_tone_curve(
     output.write(float4(r, g, b, c.a), gid);
 }
 
+// MARK: - Chromatic dispersion correction (Path A)
+//
+// Per-channel sub-pixel shift on a stacked RGBA texture. Green stays
+// anchored at the input grid; R and B sample from offset positions so
+// the misregistered colour images re-align onto green. Offsets in
+// pixels of the input texture's coord system (NOT normalised UV).
+//
+// out.r(gid) = input.r(gid - redOffset)
+// out.g(gid) = input.g(gid)
+// out.b(gid) = input.b(gid - blueOffset)
+//
+// Linear sampling preserves the sub-pixel precision of the offsets
+// computed by phase correlation.
+
+struct ChannelShiftParams {
+    float2 redOffset;   // px in input grid; r samples at gid - redOffset
+    float2 blueOffset;  // px in input grid; b samples at gid - blueOffset
+};
+
+kernel void shift_rb_channels(
+    texture2d<float, access::sample> input  [[texture(0)]],
+    texture2d<float, access::write>  output [[texture(1)]],
+    constant ChannelShiftParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float2 size = float2(output.get_width(), output.get_height());
+    float2 baseUV = (float2(gid) + 0.5) / size;
+    float2 redUV  = (float2(gid) + 0.5 - p.redOffset)  / size;
+    float2 blueUV = (float2(gid) + 0.5 - p.blueOffset) / size;
+    float r = input.sample(s, redUV).r;
+    float g = input.sample(s, baseUV).g;
+    float b = input.sample(s, blueUV).b;
+    float a = input.sample(s, baseUV).a;
+    output.write(float4(r, g, b, a), gid);
+}
+
 // MARK: - Auto white balance (gray-world correction)
 //
 // Applies a per-channel offset + scale: out.rgb = (in.rgb - offset) * scale.
