@@ -221,6 +221,54 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - File catalog auto target detection
+
+@Suite("FileCatalog — auto target detection on import")
+struct FileCatalogAutoTargetTests {
+
+    private static func entryFor(filename: String, in folder: String? = nil) -> FileEntry {
+        let baseDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(folder ?? UUID().uuidString)
+        return FileCatalog.makeEntry(url: baseDir.appendingPathComponent(filename))
+    }
+
+    @Test("Jupiter filename auto-detects to .jupiter")
+    func jupiterFile() {
+        let e = Self.entryFor(filename: "Jupiter_001.ser")
+        #expect(e.detectedTarget == .jupiter)
+    }
+
+    @Test("Sun_h-alpha filename auto-detects to .sun")
+    func sunFile() {
+        let e = Self.entryFor(filename: "halpha-2026-04-01.ser")
+        #expect(e.detectedTarget == .sun)
+    }
+
+    @Test("Parent folder name routes target when filename is generic")
+    func parentFolderRoutes() {
+        let e = Self.entryFor(filename: "capture_001.ser", in: "Mars")
+        #expect(e.detectedTarget == .mars)
+    }
+
+    @Test("Random filename gets no detected target")
+    func unrelatedFileIsNil() {
+        let e = Self.entryFor(filename: "random.tif", in: "imports-2026")
+        #expect(e.detectedTarget == nil)
+    }
+
+    @Test("Saturn filename auto-detects to .saturn")
+    func saturnFile() {
+        let e = Self.entryFor(filename: "Sat_2026-12-10.ser")
+        #expect(e.detectedTarget == .saturn)
+    }
+
+    @Test("Moon (luna_) filename auto-detects to .moon")
+    func moonFile() {
+        let e = Self.entryFor(filename: "luna_terminator.tif")
+        #expect(e.detectedTarget == .moon)
+    }
+}
+
 // MARK: - Capture validator
 
 @Suite("CaptureValidator — non-blocking SER warnings")

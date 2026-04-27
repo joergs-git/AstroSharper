@@ -27,6 +27,13 @@ struct FileEntry: Identifiable, Hashable {
     /// blocking the file list.
     var sharpness: Float? = nil
 
+    /// Target inferred from filename + parent-folder keywords (Jupiter,
+    /// Saturn, Sun, Moon, Mars). Drives auto-preset selection on import
+    /// without an extra click; nil when no keyword matches and the user
+    /// must pick manually. Set once at catalog load (`makeEntry`) so
+    /// later renames don't churn the column UI.
+    var detectedTarget: PresetTarget? = nil
+
     /// Lower-cased file extension, exposed for table-column sorting so a
     /// mixed bag of .ser / .tif / .png groups by type when the user clicks
     /// the column header.
@@ -99,7 +106,25 @@ struct FileCatalog {
         let values = try? url.resourceValues(forKeys: Set(keys))
         let size = (values?.fileSize).flatMap { Int64($0) } ?? 0
         let date = values?.creationDate ?? values?.contentModificationDate
-        return FileEntry(id: UUID(), url: url, name: url.lastPathComponent, sizeBytes: size, creationDate: date)
+
+        // Auto target detection: scan the filename and parent-folder name
+        // for target keywords (jupiter / sun / moon / mars / saturn).
+        // Picks first match per the keyword-table order; nil when nothing
+        // matches and the user picks manually. The chip-in-row UI lets
+        // the user override at any time without re-importing.
+        let detected = PresetAutoDetect.detect(in: [
+            url.lastPathComponent,
+            url.deletingLastPathComponent().lastPathComponent
+        ])
+
+        return FileEntry(
+            id: UUID(),
+            url: url,
+            name: url.lastPathComponent,
+            sizeBytes: size,
+            creationDate: date,
+            detectedTarget: detected
+        )
     }
 
     func index(of id: FileEntry.ID) -> Int? {
