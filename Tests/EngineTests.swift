@@ -282,6 +282,151 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - FITS reader + writer
+
+@Suite("FITS — basic 2D Float32 round-trip")
+struct FitsTests {
+
+    private static func tempURL(_ ext: String = "fits") -> URL {
+        URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("astrosharper-test-\(UUID().uuidString).\(ext)")
+    }
+
+    @Test("Round-trips a small synthetic image without metadata")
+    func roundTripBasic() throws {
+        let pixels: [Float] = [0.1, 0.5, 0.9, 0.3, -0.2, 1.7, 65000, 0]
+        let original = FitsImage(width: 4, height: 2, pixels: pixels)
+        let url = Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try FitsWriter.write(original, to: url)
+        let loaded = try FitsReader.read(url)
+
+        #expect(loaded.width  == original.width)
+        #expect(loaded.height == original.height)
+        #expect(loaded.pixels.count == original.pixels.count)
+        // Float32 precision is exact for the values we wrote.
+        for (a, b) in zip(loaded.pixels, original.pixels) {
+            #expect(a == b)
+        }
+    }
+
+    @Test("Round-trips user metadata cards")
+    func roundTripMetadata() throws {
+        let pixels = [Float](repeating: 0.5, count: 32 * 16)
+        let original = FitsImage(
+            width: 32, height: 16,
+            pixels: pixels,
+            metadata: [
+                "OBSERVER": "joergsflow",
+                "INSTRUME": "ZWO ASI183MC",
+                "EXPTIME":  "0.008"
+            ]
+        )
+        let url = Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try FitsWriter.write(original, to: url)
+        let loaded = try FitsReader.read(url)
+
+        #expect(loaded.metadata["OBSERVER"] == "joergsflow")
+        #expect(loaded.metadata["INSTRUME"] == "ZWO ASI183MC")
+        #expect(loaded.metadata["EXPTIME"]  == "0.008")
+        // SIMPLE / BITPIX / NAXIS* should NOT leak into metadata.
+        #expect(loaded.metadata["SIMPLE"] == nil)
+        #expect(loaded.metadata["BITPIX"] == nil)
+        #expect(loaded.metadata["NAXIS"]  == nil)
+        #expect(loaded.metadata["NAXIS1"] == nil)
+    }
+
+    @Test("File size is a multiple of 2880 bytes (FITS block size)")
+    func fileSizeBlockAligned() throws {
+        let pixels = [Float](repeating: 1.0, count: 100 * 100)   // ~40 KB raw
+        let img = FitsImage(width: 100, height: 100, pixels: pixels)
+        let url = Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try FitsWriter.write(img, to: url)
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs[.size] as? Int) ?? 0
+        #expect(size > 0)
+        #expect(size % 2880 == 0)
+    }
+
+    @Test("Reader rejects a too-small file")
+    func rejectsTooSmall() {
+        let url = Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try? Data(repeating: 0x20, count: 100).write(to: url)
+        #expect(throws: FitsError.fileTooSmall) {
+            _ = try FitsReader.read(url)
+        }
+    }
+
+    @Test("Reader rejects a header missing END")
+    func rejectsMissingEnd() throws {
+        let url = Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        // Build a 2880-byte block with valid SIMPLE/BITPIX/NAXIS but
+        // NO END keyword — should fail on the END check.
+        var header = ""
+        header += "SIMPLE  =                    T".padding(toLength: 80, withPad: " ", startingAt: 0)
+        header += "BITPIX  =                  -32".padding(toLength: 80, withPad: " ", startingAt: 0)
+        header += "NAXIS   =                    2".padding(toLength: 80, withPad: " ", startingAt: 0)
+        header += "NAXIS1  =                    4".padding(toLength: 80, withPad: " ", startingAt: 0)
+        header += "NAXIS2  =                    4".padding(toLength: 80, withPad: " ", startingAt: 0)
+        // Pad to 2880 bytes WITHOUT an END card.
+        header = header.padding(toLength: 2880, withPad: " ", startingAt: 0)
+        try header.data(using: .ascii)!.write(to: url)
+
+        #expect(throws: FitsError.missingKeyword("END")) {
+            _ = try FitsReader.read(url)
+        }
+    }
+
+    @Test("Pixel ordering is row-major, top-to-bottom")
+    func rowMajorOrdering() throws {
+        // Build a buffer where pixel value encodes its (x, y) position
+        // so the round-trip can verify the exact memory layout.
+        let W = 4, H = 3
+        var pixels = [Float](repeating: 0, count: W * H)
+        for y in 0..<H {
+            for x in 0..<W {
+                pixels[y * W + x] = Float(y * 100 + x)
+            }
+        }
+        let original = FitsImage(width: W, height: H, pixels: pixels)
+        let url = Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try FitsWriter.write(original, to: url)
+        let loaded = try FitsReader.read(url)
+
+        for y in 0..<H {
+            for x in 0..<W {
+                #expect(loaded.pixels[y * W + x] == Float(y * 100 + x))
+            }
+        }
+    }
+
+    @Test("Big-endian conversion handles non-trivial float bit patterns")
+    func bigEndianFloatBits() throws {
+        // Pi-ish: fingerprint a Float that has all 4 bytes non-trivial.
+        // Validates the byte-swap on both encode and decode.
+        let pixels: [Float] = [3.14159, -2.71828, 1.61803, 0.57721]
+        let original = FitsImage(width: 4, height: 1, pixels: pixels)
+        let url = Self.tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try FitsWriter.write(original, to: url)
+        let loaded = try FitsReader.read(url)
+
+        for (a, b) in zip(loaded.pixels, original.pixels) {
+            #expect(a == b)
+        }
+    }
+}
+
 // MARK: - Auto ROI
 
 @Suite("AutoROI — best high-contrast window")
