@@ -584,6 +584,134 @@ struct FitsTests {
     }
 }
 
+// MARK: - AP feather weights
+
+@Suite("APFeather — raised-cosine blend weights")
+struct APFeatherTests {
+
+    @Test("cosineWeight endpoints are 1 at t=0 and 0 at t=1")
+    func cosineEndpoints() {
+        #expect(APFeather.cosineWeight(unitDistance: 0)   == 1.0)
+        #expect(APFeather.cosineWeight(unitDistance: 1)   == 0.0)
+        // Out-of-range clamps in either direction.
+        #expect(APFeather.cosineWeight(unitDistance: -0.5) == 1.0)
+        #expect(APFeather.cosineWeight(unitDistance: 5)    == 0.0)
+    }
+
+    @Test("cosineWeight midpoint is 0.5 (raised-cosine half-amplitude)")
+    func cosineMidpoint() {
+        // 0.5 * (1 + cos(π · 0.5)) = 0.5 * (1 + 0) = 0.5.
+        let mid = APFeather.cosineWeight(unitDistance: 0.5)
+        #expect(abs(mid - 0.5) < 1e-6)
+    }
+
+    @Test("cosineWeight is monotonically decreasing on [0, 1]")
+    func cosineMonotonic() {
+        var prev = APFeather.cosineWeight(unitDistance: 0)
+        for k in 1...20 {
+            let t = Float(k) / 20.0
+            let w = APFeather.cosineWeight(unitDistance: t)
+            #expect(w <= prev)
+            prev = w
+        }
+    }
+
+    @Test("inner-core pixels (within halfSize) get weight 1.0")
+    func innerCoreFullWeight() {
+        let w = APFeather.weight(dx: 4, dy: -3, halfSize: 5, featherRadius: 8)
+        #expect(w == 1.0)
+    }
+
+    @Test("outer-feather pixels taper to 0")
+    func featherTapersToZero() {
+        // halfSize 5, featherRadius 4 → core ends at distance 5,
+        // feather ends at 9. At distance 9 the weight is 0.
+        let w = APFeather.weight(dx: 9, dy: 0, halfSize: 5, featherRadius: 4)
+        #expect(w == 0)
+    }
+
+    @Test("weight at feather midpoint is 0.5")
+    func featherMidpointWeight() {
+        // halfSize 5, featherRadius 4 → core ends at 5, feather ends
+        // at 9, midpoint at 7. cosineWeight(t=0.5) = 0.5.
+        let w = APFeather.weight(dx: 7, dy: 0, halfSize: 5, featherRadius: 4)
+        #expect(abs(w - 0.5) < 1e-6)
+    }
+
+    @Test("weight uses Chebyshev distance (square feather, not circular)")
+    func chebyshevDistance() {
+        // dx=3, dy=4 → Chebyshev = 4 (not Euclidean 5). Inner-core 5
+        // → both samples should be inside the core.
+        let cheb = APFeather.weight(dx: 3, dy: 4, halfSize: 5, featherRadius: 4)
+        #expect(cheb == 1.0)
+        // dx=6, dy=0 → Chebyshev = 6. Inner-core 5 → in feather zone.
+        // Same for dx=0, dy=6 → must be identical.
+        let along = APFeather.weight(dx: 6, dy: 0, halfSize: 5, featherRadius: 4)
+        let across = APFeather.weight(dx: 0, dy: 6, halfSize: 5, featherRadius: 4)
+        #expect(abs(along - across) < 1e-6)
+    }
+
+    @Test("zero feather radius gives a hard square: 1 inside, 0 outside")
+    func hardSquare() {
+        let inside = APFeather.weight(dx: 4, dy: 4, halfSize: 5, featherRadius: 0)
+        let outside = APFeather.weight(dx: 6, dy: 0, halfSize: 5, featherRadius: 0)
+        #expect(inside == 1.0)
+        #expect(outside == 0.0)
+    }
+
+    @Test("buildWeightMap returns the expected size")
+    func weightMapSize() {
+        let m = APFeather.buildWeightMap(size: 32, featherRadius: 8)
+        #expect(m.count == 32 * 32)
+    }
+
+    @Test("buildWeightMap is symmetric around the centre")
+    func weightMapSymmetric() {
+        let size = 16
+        let m = APFeather.buildWeightMap(size: size, featherRadius: 4)
+        // For an even-sized map, opposite corners should match
+        // (rotational symmetry of the raised-cosine + Chebyshev metric).
+        for y in 0..<size {
+            for x in 0..<size {
+                let v0 = m[y * size + x]
+                let v1 = m[(size - 1 - y) * size + (size - 1 - x)]
+                #expect(abs(v0 - v1) < 1e-5)
+            }
+        }
+    }
+
+    @Test("buildWeightMap centre weight is full (1.0)")
+    func weightMapCentreFull() {
+        let size = 32
+        let m = APFeather.buildWeightMap(size: size, featherRadius: 4)
+        // Centre pixel index is (size/2, size/2) — for even size, that
+        // is the lower-right of the four central pixels.
+        let cx = size / 2
+        let cy = size / 2
+        #expect(m[cy * size + cx] == 1.0)
+    }
+
+    @Test("buildWeightMap corners are 0 when feather covers them")
+    func weightMapCornersZero() {
+        let size = 16
+        // featherRadius = size/2 = 8 means feather extends to the
+        // corners — corner pixel weight should be 0.
+        let m = APFeather.buildWeightMap(size: size, featherRadius: size / 2)
+        // Corners at (0,0), (size-1, 0), (0, size-1), (size-1, size-1).
+        let corner = m[0]
+        // Approximation: corner is at distance ~size/2 + 0.5 (pixel
+        // centre offset), just past the feather edge → weight ~0.
+        #expect(corner < 0.05)
+    }
+
+    @Test("default feather radius uses 25% of AP size")
+    func defaultFractionMatchesPlan() {
+        #expect(APFeather.defaultFeatherFraction == 0.25)
+        #expect(APFeather.defaultFeatherRadius(forAPSize: 64) == 16)
+        #expect(APFeather.defaultFeatherRadius(forAPSize: 32) == 8)
+    }
+}
+
 // MARK: - Bilinear sub-pixel shift
 
 @Suite("BilinearShift — sub-pixel channel translation")
