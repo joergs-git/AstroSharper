@@ -20,6 +20,14 @@ schemes:
         AstroSharperCLI: all
     run:
       config: Debug
+  AstroSharperTests:
+    build:
+      targets:
+        AstroSharperTests: all
+    test:
+      config: Debug
+      targets:
+        - AstroSharperTests
 
 settings:
   base:
@@ -73,5 +81,29 @@ targets:
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         ENABLE_APP_SANDBOX: NO
         ENABLE_HARDENED_RUNTIME: NO
+        DEVELOPMENT_TEAM: FDSVBU33S8
+        CODE_SIGN_STYLE: Automatic
+
+  # Pure-engine unit tests. Hosted in the AstroSharper app target so we
+  # can `@testable import AstroSharper` and reach the engine's internal
+  # symbols without exposing them publicly. Tests must stay
+  # GPU-independent — the heavy regression work lives in the CLI-driven
+  # F3 harness against TESTIMAGES/.
+  AstroSharperTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+        excludes:
+          - "**/.DS_Store"
+    dependencies:
+      - target: AstroSharper
+    settings:
+      base:
+        PRODUCT_NAME: AstroSharperTests
+        PRODUCT_MODULE_NAME: AstroSharperTests
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        GENERATE_INFOPLIST_FILE: YES
         DEVELOPMENT_TEAM: FDSVBU33S8
         CODE_SIGN_STYLE: Automatic
