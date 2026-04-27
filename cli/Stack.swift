@@ -18,7 +18,7 @@ enum Stack {
         // Parse CLI args.
         var inputPath: String?
         var outputPath: String?
-        var keepPercent = 25
+        var keepPercents: [Int] = [25]
         var metricsPath: String?
         var quiet = false
         var i = 0
@@ -26,13 +26,18 @@ enum Stack {
             let arg = args[i]
             switch arg {
             case "--keep":
-                guard i + 1 < args.count, let v = Int(args[i + 1]),
-                      v >= 1, v <= 99
-                else {
-                    cliStderr("stack: --keep requires an integer in [1, 99]")
+                // Accept "25" (single) or "20,40,60,80" (multi-%).
+                guard i + 1 < args.count else {
+                    cliStderr("stack: --keep requires an integer or comma-separated list in [1, 99]")
                     return 64
                 }
-                keepPercent = v
+                let raw = args[i + 1]
+                let parsed = LuckyKeepPercents.parse(raw)
+                guard !parsed.isEmpty else {
+                    cliStderr("stack: --keep value '\(raw)' didn't parse to any valid percentage in [\(LuckyKeepPercents.minPercent), \(LuckyKeepPercents.maxPercent)]")
+                    return 64
+                }
+                keepPercents = parsed
                 i += 2
             case "--metrics":
                 guard i + 1 < args.count else {
@@ -62,12 +67,12 @@ enum Stack {
 
         guard let input = inputPath, let output = outputPath else {
             cliStderr("stack: missing input or output path")
-            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N] [--metrics file.json] [--quiet]")
+            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--metrics file.json] [--quiet]")
             return 64
         }
 
         let inputURL  = URL(fileURLWithPath: input)
-        let outputURL = URL(fileURLWithPath: output)
+        let outputURLBase = URL(fileURLWithPath: output)
 
         guard FileManager.default.fileExists(atPath: inputURL.path) else {
             cliStderr("stack: input file not found: \(inputURL.path)")
@@ -82,48 +87,80 @@ enum Stack {
         }
 
         // Make sure the output directory exists.
-        let outputDir = outputURL.deletingLastPathComponent()
+        let outputDir = outputURLBase.deletingLastPathComponent()
         try? FileManager.default.createDirectory(
             at: outputDir, withIntermediateDirectories: true
         )
 
-        var options = LuckyStackOptions()
-        options.keepPercent = keepPercent
-
         let pipeline = Pipeline()
 
-        let started = Date()
-        do {
-            let resultURL = try await LuckyStack.runAsync(
-                sourceURL: inputURL,
-                outputURL: outputURL,
-                options: options,
-                pipeline: pipeline
-            ) { progress in
-                if !quiet {
-                    Self.printProgress(progress)
-                }
+        // For a single percentage, write to the user's chosen path
+        // unchanged. For multi-% runs, derive N output paths by
+        // appending the SharpCap-style "_p<n>" suffix before the
+        // extension. This matches BiggSky's documented multi-%
+        // workflow: one input → multiple stacked outputs side-by-side.
+        let outputPlan: [(percent: Int, url: URL)] = keepPercents.map { pct in
+            if keepPercents.count == 1 {
+                return (pct, outputURLBase)
             }
-            let elapsed = Date().timeIntervalSince(started)
-
-            if !quiet {
-                print("stack: wrote \(resultURL.path) in \(String(format: "%.2f", elapsed)) s")
-            }
-
-            if let metricsPath {
-                try writeMetricsJSON(
-                    to: URL(fileURLWithPath: metricsPath),
-                    inputURL: inputURL,
-                    outputURL: resultURL,
-                    keepPercent: keepPercent,
-                    elapsedSeconds: elapsed
-                )
-            }
-            return 0
-        } catch {
-            cliStderr("stack: \(error.localizedDescription)")
-            return 1
+            let dir = outputURLBase.deletingLastPathComponent()
+            let base = outputURLBase.deletingPathExtension().lastPathComponent
+            let suffix = LuckyKeepPercents.filenameSuffix(percent: pct)
+            let ext = outputURLBase.pathExtension
+            let name = ext.isEmpty ? "\(base)\(suffix)" : "\(base)\(suffix).\(ext)"
+            return (pct, dir.appendingPathComponent(name))
         }
+
+        var perPercentMetrics: [[String: Any]] = []
+        let runStart = Date()
+        for plan in outputPlan {
+            var options = LuckyStackOptions()
+            options.keepPercent = plan.percent
+
+            let started = Date()
+            if !quiet, keepPercents.count > 1 {
+                print("stack: starting keep=\(plan.percent)% → \(plan.url.lastPathComponent)")
+            }
+            do {
+                let resultURL = try await LuckyStack.runAsync(
+                    sourceURL: inputURL,
+                    outputURL: plan.url,
+                    options: options,
+                    pipeline: pipeline
+                ) { progress in
+                    if !quiet {
+                        Self.printProgress(progress)
+                    }
+                }
+                let elapsed = Date().timeIntervalSince(started)
+                let outputBytes = (
+                    (try? FileManager.default.attributesOfItem(atPath: resultURL.path))?[.size] as? Int
+                ) ?? 0
+                perPercentMetrics.append([
+                    "keepPercent": plan.percent,
+                    "outputFile": resultURL.lastPathComponent,
+                    "outputBytes": outputBytes,
+                    "elapsedSeconds": elapsed
+                ])
+                if !quiet {
+                    print("stack: wrote \(resultURL.path) (keep=\(plan.percent)%) in \(String(format: "%.2f", elapsed)) s")
+                }
+            } catch {
+                cliStderr("stack: keep=\(plan.percent)%: \(error.localizedDescription)")
+                return 1
+            }
+        }
+        let totalElapsed = Date().timeIntervalSince(runStart)
+
+        if let metricsPath {
+            try? writeMultiMetricsJSON(
+                to: URL(fileURLWithPath: metricsPath),
+                inputURL: inputURL,
+                perPercent: perPercentMetrics,
+                totalElapsedSeconds: totalElapsed
+            )
+        }
+        return 0
     }
 
     // MARK: - Helpers
@@ -156,22 +193,26 @@ enum Stack {
         }
     }
 
-    private static func writeMetricsJSON(
+    /// Single- or multi-percentage metrics. For single-% runs the
+    /// shape is the same as before plus the percentage list (length
+    /// 1). For multi-% the per-percent details land in
+    /// `keepPercents` so the regression harness can diff each output
+    /// independently while the total wall-clock stays at the top
+    /// level.
+    private static func writeMultiMetricsJSON(
         to url: URL,
         inputURL: URL,
-        outputURL: URL,
-        keepPercent: Int,
-        elapsedSeconds: TimeInterval
+        perPercent: [[String: Any]],
+        totalElapsedSeconds: TimeInterval
     ) throws {
-        let outputAttrs = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)) ?? [:]
-        let outputBytes = (outputAttrs[.size] as? Int) ?? 0
-
+        // Sort entries by keepPercent for stable JSON ordering.
+        let sortedPerPercent = perPercent.sorted { lhs, rhs in
+            ((lhs["keepPercent"] as? Int) ?? 0) < ((rhs["keepPercent"] as? Int) ?? 0)
+        }
         let metrics: [String: Any] = [
             "inputFile": inputURL.lastPathComponent,
-            "outputFile": outputURL.lastPathComponent,
-            "keepPercent": keepPercent,
-            "elapsedSeconds": elapsedSeconds,
-            "outputBytes": outputBytes
+            "elapsedSeconds": totalElapsedSeconds,
+            "keepPercents": sortedPerPercent
         ]
         let data = try JSONSerialization.data(
             withJSONObject: metrics,

@@ -1,6 +1,10 @@
 {
   "inputFile": "2022-12-10-0254_3.ser",
-  "keepPercent": 25,
-  "outputBytes": 991506,
-  "outputFile": "biggsky__2022-12-10-0254_3.ser.stack.tif"
+  "keepPercents": [
+    {
+      "keepPercent": 25,
+      "outputBytes": 991506,
+      "outputFile": "biggsky__2022-12-10-0254_3.ser.stack.tif"
+    }
+  ]
 }

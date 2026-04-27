@@ -113,14 +113,20 @@ slug_for() {
   printf '%s' "$rel"
 }
 
-# Strip the elapsedSeconds field (and any other non-deterministic
-# fields) from a stack metrics JSON before diffing. Falls back to a
-# simple grep filter when jq isn't available.
+# Strip every elapsedSeconds field — at any depth — before diffing.
+# Stack metrics JSON nests per-percentage entries under
+# `keepPercents`, each with its own elapsedSeconds; both the top-level
+# wall-clock and the per-stack timings are non-deterministic and would
+# trigger false-positive drift. `jq`'s recursive descent (`..`) walks
+# every nested object. The grep fallback is best-effort — runs may
+# show false-drift on multi-line entries on systems without jq.
 strip_volatile_fields() {
   local in_path="$1"
   local out_path="$2"
   if command -v jq >/dev/null 2>&1; then
-    jq 'del(.elapsedSeconds)' "$in_path" > "$out_path"
+    # `del(.. | objects | .elapsedSeconds?)` deletes the field on
+    # every object in the tree where it exists.
+    jq 'del(.. | objects | .elapsedSeconds?)' "$in_path" > "$out_path"
   else
     grep -v '"elapsedSeconds"' "$in_path" > "$out_path"
   fi
