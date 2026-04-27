@@ -221,6 +221,61 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - LuckyKeepPercents parser
+
+@Suite("LuckyKeepPercents — multi-% input parser")
+struct LuckyKeepPercentsTests {
+
+    @Test("Parses BiggSky reference example '20, 40, 60, 80'")
+    func biggSkyReference() {
+        #expect(LuckyKeepPercents.parse("20, 40, 60, 80") == [20, 40, 60, 80])
+    }
+
+    @Test("Tolerates whitespace and percent symbols")
+    func tolerantParser() {
+        #expect(LuckyKeepPercents.parse("20,40, 60 , 80%") == [20, 40, 60, 80])
+        #expect(LuckyKeepPercents.parse("  25  ") == [25])
+        #expect(LuckyKeepPercents.parse("20;40;60") == [20, 40, 60])
+    }
+
+    @Test("Sorts ascending")
+    func sortsAscending() {
+        #expect(LuckyKeepPercents.parse("60, 20, 40") == [20, 40, 60])
+    }
+
+    @Test("Deduplicates")
+    func deduplicates() {
+        #expect(LuckyKeepPercents.parse("20, 20, 40, 40") == [20, 40])
+    }
+
+    @Test("Rejects out-of-range and non-numeric tokens")
+    func rejectsInvalid() {
+        // 0 and 100+ are out of range; 'foo' isn't an int.
+        #expect(LuckyKeepPercents.parse("20, foo, 40, 200, 0") == [20, 40])
+        #expect(LuckyKeepPercents.parse("100, 50, -5") == [50])
+    }
+
+    @Test("Empty string returns empty array")
+    func emptyIsEmpty() {
+        #expect(LuckyKeepPercents.parse("") == [])
+        #expect(LuckyKeepPercents.parse("   ") == [])
+        #expect(LuckyKeepPercents.parse(",,,") == [])
+    }
+
+    @Test("format is the inverse of parse for clean inputs")
+    func formatRoundTrip() {
+        let parsed = LuckyKeepPercents.parse("20, 40, 60, 80")
+        #expect(LuckyKeepPercents.format(parsed) == "20, 40, 60, 80")
+    }
+
+    @Test("filename suffix uses SharpCap _p<n> convention")
+    func filenameSuffix() {
+        #expect(LuckyKeepPercents.filenameSuffix(percent: 25)  == "_p25")
+        #expect(LuckyKeepPercents.filenameSuffix(percent: 5)   == "_p5")
+        #expect(LuckyKeepPercents.filenameSuffix(percent: 100) == "_p100")
+    }
+}
+
 // MARK: - Calibration policy
 
 @Suite("CalibrationPolicy — auto-skip rule")
