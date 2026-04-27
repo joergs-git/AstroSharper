@@ -441,9 +441,20 @@ kernel void unpack_bayer8_to_rgba(
 
 // MARK: - Quality grading
 //
-// Per-frame Laplacian variance via threadgroup-local reduction. Each group
-// emits one (sum, sumSq, count) triple to a flat partials buffer indexed by
-// frame; final variance resolves on CPU. Avoids cross-frame syncs entirely.
+// Per-frame quality scoring via Diagonal Laplacian (LAPD) variance,
+// reduced threadgroup-locally. Each group emits one (sum, sumSq, count)
+// triple to a flat partials buffer indexed by frame; final variance
+// resolves on CPU. Avoids cross-frame syncs entirely.
+//
+// LAPD vs the 4-neighbour cross Laplacian: LAPD samples both cardinal
+// AND diagonal neighbours, weighted by 1/distance² (cardinal=1.0,
+// diagonal=0.5). This makes the operator more rotation-invariant —
+// 4-neighbour cross sees diagonal edges as "blurred" because the
+// kernel doesn't sample along the edge direction. For planetary work
+// this matters: Jupiter's NEB and SEB are roughly horizontal, but Mars
+// surface features and lunar terminator gradients hit every angle.
+// MDPI 2076-3417/13/4/2652 reports LAPD outperforms VL in seeing-
+// limited regimes — exactly our domain.
 
 struct QualityPartial {
     float sum;
@@ -456,15 +467,38 @@ inline float luma_lq(float4 c) {
     return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
 }
 
+/// LAPD (Diagonal Laplacian): isotropic 8-neighbour second-derivative
+/// discretisation. Cardinal neighbours weight 1.0 (distance 1), diagonal
+/// neighbours weight 0.5 (distance √2 → 1/d² = 0.5). Centre coefficient
+/// is -(4·1 + 4·0.5) = -6 so the kernel sums to zero on a constant
+/// field — uniform regions correctly score 0.
 inline float laplacian_at(texture2d<float, access::read> tex, uint2 gid) {
     uint W = tex.get_width(), H = tex.get_height();
     if (gid.x == 0 || gid.y == 0 || gid.x + 1 >= W || gid.y + 1 >= H) return 0.0;
-    float c = luma_lq(tex.read(gid));
-    float l = luma_lq(tex.read(uint2(gid.x - 1, gid.y)));
-    float r = luma_lq(tex.read(uint2(gid.x + 1, gid.y)));
-    float t = luma_lq(tex.read(uint2(gid.x,     gid.y - 1)));
-    float b = luma_lq(tex.read(uint2(gid.x,     gid.y + 1)));
-    return (l + r + t + b) - 4.0 * c;
+    float c  = luma_lq(tex.read(gid));
+    float l  = luma_lq(tex.read(uint2(gid.x - 1, gid.y)));
+    float r  = luma_lq(tex.read(uint2(gid.x + 1, gid.y)));
+    float t  = luma_lq(tex.read(uint2(gid.x,     gid.y - 1)));
+    float b  = luma_lq(tex.read(uint2(gid.x,     gid.y + 1)));
+    float tl = luma_lq(tex.read(uint2(gid.x - 1, gid.y - 1)));
+    float tr = luma_lq(tex.read(uint2(gid.x + 1, gid.y - 1)));
+    float bl = luma_lq(tex.read(uint2(gid.x - 1, gid.y + 1)));
+    float br = luma_lq(tex.read(uint2(gid.x + 1, gid.y + 1)));
+    return (l + r + t + b) + 0.5 * (tl + tr + bl + br) - 6.0 * c;
+}
+
+/// Per-pixel LAPD field — used by SharpnessProbe to feed
+/// MPSImageStatisticsMeanAndVariance. Mirrors `laplacian_at` exactly so
+/// the HUD probe and the bulk lucky-stack grader produce comparable
+/// numbers.
+kernel void compute_lapd_field(
+    texture2d<float, access::read>  src [[texture(0)]],
+    texture2d<float, access::write> dst [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= src.get_width() || gid.y >= src.get_height()) return;
+    float v = laplacian_at(src, gid);
+    dst.write(float4(v, v, v, 1.0), gid);
 }
 
 kernel void quality_partials(

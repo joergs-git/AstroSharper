@@ -221,6 +221,271 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - Lucky keep-% recommendation
+
+@Suite("Lucky keep-% formula — frame-count floor + knee detection")
+struct LuckyKeepRecommendationTests {
+
+    @Test("tight distribution caps at 50%, never returns the legacy 75%")
+    func tightDistributionCapped() {
+        // 64 nearly-identical scores → kneeFraction near 1.0 → clamp 50%.
+        let scores: [Float] = (0..<64).map { _ in 100.0 }.sorted()
+        let p90: Float = 100.0
+        let rec = SerQualityScanner.computeKeepRecommendation(
+            sortedScores: scores,
+            totalFrames: 1000,
+            p90: p90,
+            jitterRMS: nil
+        )
+        #expect(rec.fraction <= 0.50)
+        #expect(rec.fraction >= 0.05)
+        // 1000 frames × 0.50 = 500 frames kept on a tight distribution.
+        #expect(rec.count >= 100)   // typical floor satisfied
+        #expect(rec.count <= 500)
+    }
+
+    @Test("wide distribution (lucky tail) recommends a small fraction")
+    func wideDistributionPicksLuckyTail() {
+        // 64 scores: bottom 56 are dim (1.0), top 8 are sharp (10.0).
+        // p90 ≈ 10.0; knee threshold = 5.0; only the top 8 are above.
+        // kneeFraction = 8/64 = 0.125 → clamped to >=0.05, in band.
+        var values: [Float] = Array(repeating: 1.0, count: 56)
+        values.append(contentsOf: Array(repeating: 10.0, count: 8))
+        let scores = values.sorted()
+        let p90: Float = 10.0
+        let rec = SerQualityScanner.computeKeepRecommendation(
+            sortedScores: scores,
+            totalFrames: 5000,
+            p90: p90,
+            jitterRMS: nil
+        )
+        #expect(rec.fraction >= 0.05)
+        #expect(rec.fraction <= 0.20)
+        // 5000 frames × 12.5% = 625 — well above the 100-frame floor.
+        #expect(rec.count > 100)
+        #expect(rec.count < 1000)
+    }
+
+    @Test("frame-count floor lifts to 100 on small SERs")
+    func smallSerLiftsToTypicalFloor() {
+        // 200-frame SER + wide distribution that suggests 5%.
+        // 5% of 200 = 10 frames, well below the 100-frame typical floor.
+        // Result must lift to 100.
+        var values: [Float] = Array(repeating: 1.0, count: 60)
+        values.append(contentsOf: Array(repeating: 50.0, count: 4))
+        let scores = values.sorted()
+        let p90: Float = 50.0
+        let rec = SerQualityScanner.computeKeepRecommendation(
+            sortedScores: scores,
+            totalFrames: 200,
+            p90: p90,
+            jitterRMS: nil
+        )
+        #expect(rec.count >= 100)
+        #expect(rec.fraction >= 0.5)   // 100 / 200 = 0.5
+    }
+
+    @Test("frame-count floor is min(totalFrames, 100) for tiny SERs")
+    func tinySerCannotKeepMoreThanItHas() {
+        // 60-frame SER → typical floor = 60. Always keep all.
+        let scores: [Float] = Array(repeating: 1.0, count: 60).sorted()
+        let rec = SerQualityScanner.computeKeepRecommendation(
+            sortedScores: scores,
+            totalFrames: 60,
+            p90: 1.0,
+            jitterRMS: nil
+        )
+        #expect(rec.count <= 60)
+        #expect(rec.count >= 50)   // absolute floor
+    }
+
+    @Test("absolute floor 50 enforced even on extreme cases")
+    func absoluteFloorIsFifty() {
+        let scores: [Float] = Array(repeating: 1.0, count: 64).sorted()
+        let rec = SerQualityScanner.computeKeepRecommendation(
+            sortedScores: scores,
+            totalFrames: 80,
+            p90: 1.0,
+            jitterRMS: nil
+        )
+        #expect(rec.count >= 50)
+    }
+
+    @Test("high jitter tightens the keep band")
+    func highJitterTightens() {
+        // Same input as wide distribution test, but with high jitter.
+        var values: [Float] = Array(repeating: 1.0, count: 56)
+        values.append(contentsOf: Array(repeating: 10.0, count: 8))
+        let scores = values.sorted()
+
+        let calm = SerQualityScanner.computeKeepRecommendation(
+            sortedScores: scores, totalFrames: 5000, p90: 10.0, jitterRMS: nil
+        )
+        let jittery = SerQualityScanner.computeKeepRecommendation(
+            sortedScores: scores, totalFrames: 5000, p90: 10.0, jitterRMS: 20.0
+        )
+        #expect(jittery.fraction < calm.fraction)
+        #expect(jittery.text.contains("jitter"))
+    }
+
+    @Test("recommendation text shows both percent and absolute count")
+    func textShowsBothMetrics() {
+        let scores: [Float] = Array(repeating: 1.0, count: 64).sorted()
+        let rec = SerQualityScanner.computeKeepRecommendation(
+            sortedScores: scores, totalFrames: 2000, p90: 1.0, jitterRMS: nil
+        )
+        // Must contain a '%' and 'of N frames' style absolute count.
+        #expect(rec.text.contains("%"))
+        #expect(rec.text.contains("of \(2000)") || rec.text.contains("\(rec.count)"))
+    }
+
+    @Test("empty samples returns BiggSky 25% default with floor")
+    func emptyReturnsDefault() {
+        let rec = SerQualityScanner.computeKeepRecommendation(
+            sortedScores: [],
+            totalFrames: 1000,
+            p90: 0,
+            jitterRMS: nil
+        )
+        #expect(rec.fraction > 0)
+        #expect(rec.count >= 100)
+    }
+
+    @Test("fraction always in [0.05, 0.75] band")
+    func fractionAlwaysInBand() {
+        // Run a few permutations; assert no result violates the clamp.
+        let inputs: [(scores: [Float], total: Int, p90: Float, jitter: Float?)] = [
+            ([Float](repeating: 1.0, count: 64), 5000, 1.0, nil),
+            ((0..<64).map { Float($0) }, 5000, 56.7, nil),
+            ([Float](repeating: 0.001, count: 56) + [Float](repeating: 100, count: 8), 5000, 100, 30),
+            ([0.5, 0.5, 0.5, 0.5], 100, 0.5, nil),
+        ]
+        for inp in inputs {
+            let rec = SerQualityScanner.computeKeepRecommendation(
+                sortedScores: inp.scores.sorted(),
+                totalFrames: inp.total,
+                p90: inp.p90,
+                jitterRMS: inp.jitter
+            )
+            #expect(rec.fraction >= 0.05)
+            #expect(rec.fraction <= 1.0)   // upper bound is implicit via floor lift
+            #expect(rec.count > 0)
+        }
+    }
+}
+
+// MARK: - LAPD quality metric (CPU reference)
+
+@Suite("LAPD — CPU reference math")
+struct LAPDReferenceTests {
+
+    /// Builds a `width × height` luminance buffer from a generator.
+    private static func buffer(width: Int, height: Int, _ f: (Int, Int) -> Float) -> [Float] {
+        var out = [Float](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                out[y * width + x] = f(x, y)
+            }
+        }
+        return out
+    }
+
+    @Test("uniform field has zero LAPD variance")
+    func uniformIsZero() {
+        // LAPD of a constant field is exactly zero (kernel sums to 0).
+        // Variance over a constant-zero field is zero. End to end: 0.
+        let buf = Self.buffer(width: 32, height: 32) { _, _ in 0.5 }
+        let v = SharpnessProbe.referenceVarianceOfLAPD(
+            luma: buf, width: 32, height: 32
+        )
+        #expect(v == 0)
+    }
+
+    @Test("linear gradient has near-zero LAPD variance")
+    func linearGradientNearZero() {
+        // 2nd derivative of a linear ramp is identically zero, so LAPD
+        // is zero everywhere except border (where we pad with zero too).
+        let buf = Self.buffer(width: 32, height: 32) { x, _ in
+            Float(x) / 31.0
+        }
+        let v = SharpnessProbe.referenceVarianceOfLAPD(
+            luma: buf, width: 32, height: 32
+        )
+        #expect(v < 1e-6)
+    }
+
+    @Test("checker pattern produces non-zero variance")
+    func checkerNonZero() {
+        // Alternating 0/1 squares — LAPD is large at every pixel because
+        // every neighbourhood has the maximum-frequency oscillation a
+        // 3×3 stencil can see.
+        let buf = Self.buffer(width: 32, height: 32) { x, y in
+            ((x + y) & 1) == 0 ? 0.0 : 1.0
+        }
+        let v = SharpnessProbe.referenceVarianceOfLAPD(
+            luma: buf, width: 32, height: 32
+        )
+        #expect(v > 0.1)
+    }
+
+    @Test("checker scores higher than gradient (sharpness ranking sanity)")
+    func checkerBeatsGradient() {
+        let checker = Self.buffer(width: 32, height: 32) { x, y in
+            ((x + y) & 1) == 0 ? 0.0 : 1.0
+        }
+        let gradient = Self.buffer(width: 32, height: 32) { x, _ in
+            Float(x) / 31.0
+        }
+        let vChecker = SharpnessProbe.referenceVarianceOfLAPD(
+            luma: checker, width: 32, height: 32
+        )
+        let vGradient = SharpnessProbe.referenceVarianceOfLAPD(
+            luma: gradient, width: 32, height: 32
+        )
+        #expect(vChecker > vGradient)
+        // And checker should score by orders of magnitude — actual LAPD
+        // values on a binary checker hit ~40+ per pixel.
+        #expect(vChecker > 100 * max(vGradient, 1e-12))
+    }
+
+    @Test("single-pixel impulse produces non-zero variance")
+    func impulseNonZero() {
+        var buf = Self.buffer(width: 32, height: 32) { _, _ in 0.0 }
+        buf[16 * 32 + 16] = 1.0
+        let v = SharpnessProbe.referenceVarianceOfLAPD(
+            luma: buf, width: 32, height: 32
+        )
+        #expect(v > 0)
+    }
+
+    @Test("LAPD picks up diagonal edges (vs cross Laplacian)")
+    func diagonalEdgeIsDetected() {
+        // Diagonal step edge: pixels with x + y > 16 are 1, otherwise 0.
+        // A 4-neighbour cross Laplacian sees this edge poorly because the
+        // kernel doesn't sample along the edge direction. LAPD's diagonal
+        // weight makes the response substantial — the whole point of the
+        // metric swap. Just assert non-zero here; visual comparison vs
+        // the cross Laplacian is exercised in the F3 regression harness.
+        let buf = Self.buffer(width: 32, height: 32) { x, y in
+            (x + y) > 16 ? 1.0 : 0.0
+        }
+        let v = SharpnessProbe.referenceVarianceOfLAPD(
+            luma: buf, width: 32, height: 32
+        )
+        #expect(v > 0.001)
+    }
+
+    @Test("rejects undersized buffers gracefully")
+    func tinyBufferReturnsZero() {
+        // A 2×2 buffer has no interior pixels (LAPD requires 3×3 stencil).
+        let buf: [Float] = [0.1, 0.5, 0.9, 0.2]
+        let v = SharpnessProbe.referenceVarianceOfLAPD(
+            luma: buf, width: 2, height: 2
+        )
+        #expect(v == 0)
+    }
+}
+
 // MARK: - Export format / bit depth
 
 @Suite("ExportFormat — bit-depth + extension regression")

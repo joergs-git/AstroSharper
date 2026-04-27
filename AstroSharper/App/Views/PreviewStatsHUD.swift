@@ -61,13 +61,13 @@ struct PreviewStatsHUD: View {
                             .help("Root-mean-square frame-to-frame shift (phase correlation between adjacent samples). Higher = more atmospheric motion to register.")
                     }
                 }
-                Text("Recommend: keep top \(Int(d.recommendedKeepFraction * 100))%")
+                Text("Recommend: keep top \(Int(d.recommendedKeepFraction * 100))% (\(d.recommendedKeepCount) of \(d.totalFrames))")
                     .fontWeight(.semibold)
                     .foregroundColor(.yellow)
                 Text(d.recommendationText)
                     .foregroundColor(.secondary)
-                    .lineLimit(2)
-                    .frame(maxWidth: 280, alignment: .leading)
+                    .lineLimit(3)
+                    .frame(maxWidth: 320, alignment: .leading)
             } else if stats.totalFrames > 1 {
                 // Distribution not yet computed for this video. Offer an
                 // explicit "Calculate Video Quality" button instead of

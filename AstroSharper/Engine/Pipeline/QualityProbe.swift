@@ -52,6 +52,10 @@ struct PreviewStats: Equatable {
 
 struct SharpnessDistribution: Equatable, Codable {
     let sampleCount: Int
+    /// Total frames in the source SER. Used by the keep-% recommender to
+    /// enforce the absolute / typical frame-count floors on the actual
+    /// stack size, not the 64-sample probe scan.
+    let totalFrames: Int
     let median: Float
     let p10: Float
     let p90: Float
@@ -64,15 +68,29 @@ struct SharpnessDistribution: Equatable, Codable {
     var jitterRMS: Float? = nil
     /// Recommended fraction (0…1) of best frames to keep when stacking.
     let recommendedKeepFraction: Double
-    /// Human-readable recommendation rationale.
+    /// Recommended absolute frame count to keep — `recommendedKeepFraction
+    /// × totalFrames`, lifted to the floor when the fraction would drop
+    /// the count below ~100 frames. Always >= 50 even for tiny SERs.
+    let recommendedKeepCount: Int
+    /// Human-readable recommendation rationale, includes both the
+    /// percentage and the absolute count so the user can sanity-check
+    /// without doing arithmetic.
     let recommendationText: String
 }
 
 // MARK: - Sharpness probe
 
-/// Variance of Laplacian — a scale-invariant, contrast-sensitive proxy for
-/// image sharpness. Higher = sharper. Used by Computer Vision libraries as
-/// a focus/blur metric for decades.
+/// Variance of Diagonal Laplacian (LAPD) — a scale-invariant, contrast-
+/// sensitive proxy for image sharpness. Higher = sharper.
+///
+/// LAPD uses an 8-neighbour kernel weighted by 1/distance² (cardinal
+/// neighbours = 1.0, diagonal neighbours = 0.5, centre = -6). Versus
+/// the classic 4-neighbour cross Laplacian, LAPD picks up edges at any
+/// orientation rather than penalising diagonals — empirically better
+/// in seeing-limited regimes per MDPI 2076-3417/13/4/2652. The probe
+/// reduces the LAPD field to a single variance via
+/// `MPSImageStatisticsMeanAndVariance` so the legacy "single Float per
+/// frame" API is preserved.
 ///
 /// Performance notes
 /// -----------------
@@ -94,7 +112,7 @@ final class SharpnessProbe {
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
-    private let laplacian: MPSImageLaplacian
+    private let lapdPSO: MTLComputePipelineState
     private let stats: MPSImageStatisticsMeanAndVariance
 
     // Cache temp textures by (width, height, sourcePixelFormat). All probe
@@ -110,7 +128,13 @@ final class SharpnessProbe {
     init(device: MTLDevice) {
         self.device = device
         self.commandQueue = device.makeCommandQueue()!
-        self.laplacian = MPSImageLaplacian(device: device)
+        guard let lib = MetalDevice.shared.library,
+              let fn = lib.makeFunction(name: "compute_lapd_field"),
+              let pso = try? device.makeComputePipelineState(function: fn)
+        else {
+            fatalError("SharpnessProbe: missing compute_lapd_field kernel")
+        }
+        self.lapdPSO = pso
         self.stats = MPSImageStatisticsMeanAndVariance(device: device)
     }
 
@@ -132,8 +156,28 @@ final class SharpnessProbe {
         // same-shaped textures don't trample each other on the cached
         // statsTex.getBytes. Probe runs ~1 ms so contention is negligible.
         defer { cacheLock.unlock() }
-        guard let cmd = commandQueue.makeCommandBuffer(), let e = entry else { return .nan }
-        laplacian.encode(commandBuffer: cmd, sourceTexture: src, destinationTexture: e.lap)
+        guard
+            let cmd = commandQueue.makeCommandBuffer(),
+            let e = entry,
+            let enc = cmd.makeComputeCommandEncoder()
+        else { return .nan }
+
+        // Pass 1: per-pixel LAPD field.
+        enc.setComputePipelineState(lapdPSO)
+        enc.setTexture(src, index: 0)
+        enc.setTexture(e.lap, index: 1)
+        let tgw = lapdPSO.threadExecutionWidth
+        let tgh = lapdPSO.maxTotalThreadsPerThreadgroup / tgw
+        let tgSize = MTLSize(width: tgw, height: tgh, depth: 1)
+        let tgCount = MTLSize(
+            width: (src.width  + tgw - 1) / tgw,
+            height: (src.height + tgh - 1) / tgh,
+            depth: 1
+        )
+        enc.dispatchThreadgroups(tgCount, threadsPerThreadgroup: tgSize)
+        enc.endEncoding()
+
+        // Pass 2: variance reduction over the LAPD field.
         stats.encode(commandBuffer: cmd, sourceTexture: e.lap, destinationTexture: e.stats)
         cmd.commit()
         cmd.waitUntilCompleted()
@@ -147,6 +191,55 @@ final class SharpnessProbe {
                          mipmapLevel: 0)
         let v = (pix[0] + pix[1] + pix[2]) / 3.0
         return v.isFinite ? v : 0
+    }
+
+    // MARK: - CPU reference (unit-testable, GPU-independent)
+
+    /// CPU implementation of the LAPD operator that mirrors
+    /// `compute_lapd_field` / `laplacian_at` in Shaders.metal byte-for-byte.
+    /// Used by the test target to assert kernel correctness and by any
+    /// host-tool that wants a sharpness number without booting Metal.
+    ///
+    /// `pixels` is a row-major luminance buffer of size `width * height`.
+    /// Returns the variance of the LAPD field — the same scalar the GPU
+    /// path produces (modulo float rounding), so the two can be diffed
+    /// in regression tests on synthetic inputs.
+    static func referenceVarianceOfLAPD(
+        luma pixels: [Float],
+        width: Int,
+        height: Int
+    ) -> Float {
+        precondition(pixels.count == width * height, "buffer size mismatch")
+        guard width >= 3, height >= 3 else { return 0 }
+
+        // Pass 1: build the LAPD field (border pixels = 0).
+        var lapd = [Float](repeating: 0, count: width * height)
+        for y in 1..<(height - 1) {
+            for x in 1..<(width - 1) {
+                let c  = pixels[y * width + x]
+                let l  = pixels[y * width + (x - 1)]
+                let r  = pixels[y * width + (x + 1)]
+                let t  = pixels[(y - 1) * width + x]
+                let b  = pixels[(y + 1) * width + x]
+                let tl = pixels[(y - 1) * width + (x - 1)]
+                let tr = pixels[(y - 1) * width + (x + 1)]
+                let bl = pixels[(y + 1) * width + (x - 1)]
+                let br = pixels[(y + 1) * width + (x + 1)]
+                lapd[y * width + x] =
+                    (l + r + t + b) + 0.5 * (tl + tr + bl + br) - 6.0 * c
+            }
+        }
+
+        // Pass 2: variance over the whole field (matches the GPU path's
+        // MPSImageStatisticsMeanAndVariance reduction, which divides by N
+        // including border zeros).
+        let n = Float(pixels.count)
+        var sum: Float = 0
+        for v in lapd { sum += v }
+        let mean = sum / n
+        var sumSq: Float = 0
+        for v in lapd { let d = v - mean; sumSq += d * d }
+        return sumSq / n
     }
 
     private func makeEntry(for src: MTLTexture) -> CacheEntry? {
@@ -242,7 +335,11 @@ final class SerQualityScanner {
             let jitter: Float? = shiftCount > 0
                 ? Float((shiftSqSum / Double(shiftCount)).squareRoot())
                 : nil
-            let dist = Self.makeDistribution(scores: scores, jitterRMS: jitter)
+            let dist = Self.makeDistribution(
+                scores: scores,
+                totalFrames: total,
+                jitterRMS: jitter
+            )
             await MainActor.run {
                 var stats = seedStats
                 stats.distribution = dist
@@ -256,12 +353,32 @@ final class SerQualityScanner {
         task = nil
     }
 
-    /// Translate the raw distribution into a "keep top N%" recommendation.
-    /// The heuristic: a wide distribution means a few frames are dramatically
-    /// sharper than the rest (turbulent seeing) → be picky. A tight
-    /// distribution means most frames are similar → keep more, since the
-    /// stack benefits more from SNR than from selectivity.
-    nonisolated private static func makeDistribution(scores: [Float], jitterRMS: Float? = nil) -> SharpnessDistribution {
+    /// Translate the raw sample distribution into a "keep top N% (M of T
+    /// frames)" recommendation that's anchored in lucky-imaging norms,
+    /// not the bare p90/p10 spread.
+    ///
+    /// Algorithm:
+    ///
+    ///   1. Knee detection — find the percentile `p` where sharpness
+    ///      drops below `0.5 × p90`. The fraction of frames *above* the
+    ///      knee is the natural "sharp tail" that lucky imaging targets.
+    ///   2. Clamp to scientific norms: between 5% and 50% of frames.
+    ///      The legacy 75% default was wrong — a "tight" distribution
+    ///      typically means uniformly-mediocre seeing, not uniformly-
+    ///      sharp; either way 50% of-the-frames-or-fewer is the right
+    ///      anchor (BiggSky's documented default is 25%).
+    ///   3. Frame-count floor: SNR ∝ √N. Recommend at least 100 frames
+    ///      (when the SER has them) and never less than 50, regardless
+    ///      of the percentage that implies.
+    ///   4. Jitter tightening — RMS frame-to-frame shift > 15 px tightens
+    ///      the band by 30% so registration has less drift to fight.
+    ///   5. Display both percentage and count so the user can sanity-
+    ///      check without arithmetic.
+    nonisolated private static func makeDistribution(
+        scores: [Float],
+        totalFrames: Int,
+        jitterRMS: Float? = nil
+    ) -> SharpnessDistribution {
         let sorted = scores.sorted()
         func percentile(_ p: Double) -> Float {
             guard !sorted.isEmpty else { return 0 }
@@ -274,46 +391,92 @@ final class SerQualityScanner {
         let lo  = sorted.first ?? 0
         let hi  = sorted.last  ?? 0
 
-        // Spread = p90 / p10 (clamped to avoid divide-by-zero).
-        let spread = Double(p90 / max(p10, 1e-6))
-        var keep: Double
-        var basis: String
-        switch spread {
-        case ..<1.4:
-            keep = 0.75
-            basis = "tight quality distribution — keep top 75% for SNR."
-        case ..<2.0:
-            keep = 0.50
-            basis = "moderate variance — keep top 50% balances SNR and detail."
-        case ..<4.0:
-            keep = 0.25
-            basis = "wide spread (seeing variable) — keep top 25%."
-        default:
-            keep = 0.10
-            basis = "very wide spread (turbulent seeing) — keep only top 10%."
-        }
-
-        // Refine with jitter: very high frame-to-frame motion means even the
-        // "sharp" frames are positionally inconsistent; tighten the keep band
-        // by one notch so the lucky stack has less drift to register out.
-        if let j = jitterRMS, j > 15 {
-            switch keep {
-            case 0.75: keep = 0.50
-            case 0.50: keep = 0.25
-            case 0.25: keep = 0.10
-            default: break
-            }
-            basis += " High jitter (\(String(format: "%.1f", j)) px RMS) — tightened one band."
-        } else if let j = jitterRMS, j > 6 {
-            basis += " Moderate jitter (\(String(format: "%.1f", j)) px RMS)."
-        }
+        let rec = computeKeepRecommendation(
+            sortedScores: sorted,
+            totalFrames: totalFrames,
+            p90: p90,
+            jitterRMS: jitterRMS
+        )
 
         return SharpnessDistribution(
             sampleCount: sorted.count,
+            totalFrames: totalFrames,
             median: p50, p10: p10, p90: p90, min: lo, max: hi,
             jitterRMS: jitterRMS,
-            recommendedKeepFraction: keep,
-            recommendationText: basis
+            recommendedKeepFraction: rec.fraction,
+            recommendedKeepCount: rec.count,
+            recommendationText: rec.text
         )
+    }
+
+    /// Pure, testable keep-% formula. Surfaced as `internal` (not
+    /// private) so the unit tests in AstroSharperTests can validate
+    /// it on synthetic distributions without booting Metal or building
+    /// a SerReader.
+    ///
+    /// Guarantees:
+    ///   * Result fraction is in [0.05, 0.75] inclusive.
+    ///   * Result count is at least `min(totalFrames, 50)`.
+    ///   * When `totalFrames >= 100`, result count is at least 100
+    ///     (typical SNR floor).
+    ///   * When `sortedScores` is empty, returns the BiggSky default
+    ///     25% fraction with the floor applied.
+    nonisolated static func computeKeepRecommendation(
+        sortedScores: [Float],
+        totalFrames: Int,
+        p90: Float,
+        jitterRMS: Float?
+    ) -> (fraction: Double, count: Int, text: String) {
+        let absoluteFloor = 50
+        let typicalFloor  = min(totalFrames, 100)
+
+        // Empty / degenerate input → BiggSky 25% default + floor.
+        guard !sortedScores.isEmpty, totalFrames > 0 else {
+            let count = max(absoluteFloor, min(totalFrames, max(typicalFloor, totalFrames / 4)))
+            let frac  = totalFrames > 0 ? Double(count) / Double(totalFrames) : 0.25
+            return (frac, count, "Keep top \(Int((frac * 100).rounded()))% (\(count) of \(totalFrames) frames) — default; no quality samples available.")
+        }
+
+        // Knee detection on the ASCENDING sorted scores.
+        let kneeThreshold = 0.5 * p90
+        let kneeIdx = sortedScores.firstIndex { $0 >= kneeThreshold } ?? sortedScores.count
+        let aboveKneeCount = sortedScores.count - kneeIdx
+        let kneeFraction = Double(aboveKneeCount) / Double(sortedScores.count)
+
+        // Clamp to scientific lucky-imaging norms. Tight distributions
+        // (kneeFraction → 1.0) get capped at 50% rather than 75%; very
+        // wide distributions (kneeFraction → 0) get a 5% floor so we
+        // don't accidentally recommend "keep nothing".
+        var clampedFraction = max(0.05, min(0.50, kneeFraction))
+
+        // Jitter tightening.
+        var jitterNote = ""
+        if let j = jitterRMS, j > 15 {
+            let before = clampedFraction
+            clampedFraction = max(0.05, clampedFraction * 0.7)
+            jitterNote = " High jitter (\(String(format: "%.1f", j)) px RMS) — tightened from \(Int((before * 100).rounded()))% to \(Int((clampedFraction * 100).rounded()))%."
+        } else if let j = jitterRMS, j > 6 {
+            jitterNote = " Moderate jitter (\(String(format: "%.1f", j)) px RMS)."
+        }
+
+        // Frame-count floor: lift the keep count up to whichever floor
+        // applies, then re-derive the fraction so display is consistent.
+        let idealCount = Int((clampedFraction * Double(totalFrames)).rounded(.up))
+        let liftedCount = max(typicalFloor, max(absoluteFloor, idealCount))
+        let keepCount = min(liftedCount, totalFrames)   // cannot keep more than we have
+        let keepFraction = Double(keepCount) / Double(totalFrames)
+
+        let pct = Int((keepFraction * 100).rounded())
+        let kneePct = Int((kneeFraction * 100).rounded())
+        var text: String
+        if keepCount > idealCount {
+            text = "Keep top \(pct)% (\(keepCount) of \(totalFrames) frames). Knee at \(kneePct)% suggests fewer; lifted to the SNR floor."
+        } else if kneeFraction > 0.5 {
+            text = "Keep top \(pct)% (\(keepCount) of \(totalFrames) frames). Tight distribution — capped at 50% per BiggSky norms."
+        } else {
+            text = "Keep top \(pct)% (\(keepCount) of \(totalFrames) frames) — sharpness drops sharply below this point."
+        }
+        text += jitterNote
+        return (keepFraction, keepCount, text)
     }
 }
