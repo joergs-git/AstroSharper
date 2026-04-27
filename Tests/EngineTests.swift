@@ -282,6 +282,113 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - DriftCache
+
+@Suite("DriftCache — phase-correlation drift tracking")
+struct DriftCacheTests {
+
+    @Test("empty cache predicts nil")
+    func emptyPredictsNil() {
+        let c = DriftCache()
+        #expect(c.predictNextShift() == nil)
+    }
+
+    @Test("single entry predicts itself unchanged")
+    func singleEntryPassThrough() {
+        let c = DriftCache()
+        c.append(frameIndex: 0, shift: AlignShift(dx: 3, dy: 4))
+        #expect(c.predictNextShift() == AlignShift(dx: 3, dy: 4))
+    }
+
+    @Test("constant-velocity drift extrapolates linearly")
+    func linearExtrapolation() {
+        // Frames advance dy=+0.5 px / frame consistently. After 4
+        // entries the next prediction should be at last + velocity.
+        let c = DriftCache()
+        c.append(frameIndex: 0, shift: AlignShift(dx: 0, dy: 0))
+        c.append(frameIndex: 1, shift: AlignShift(dx: 0, dy: 0.5))
+        c.append(frameIndex: 2, shift: AlignShift(dx: 0, dy: 1.0))
+        c.append(frameIndex: 3, shift: AlignShift(dx: 0, dy: 1.5))
+        let p = c.predictNextShift()
+        #expect(p != nil)
+        #expect(abs((p?.dx ?? 0) - 0) < 1e-5)
+        #expect(abs((p?.dy ?? 0) - 2.0) < 1e-5)
+    }
+
+    @Test("zero velocity (stationary) keeps last shift")
+    func stationarySubject() {
+        let c = DriftCache()
+        c.append(frameIndex: 0, shift: AlignShift(dx: 5, dy: 5))
+        c.append(frameIndex: 1, shift: AlignShift(dx: 5, dy: 5))
+        c.append(frameIndex: 2, shift: AlignShift(dx: 5, dy: 5))
+        let p = c.predictNextShift()
+        #expect(p?.dx == 5)
+        #expect(p?.dy == 5)
+    }
+
+    @Test("velocityWindow caps how many entries inform the estimate")
+    func velocityWindowCapped() {
+        // Old entries had wild drift; the recent window settles down.
+        let c = DriftCache()
+        c.velocityWindow = 2
+        c.append(frameIndex: 0, shift: AlignShift(dx: 0, dy: 0))
+        c.append(frameIndex: 1, shift: AlignShift(dx: 0, dy: 100))   // big jump
+        c.append(frameIndex: 2, shift: AlignShift(dx: 0, dy: 100.5))
+        c.append(frameIndex: 3, shift: AlignShift(dx: 0, dy: 101))
+        let p = c.predictNextShift()
+        // Last 3 entries (window=2 → 3 pairs) trend at +0.5 px/frame.
+        // Predicted = 101 + ~0.5 = ~101.5. Allow a 0.1 px tolerance.
+        #expect(p != nil)
+        #expect(abs((p?.dy ?? 0) - 101.5) < 0.6)
+    }
+
+    @Test("out-of-order frames are silently dropped")
+    func outOfOrderIgnored() {
+        let c = DriftCache()
+        c.append(frameIndex: 5, shift: AlignShift(dx: 1, dy: 1))
+        c.append(frameIndex: 3, shift: AlignShift(dx: 9, dy: 9))     // ignored
+        #expect(c.entries.count == 1)
+        #expect(c.entries.first?.shift.dx == 1)
+    }
+
+    @Test("isOutlier flags shifts that diverge from prediction")
+    func outlierDetection() {
+        let c = DriftCache()
+        c.append(frameIndex: 0, shift: AlignShift(dx: 0, dy: 0))
+        c.append(frameIndex: 1, shift: AlignShift(dx: 1, dy: 0))
+        c.append(frameIndex: 2, shift: AlignShift(dx: 2, dy: 0))
+        // Prediction extrapolates to (3, 0). A shift of (3.5, 0.2) is
+        // close enough — not an outlier; (10, 0) IS far enough.
+        #expect(c.isOutlier(shift: AlignShift(dx: 3.5, dy: 0.2), thresholdPx: 1.0) == false)
+        #expect(c.isOutlier(shift: AlignShift(dx: 10, dy: 0),    thresholdPx: 1.0) == true)
+    }
+
+    @Test("isOutlier returns false when there's no prediction")
+    func noPredictionMeansNoOutliers() {
+        let c = DriftCache()
+        #expect(c.isOutlier(shift: AlignShift(dx: 100, dy: 100), thresholdPx: 0.1) == false)
+    }
+
+    @Test("reset clears all history")
+    func resetClears() {
+        let c = DriftCache()
+        c.append(frameIndex: 0, shift: AlignShift(dx: 1, dy: 1))
+        c.append(frameIndex: 1, shift: AlignShift(dx: 2, dy: 2))
+        c.reset()
+        #expect(c.entries.isEmpty)
+        #expect(c.predictNextShift() == nil)
+    }
+
+    @Test("Euclidean distance helper is correct")
+    func distanceHelper() {
+        let d = DriftCache.distance(
+            AlignShift(dx: 0, dy: 0),
+            AlignShift(dx: 3, dy: 4)
+        )
+        #expect(abs(d - 5.0) < 1e-6)
+    }
+}
+
 // MARK: - TimingRecorder
 
 @Suite("TimingRecorder — phase wall-clock collector")
