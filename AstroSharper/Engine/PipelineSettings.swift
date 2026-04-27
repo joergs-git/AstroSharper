@@ -83,6 +83,29 @@ struct SharpenSettings: Equatable, Codable {
     /// (50, 100, …) is converted via `CaptureGamma.gamma(fromCameraSliderValue:)`.
     var captureGamma: Double = 1.0
 
+    // MARK: - Final-stage noise reduction
+    //
+    // Bilateral filter applied AFTER all sharpening (deconv → wavelet →
+    // unsharp → Wiener) and BEFORE the tone curve. The sharpen chain
+    // amplifies high-frequency content — including residual stacking
+    // noise — so a final edge-preserving smoother cleans up the noise
+    // floor without un-doing the visible detail enhancement. This is the
+    // standard astronomy-pipeline order: stack → align → sharpen → NR
+    // → stretch.
+    var nrEnabled: Bool = false
+    /// Spatial Gaussian σ in pixels — controls how big the smoothing
+    /// kernel is. 1.0 ≈ tight 5×5; 2.0 ≈ 7×7 effective neighbourhood.
+    var nrSpatial: Double = 1.0
+    /// Range Gaussian σ as a fraction of the [0,1] intensity range —
+    /// pixels whose value differs from the centre by more than ~3×
+    /// nrRange are weighted near zero, so edges survive. Lower = harder
+    /// edge preservation; higher = stronger smoothing across edges.
+    var nrRange: Double = 0.05
+    /// Effective window radius in pixels (final kernel = 2·radius+1).
+    /// Capped at 4 so the per-pixel cost stays bounded; ≥ 3·nrSpatial is
+    /// the rule of thumb.
+    var nrRadius: Int = 3
+
     // MARK: - Codable
 
     /// Custom decoder so preset JSON written by older app versions
@@ -111,6 +134,10 @@ struct SharpenSettings: Equatable, Codable {
         self.denoiseAfterPercent  = try c.decodeIfPresent(Double.self, forKey: .denoiseAfterPercent)  ?? 75
         self.processLuminanceOnly = try c.decodeIfPresent(Bool.self,   forKey: .processLuminanceOnly) ?? true
         self.captureGamma         = try c.decodeIfPresent(Double.self, forKey: .captureGamma)         ?? 1.0
+        self.nrEnabled            = try c.decodeIfPresent(Bool.self,   forKey: .nrEnabled)            ?? false
+        self.nrSpatial            = try c.decodeIfPresent(Double.self, forKey: .nrSpatial)            ?? 1.0
+        self.nrRange              = try c.decodeIfPresent(Double.self, forKey: .nrRange)              ?? 0.05
+        self.nrRadius             = try c.decodeIfPresent(Int.self,    forKey: .nrRadius)             ?? 3
     }
 
     /// Designated memberwise init — Swift can't synthesise this
@@ -133,7 +160,11 @@ struct SharpenSettings: Equatable, Codable {
         denoiseBeforePercent: Double = 75,
         denoiseAfterPercent: Double = 75,
         processLuminanceOnly: Bool = true,
-        captureGamma: Double = 1.0
+        captureGamma: Double = 1.0,
+        nrEnabled: Bool = false,
+        nrSpatial: Double = 1.0,
+        nrRange: Double = 0.05,
+        nrRadius: Int = 3
     ) {
         self.enabled = enabled
         self.unsharpEnabled = unsharpEnabled
@@ -152,6 +183,10 @@ struct SharpenSettings: Equatable, Codable {
         self.denoiseAfterPercent = denoiseAfterPercent
         self.processLuminanceOnly = processLuminanceOnly
         self.captureGamma = captureGamma
+        self.nrEnabled = nrEnabled
+        self.nrSpatial = nrSpatial
+        self.nrRange = nrRange
+        self.nrRadius = nrRadius
     }
 }
 

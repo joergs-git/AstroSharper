@@ -19,6 +19,7 @@ final class Pipeline {
     private lazy var mulPSO     = makeComputePSO(function: "lr_multiply")
     private lazy var tonePSO    = makeComputePSO(function: "apply_tone_curve")
     private lazy var satPSO     = makeComputePSO(function: "apply_saturation")
+    private lazy var nrPSO      = makeComputePSO(function: "noise_reduce_bilateral")
     private lazy var shiftPSO   = makeComputePSO(function: "sub_pixel_shift")
     private lazy var stackPSO   = makeComputePSO(function: "stack_accumulate")
     private lazy var subPSO     = makeComputePSO(function: "subtract_textures")
@@ -170,6 +171,32 @@ final class Pipeline {
         let cmdBuf2 = needsWiener ? commandQueue.makeCommandBuffer() : cmdBuf
         guard let finalCmd = cmdBuf2 else { return copyTexture(input, into: output) }
 
+        // Noise reduction — bilateral filter, runs AFTER all sharpening
+        // and BEFORE tone-curve / saturation. The sharpen chain inevitably
+        // amplifies high-frequency residual stacking noise; bilateral
+        // smoothing knocks the noise floor back down without un-doing the
+        // visible detail because edge-aware weights skip jumps across
+        // band boundaries.
+        if sharpen.enabled, sharpen.nrEnabled {
+            let result = borrow(width: w, height: h, format: input.pixelFormat)
+            borrowed.append(result)
+            if let enc = finalCmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(nrPSO)
+                enc.setTexture(current, index: 0)
+                enc.setTexture(result, index: 1)
+                var p = NoiseReduceParamsCPU(
+                    spatialSigma: Float(sharpen.nrSpatial),
+                    rangeSigma:   Float(sharpen.nrRange),
+                    radius:       Int32(max(1, min(6, sharpen.nrRadius)))
+                )
+                enc.setBytes(&p, length: MemoryLayout<NoiseReduceParamsCPU>.stride, index: 0)
+                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: nrPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            current = result
+        }
+
         if toneCurve.enabled, let lut = toneCurveLUT {
             let result = borrow(width: w, height: h, format: input.pixelFormat)
             borrowed.append(result)
@@ -238,6 +265,14 @@ final class Pipeline {
 /// Mirror of the Metal `SaturationParams` struct; sent via `setBytes`.
 struct SaturationParamsCPU {
     var saturation: Float
+}
+
+/// Mirror of the Metal `NoiseReduceParams` struct (struct field layout
+/// must match the Metal definition exactly).
+struct NoiseReduceParamsCPU {
+    var spatialSigma: Float
+    var rangeSigma: Float
+    var radius: Int32
 }
 
 // Utility for dispatch sizing.

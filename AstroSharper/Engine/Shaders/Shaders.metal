@@ -163,6 +163,63 @@ kernel void apply_tone_curve(
     output.write(float4(r, g, b, c.a), gid);
 }
 
+// MARK: - Bilateral noise reduction
+//
+// Edge-preserving smoother that runs as the LAST step of the sharpening
+// chain. Sharpening (deconv → wavelet → unsharp) amplifies high-frequency
+// content including residual stacking noise; bilateral smoothing knocks
+// the noise floor down without un-doing the visible detail enhancement
+// because it weights neighbour samples by both spatial AND range
+// (intensity) distance — pixels across an edge contribute almost
+// nothing.
+//
+// Two parameters tune the trade-off:
+//   spatialSigma — controls neighbourhood size (1.0 ≈ tight 5×5 weights)
+//   rangeSigma   — controls edge sensitivity in [0,1] intensity units;
+//                  smaller = harder edge preservation, larger = stronger
+//                  smoothing across edges.
+// The fixed window radius bounds per-pixel cost (final kernel = 2r+1).
+
+struct NoiseReduceParams {
+    float spatialSigma;
+    float rangeSigma;
+    int   radius;
+};
+
+kernel void noise_reduce_bilateral(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    constant NoiseReduceParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    int W = int(input.get_width()), H = int(input.get_height());
+    float4 center = input.read(gid);
+    float spatialFactor = -0.5 / max(p.spatialSigma * p.spatialSigma, 1e-6);
+    float rangeFactor   = -0.5 / max(p.rangeSigma * p.rangeSigma, 1e-6);
+    float3 sum = float3(0.0);
+    float wsum = 0.0;
+    int r = p.radius;
+    for (int dy = -r; dy <= r; dy++) {
+        for (int dx = -r; dx <= r; dx++) {
+            int x = clamp(int(gid.x) + dx, 0, W - 1);
+            int y = clamp(int(gid.y) + dy, 0, H - 1);
+            float4 sample = input.read(uint2(x, y));
+            float spatial = exp(spatialFactor * float(dx * dx + dy * dy));
+            float3 diff = sample.rgb - center.rgb;
+            float range = exp(rangeFactor * dot(diff, diff));
+            float w = spatial * range;
+            sum += sample.rgb * w;
+            wsum += w;
+        }
+    }
+    if (wsum > 0.0) {
+        output.write(float4(sum / wsum, center.a), gid);
+    } else {
+        output.write(center, gid);
+    }
+}
+
 // MARK: - Saturation
 //
 // Mix each RGB sample with its Rec.709 luminance to control colour

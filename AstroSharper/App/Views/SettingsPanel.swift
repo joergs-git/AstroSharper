@@ -33,10 +33,13 @@ struct SharpeningSection: View {
 
     var body: some View {
         SectionContainer(title: "Sharpening", icon: "wand.and.stars", isOn: $app.sharpen.enabled) {
+            // Slider ranges bumped 1.5–2× the previous limits so the
+            // strong sharpening typical for jupiter / saturn fits inside
+            // the slider without forcing the user to type values manually.
             Toggle("Unsharp Mask", isOn: $app.sharpen.unsharpEnabled)
-            LabeledSlider(label: "Radius (σ)", value: $app.sharpen.radius, range: 0.2...10, format: "%.2f px")
+            LabeledSlider(label: "Radius (σ)", value: $app.sharpen.radius, range: 0.2...15, format: "%.2f px")
                 .disabled(!app.sharpen.unsharpEnabled)
-            LabeledSlider(label: "Amount", value: $app.sharpen.amount, range: 0...5, format: "%.2f")
+            LabeledSlider(label: "Amount", value: $app.sharpen.amount, range: 0...8, format: "%.2f")
                 .disabled(!app.sharpen.unsharpEnabled)
             Toggle("Adaptive (dim areas less)", isOn: $app.sharpen.adaptive)
                 .disabled(!app.sharpen.unsharpEnabled)
@@ -52,7 +55,7 @@ struct SharpeningSection: View {
                             get: { app.sharpen.waveletScales[idx] },
                             set: { app.sharpen.waveletScales[idx] = $0 }
                         ),
-                        range: 0...4, format: "%.2f×"
+                        range: 0...6, format: "%.2f×"
                     )
                 }
                 Text("Registax-style multi-scale sharpening. Try smaller scales for fine solar granulation, larger for overall contrast.")
@@ -64,7 +67,7 @@ struct SharpeningSection: View {
             Divider().padding(.vertical, 4)
 
             Toggle("Wiener Deconvolution", isOn: $app.sharpen.wienerEnabled)
-            LabeledSlider(label: "Wiener PSF σ", value: $app.sharpen.wienerSigma, range: 0.3...4, format: "%.2f px")
+            LabeledSlider(label: "Wiener PSF σ", value: $app.sharpen.wienerSigma, range: 0.3...6, format: "%.2f px")
                 .disabled(!app.sharpen.wienerEnabled)
             LabeledSlider(label: "Wiener SNR", value: $app.sharpen.wienerSNR, range: 5...500, format: "%.0f")
                 .disabled(!app.sharpen.wienerEnabled)
@@ -86,8 +89,32 @@ struct SharpeningSection: View {
                 range: 1...200, format: "%.0f"
             )
             .disabled(!app.sharpen.lrEnabled)
-            LabeledSlider(label: "PSF σ", value: $app.sharpen.lrSigma, range: 0.3...5, format: "%.2f px")
+            LabeledSlider(label: "PSF σ", value: $app.sharpen.lrSigma, range: 0.3...8, format: "%.2f px")
                 .disabled(!app.sharpen.lrEnabled)
+
+            Divider().padding(.vertical, 4)
+
+            // Noise reduction — final stage, applied AFTER all sharpening
+            // and before the tone curve. Edge-preserving bilateral filter.
+            Toggle("Noise Reduction (final stage)", isOn: $app.sharpen.nrEnabled)
+            LabeledSlider(label: "Spatial σ", value: $app.sharpen.nrSpatial, range: 0.3...4, format: "%.2f px")
+                .disabled(!app.sharpen.nrEnabled)
+            LabeledSlider(label: "Edge tolerance", value: $app.sharpen.nrRange, range: 0.005...0.30, format: "%.3f")
+                .disabled(!app.sharpen.nrEnabled)
+            LabeledSlider(
+                label: "Window radius",
+                value: Binding(
+                    get: { Double(app.sharpen.nrRadius) },
+                    set: { app.sharpen.nrRadius = Int($0) }
+                ),
+                range: 1...6, format: "%.0f px"
+            )
+            .disabled(!app.sharpen.nrEnabled)
+            Text("Bilateral filter — runs after all sharpening, before tone curve. Smooths the noise floor without crossing edges. Keep edge tolerance low (0.02–0.08) for hard band/limb preservation.")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .opacity(app.sharpen.nrEnabled ? 1 : 0.5)
 
             Divider().padding(.vertical, 4)
 
@@ -270,7 +297,7 @@ struct ToneCurveSection: View {
                 Text("Saturation")
                     .font(.system(size: 11))
                     .frame(width: 80, alignment: .leading)
-                Slider(value: $app.toneCurve.saturation, in: 0...2, step: 0.05)
+                Slider(value: $app.toneCurve.saturation, in: 0...3, step: 0.05)
                 Text(String(format: "%.2f", app.toneCurve.saturation))
                     .font(.system(size: 11, design: .monospaced))
                     .frame(width: 40, alignment: .trailing)
