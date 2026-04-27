@@ -221,6 +221,65 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - Border crop math
+
+@Suite("BorderCrop — rect math + defaults")
+struct BorderCropTests {
+
+    @Test("Zero border returns full rect")
+    func zeroBorder() {
+        let r = BorderCrop.cropRect(width: 64, height: 64, borderPixels: 0)
+        #expect(r == CGRect(x: 0, y: 0, width: 64, height: 64))
+    }
+
+    @Test("Standard 8-px border returns inset rect")
+    func standardBorder() {
+        let r = BorderCrop.cropRect(width: 64, height: 64, borderPixels: 8)
+        #expect(r == CGRect(x: 8, y: 8, width: 48, height: 48))
+    }
+
+    @Test("Border that would leave nothing returns nil")
+    func borderTooLarge() {
+        #expect(BorderCrop.cropRect(width: 64, height: 64, borderPixels: 32)  == nil)
+        #expect(BorderCrop.cropRect(width: 64, height: 64, borderPixels: 100) == nil)
+    }
+
+    @Test("Negative border treated as zero")
+    func negativeBorderClampsToZero() {
+        let r = BorderCrop.cropRect(width: 64, height: 64, borderPixels: -1)
+        #expect(r == CGRect(x: 0, y: 0, width: 64, height: 64))
+    }
+
+    @Test("Asymmetric image dimensions handled correctly")
+    func asymmetricDimensions() {
+        let r = BorderCrop.cropRect(width: 200, height: 100, borderPixels: 10)
+        #expect(r == CGRect(x: 10, y: 10, width: 180, height: 80))
+    }
+
+    @Test("Zero or negative dimensions return nil")
+    func zeroDimensions() {
+        #expect(BorderCrop.cropRect(width: 0,  height: 64, borderPixels: 0)  == nil)
+        #expect(BorderCrop.cropRect(width: 64, height: 0,  borderPixels: 0)  == nil)
+        #expect(BorderCrop.cropRect(width: -1, height: 64, borderPixels: 0)  == nil)
+    }
+
+    @Test("croppedDimensions matches cropRect width/height")
+    func croppedDimensionsMatches() {
+        let dims = BorderCrop.croppedDimensions(width: 1024, height: 768, borderPixels: 32)
+        #expect(dims?.width  == 960)
+        #expect(dims?.height == 704)
+    }
+
+    @Test("BiggSky default constants match the documented values")
+    func defaultsAreBiggSkyAligned() {
+        // Documented in the BiggSky tech doc: SaveView_BorderCrop=32,
+        // data crops 0. We mirror those exactly so existing user
+        // workflows transferring from BiggSky get the same trim.
+        #expect(BorderCrop.defaultViewBorderCropPixels == 32)
+        #expect(BorderCrop.defaultDataBorderCropPixels == 0)
+    }
+}
+
 // MARK: - LuckyKeepPercents parser
 
 @Suite("LuckyKeepPercents — multi-% input parser")

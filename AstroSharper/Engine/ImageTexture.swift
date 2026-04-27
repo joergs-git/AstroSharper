@@ -198,10 +198,17 @@ enum ImageTexture {
     /// TIFF supports `uint16` (default, current pipeline behaviour) and
     /// `float32` (new, for high-dynamic-range deconv outputs). PNG/JPEG
     /// remain 8-bit per the format spec regardless of `bitDepth`.
+    ///
+    /// `borderCropPixels` removes that many pixels from each side of
+    /// the output — used after deconvolution to drop the frequency-
+    /// domain edge artifact (BiggSky default 32 for view, 0 for data).
+    /// 0 = no crop (default behaviour). Values that would leave a
+    /// non-positive dimension are silently ignored.
     static func write(
         texture: MTLTexture,
         to url: URL,
-        bitDepth: BitDepth = .uint16
+        bitDepth: BitDepth = .uint16,
+        borderCropPixels: Int = 0
     ) throws {
         let ciContext = CIContext(mtlDevice: texture.device)
         guard let ci = CIImage(mtlTexture: texture, options: [.colorSpace: CGColorSpaceCreateDeviceRGB()]) else {
@@ -209,21 +216,37 @@ enum ImageTexture {
         }
         // CIImage from Metal is flipped vertically vs. ImageIO's expectations.
         let flipped = ci.transformed(by: CGAffineTransform(scaleX: 1, y: -1).translatedBy(x: 0, y: -ci.extent.height))
+
+        // Optional border crop. Skipped silently when it would leave a
+        // non-positive dimension — caller's intent in that case is "no
+        // useful crop possible," fall back to the full image.
+        let toEncode: CIImage
+        if borderCropPixels > 0,
+           let rect = BorderCrop.cropRect(
+            width: texture.width,
+            height: texture.height,
+            borderPixels: borderCropPixels
+           ) {
+            toEncode = flipped.cropped(to: rect)
+        } else {
+            toEncode = flipped
+        }
+
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         let ext = url.pathExtension.lowercased()
         switch ext {
         case "tif", "tiff":
             let format: CIFormat = (bitDepth == .float32) ? .RGBAf : .RGBA16
-            try ciContext.writeTIFFRepresentation(of: flipped, to: url, format: format, colorSpace: colorSpace, options: [:])
+            try ciContext.writeTIFFRepresentation(of: toEncode, to: url, format: format, colorSpace: colorSpace, options: [:])
         case "png":
             // PNG is always 8-bit; bitDepth has no effect.
-            try ciContext.writePNGRepresentation(of: flipped, to: url, format: .RGBA8, colorSpace: colorSpace, options: [:])
+            try ciContext.writePNGRepresentation(of: toEncode, to: url, format: .RGBA8, colorSpace: colorSpace, options: [:])
         case "jpg", "jpeg":
-            try ciContext.writeJPEGRepresentation(of: flipped, to: url, colorSpace: colorSpace, options: [:])
+            try ciContext.writeJPEGRepresentation(of: toEncode, to: url, colorSpace: colorSpace, options: [:])
         default:
             // Unknown extension → fall back to TIFF, honouring bit depth.
             let format: CIFormat = (bitDepth == .float32) ? .RGBAf : .RGBA16
-            try ciContext.writeTIFFRepresentation(of: flipped, to: url, format: format, colorSpace: colorSpace, options: [:])
+            try ciContext.writeTIFFRepresentation(of: toEncode, to: url, format: format, colorSpace: colorSpace, options: [:])
         }
     }
 }
