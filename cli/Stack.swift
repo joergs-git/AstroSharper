@@ -26,6 +26,9 @@ enum Stack {
         var drizzlePixfrac: Float = 0.7
         var useTwoStage = false
         var twoStageGrid = 8
+        var mode: LuckyStackMode = .lightspeed
+        var useMultiAP = false
+        var multiAPGrid = 8
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -91,6 +94,46 @@ enum Stack {
                 twoStageGrid = v
                 useTwoStage = true
                 i += 2
+            case "--mode":
+                // .lightspeed (default) — single-frame reference + global phase corr.
+                // .scientific — 2-stage clean-reference build (top 5% aligned to
+                //               single best, accumulated, then ALL keepers aligned
+                //               to that cleaner reference). Sharper alignment on
+                //               smooth subjects (Jupiter / Saturn / Sun); slower.
+                guard i + 1 < args.count else {
+                    cliStderr("stack: --mode requires lightspeed | scientific")
+                    return 64
+                }
+                switch args[i + 1].lowercased() {
+                case "lightspeed", "fast":
+                    mode = .lightspeed
+                case "scientific", "sci":
+                    mode = .scientific
+                default:
+                    cliStderr("stack: --mode '\(args[i + 1])' not recognised (use lightspeed | scientific)")
+                    return 64
+                }
+                i += 2
+            case "--multi-ap":
+                // Multi-AP local shift refinement — bilinear-sampled per-pixel
+                // shift map from an 8×8 (or larger) grid of SAD searches against
+                // the cleaner reference. Engages only in scientific mode and
+                // only with the standard accumulator path (not two-stage /
+                // drizzle / sigma).
+                useMultiAP = true
+                if mode == .lightspeed { mode = .scientific }   // implies scientific
+                i += 1
+            case "--multi-ap-grid":
+                guard i + 1 < args.count, let v = Int(args[i + 1]),
+                      v >= 4, v <= 16
+                else {
+                    cliStderr("stack: --multi-ap-grid requires an integer in [4, 16] (default 8)")
+                    return 64
+                }
+                multiAPGrid = v
+                useMultiAP = true
+                if mode == .lightspeed { mode = .scientific }
+                i += 2
             case "--quiet", "-q":
                 quiet = true
                 i += 1
@@ -112,7 +155,7 @@ enum Stack {
 
         guard let input = inputPath, let output = outputPath else {
             cliStderr("stack: missing input or output path")
-            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--sigma N] [--metrics file.json] [--quiet]")
+            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--metrics file.json] [--quiet]")
             return 64
         }
 
@@ -166,6 +209,9 @@ enum Stack {
             options.drizzlePixfrac = drizzlePixfrac
             options.useTwoStageQuality = useTwoStage
             options.twoStageAPGrid = twoStageGrid
+            options.mode = mode
+            options.useMultiAP = useMultiAP
+            options.multiAPGrid = multiAPGrid
 
             let started = Date()
             if !quiet, keepPercents.count > 1 {
