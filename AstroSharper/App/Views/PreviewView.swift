@@ -413,6 +413,14 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
 
         let flipped = entry.meridianFlipped
         let aviForBackground = aviReader
+        // Stale-load guard: capture the file ID at dispatch time, then drop
+        // the result on completion if the user has already moved on. Without
+        // this, fast arrow-key blinking across the list dispatches multiple
+        // background loads in flight at once; whichever finishes LAST wins
+        // the beforeTex slot regardless of which row the user is now sitting
+        // on, so the visible image desyncs from the highlighted filename and
+        // can flip back and forth as old loads complete out-of-order.
+        let dispatchedID = id
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             var tex: MTLTexture?
@@ -437,6 +445,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             // SERs. The "Calculate Video Quality" button below the HUD is the
             // explicit opt-in that runs the per-frame probe + distribution.
             DispatchQueue.main.async {
+                guard self.app.previewFileID == dispatchedID else { return }
                 self.beforeTex = tex
                 self.afterTex = nil
                 // Zoom + pan deliberately PRESERVED across file switches — this
@@ -497,6 +506,13 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         let isSER = entry.isSER
         let frameIndex = app.previewSerFrameIndex
         let flipped = entry.meridianFlipped
+        // Stale-load guard tokens — both the file and the frame index must
+        // still match when this load completes. Fast scrubbing dispatches
+        // many concurrent loads; without this, frame N+5 finishing AFTER
+        // frame N+10 would draw N+5 over N+10 and flip the visible frame
+        // backwards relative to the slider.
+        let dispatchedID = id
+        let dispatchedFrameIndex = frameIndex
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             var tex: MTLTexture?
@@ -517,6 +533,8 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             // during scrub; the "Calculate Video Quality" button populates
             // the sampled distribution when the user opts in.
             DispatchQueue.main.async {
+                guard self.app.previewFileID == dispatchedID,
+                      self.app.previewSerFrameIndex == dispatchedFrameIndex else { return }
                 guard let tex else { return }
                 // Drop the stale sharpened texture so the raw frame paints
                 // immediately. Without this the user stares at the previous
