@@ -2,6 +2,16 @@
 
 Patterns and gotchas captured from this project. Read at session start; append after every correction.
 
+## [2026-04-27] — Lucky-stack accumulator must be 32-bit float, not half-precision
+- **Mistake:** Used `rgba16Float` for the stacked-output accumulator (and the drizzle accumulator). With ~10 bits of mantissa in the 0..1 mid-range, weighted-mean accumulation across hundreds of frames + a final unsharp+wavelet pass surfaced as visible colour banding on smooth Jupiter cloud detail. Existing comments warned about this for the sigma-clip Welford state, but the standard / two-stage / drizzle paths missed the upgrade.
+- **Rule:** Any pipeline stage that *accumulates* across many frames must use `rgba32Float` (single precision). Half-precision is fine for pass-through textures (per-frame sharpen output, display blits) but never for the running mean / weighted sum / variance state. Memory cost: 2× per accumulator — negligible on Apple Silicon.
+- **Applies to:** `Engine/Pipeline/LuckyStack.swift::makeAccumulator`, drizzle accumulator. Same principle for any future blind-deconv / tiled-deconv accumulators.
+
+## [2026-04-27] — No auto-probe on file/frame switch in interactive UI
+- **Mistake:** Both `loadCurrentFile` and `loadCurrentSerFrame` ran `SharpnessProbe.compute` on the freshly-loaded full-resolution texture so the HUD showed a "current sharpness" number. At source resolution that's 5–30 ms per click — bearable on one file, unbearable when fanning through a folder of large SERs or holding next-frame.
+- **Rule:** Anything more expensive than ~1 ms must NOT auto-run on routine UI navigation (file selection, frame scrub). Wire it behind an explicit "Calculate / Analyze" button (the SER distribution scanner already does this — pattern to follow). Acceptable to compute for cached entries on-disk in a background pass once at import; never on every click.
+- **Applies to:** `App/Views/PreviewView.swift`, future per-frame probes (HFR sparkline, jitter score, capture validator on scrub). Same principle for any new "show me a metric" UI.
+
 ## [2026-04-27] — Anchored-zoom math is per-axis, not isotropic
 - **Mistake:** Ported AstroTriage's `anchoredZoom` using a single `baseFit = min(viewW/texW, viewH/texH)` for both axes. The display shader uses **per-axis** `fitScale.x` / `fitScale.y` (different when image and view aspect ratios differ), so the pan-compensation has the wrong magnitude on at least one axis — large enough that the user perceives it as a sign flip ("left is right, up is down").
 - **Rule:** Any anchor-preserving viewport math must read the SAME fit-scale convention the shader uses. Compute `tex pixels per view pixel` per axis as `tpv_axis = texSize_axis / (viewSize_axis * fitScale_axis)`, then `panPx_new = panPx_old + relAxis * tpv_axis * (1/oldZ − 1/newZ)`.
