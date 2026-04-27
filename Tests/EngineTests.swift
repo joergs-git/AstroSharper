@@ -221,6 +221,108 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - Half-Flux Radius
+
+@Suite("HalfFluxRadius — PSF concentration metric")
+struct HalfFluxRadiusTests {
+
+    private static func buffer(width: Int, height: Int, _ f: (Int, Int) -> Float) -> [Float] {
+        var out = [Float](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                out[y * width + x] = f(x, y)
+            }
+        }
+        return out
+    }
+
+    @Test("delta function has near-zero HFR")
+    func deltaIsNearZero() {
+        // Single bright pixel — centroid lands on it, half the flux is
+        // *inside* bin 0 (radius 0). HFR = 0.
+        var buf = Self.buffer(width: 32, height: 32) { _, _ in 0 }
+        buf[16 * 32 + 16] = 1.0
+        let hfr = HalfFluxRadius.compute(luma: buf, width: 32, height: 32)
+        #expect(hfr < 0.5)
+    }
+
+    @Test("empty buffer returns zero")
+    func emptyReturnsZero() {
+        let buf = Self.buffer(width: 16, height: 16) { _, _ in 0 }
+        let hfr = HalfFluxRadius.compute(luma: buf, width: 16, height: 16)
+        #expect(hfr == 0)
+    }
+
+    @Test("sharp Gaussian has smaller HFR than blurred Gaussian")
+    func sharperBeatsBlurred() {
+        let cx = 31, cy = 31
+        let sharp = Self.buffer(width: 64, height: 64) { x, y in
+            let dx = Float(x - cx), dy = Float(y - cy)
+            return exp(-(dx * dx + dy * dy) / 2.0)        // sigma = 1.0
+        }
+        let blurred = Self.buffer(width: 64, height: 64) { x, y in
+            let dx = Float(x - cx), dy = Float(y - cy)
+            return exp(-(dx * dx + dy * dy) / 32.0)       // sigma = 4.0
+        }
+        let hSharp   = HalfFluxRadius.compute(luma: sharp,   width: 64, height: 64)
+        let hBlurred = HalfFluxRadius.compute(luma: blurred, width: 64, height: 64)
+        #expect(hSharp < hBlurred)
+        // For a 2D Gaussian with sigma σ, HFR ≈ 1.1774 × σ. Sigma=1 → ~1.18 px.
+        #expect(hSharp > 0.5)
+        #expect(hSharp < 2.0)
+    }
+
+    @Test("Gaussian HFR ≈ 1.177 × sigma (analytical)")
+    func gaussianMatchesAnalytical() {
+        // A 2D Gaussian's HFR has a closed form: sqrt(2 * ln(2)) * sigma
+        // ≈ 1.1774 * sigma. Test sigma=2 → expected HFR ≈ 2.355.
+        let cx = 47, cy = 47
+        let sigma: Float = 2.0
+        let buf = Self.buffer(width: 96, height: 96) { x, y in
+            let dx = Float(x - cx), dy = Float(y - cy)
+            return exp(-(dx * dx + dy * dy) / (2.0 * sigma * sigma))
+        }
+        let hfr = HalfFluxRadius.compute(luma: buf, width: 96, height: 96)
+        let expected = Float((2.0 * Foundation.log(2.0)).squareRoot()) * sigma
+        // 5% tolerance — discretisation + bin-width interpolation.
+        #expect(abs(hfr - expected) < 0.05 * expected)
+    }
+
+    @Test("uniform disc — HFR ≈ R / sqrt(2)")
+    func uniformDiscHFR() {
+        // Sharp uniform disc of radius R has HFR = R / √2 because the
+        // flux scales with area which is r².
+        let cx = 31.5, cy = 31.5
+        let R: Double = 16.0
+        let buf = Self.buffer(width: 64, height: 64) { x, y in
+            let dx = Double(x) - cx, dy = Double(y) - cy
+            return (dx * dx + dy * dy) <= R * R ? 1.0 : 0.0
+        }
+        let hfr = HalfFluxRadius.compute(luma: buf, width: 64, height: 64)
+        let expected = Float(R / 2.0.squareRoot())
+        // 5% tolerance — the disc edge isn't perfectly sub-pixel sampled.
+        #expect(abs(hfr - expected) < 0.05 * expected)
+    }
+
+    @Test("centroid offset — HFR independent of disc position")
+    func centroidIsTranslationInvariant() {
+        // Same disc, two different centre positions: HFR should match
+        // (within bin discretisation), proving the centroid step works.
+        let R: Double = 12.0
+        let bufCenter = Self.buffer(width: 96, height: 96) { x, y in
+            let dx = Double(x) - 47.5, dy = Double(y) - 47.5
+            return (dx * dx + dy * dy) <= R * R ? 1.0 : 0.0
+        }
+        let bufOffset = Self.buffer(width: 96, height: 96) { x, y in
+            let dx = Double(x) - 30.0, dy = Double(y) - 60.0
+            return (dx * dx + dy * dy) <= R * R ? 1.0 : 0.0
+        }
+        let hCenter = HalfFluxRadius.compute(luma: bufCenter, width: 96, height: 96)
+        let hOffset = HalfFluxRadius.compute(luma: bufOffset, width: 96, height: 96)
+        #expect(abs(hCenter - hOffset) < 0.1 * hCenter)
+    }
+}
+
 // MARK: - Strehl-style concentration metric
 
 @Suite("Strehl — central-concentration analogue")
