@@ -842,6 +842,89 @@ kernel void lucky_normalize_per_pixel(
     accum.write(float4(clamp(norm.rgb, 0.0, 1.0), 1.0), gid);
 }
 
+// MARK: - Drizzle (Fruchter & Hook 2002, GPU splat) (B.6)
+//
+// Per-output reverse-mapped splatter. Each output thread (in upsampled
+// coords) finds the single input pixel whose drop covers it and adds
+// the value × overlap-area into the accumulator + weight textures.
+//
+// Algorithm reverse-maps the drop centre:
+//   centre_out = (xi + 0.5 + shift) * scale
+//   so xi = round((output_centre / scale) - 0.5 - shift)
+// Then computes the overlap rectangle of the [output_pixel] cell and
+// the drop box [centre_out ± halfDrop]. Output pixels not covered by
+// any drop stay at 0 weight; the finalize pass treats them as 0.
+//
+// Constraints (v0):
+//   * `scale` must be a positive integer (1, 2, 3 typical). Fractional
+//     scales (1.5×) require the per-output approach to consider up to
+//     four input drops per output pixel — folded into v1.
+//   * `pixfrac` ∈ (0, 1]; the kernel skips at 0 to make pixfrac=0 a
+//     no-op for tests.
+//   * Sub-pixel shifts are honoured.
+//
+// CPU reference: Engine/Pipeline/Drizzle.swift::splat / finalize.
+
+struct LuckyDrizzleParams {
+    float  weight;
+    float  pixfrac;
+    uint   scale;
+    float  pad0;
+    float2 shift;          // sub-pixel shift in INPUT pixels
+    uint2  inputSize;      // (W, H) of `frame`
+};
+
+kernel void lucky_drizzle_splat(
+    texture2d<float, access::read>       frame  [[texture(0)]],
+    texture2d<float, access::read_write> accum  [[texture(1)]],
+    texture2d<float, access::read_write> wtTex  [[texture(2)]],
+    constant LuckyDrizzleParams&         p      [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= accum.get_width() || gid.y >= accum.get_height()) return;
+    if (p.pixfrac <= 0.0 || p.scale == 0) return;
+
+    float scale = float(p.scale);
+    float halfDrop = 0.5 * p.pixfrac * scale;
+
+    // Output pixel centre in output coords.
+    float outCx = float(gid.x) + 0.5;
+    float outCy = float(gid.y) + 0.5;
+
+    // Reverse-map to find the input pixel whose drop centre is closest
+    // to this output centre. With pixfrac ≤ 1 and integer scale, at
+    // most one input drop covers any given output pixel.
+    float fxi = (outCx / scale) - 0.5 - p.shift.x;
+    float fyi = (outCy / scale) - 0.5 - p.shift.y;
+    int xi = int(round(fxi));
+    int yi = int(round(fyi));
+    if (xi < 0 || xi >= int(p.inputSize.x)) return;
+    if (yi < 0 || yi >= int(p.inputSize.y)) return;
+
+    float4 v = frame.read(uint2(uint(xi), uint(yi)));
+
+    // Drop box for this input pixel.
+    float cx = (float(xi) + 0.5 + p.shift.x) * scale;
+    float cy = (float(yi) + 0.5 + p.shift.y) * scale;
+    float dropMinX = cx - halfDrop;
+    float dropMaxX = cx + halfDrop;
+    float dropMinY = cy - halfDrop;
+    float dropMaxY = cy + halfDrop;
+
+    // Overlap of the unit-cell at (gid) with the drop box.
+    float pixelMinX = float(gid.x);
+    float pixelMaxX = float(gid.x) + 1.0;
+    float pixelMinY = float(gid.y);
+    float pixelMaxY = float(gid.y) + 1.0;
+    float xOverlap = max(0.0, min(dropMaxX, pixelMaxX) - max(dropMinX, pixelMinX));
+    float yOverlap = max(0.0, min(dropMaxY, pixelMaxY) - max(dropMinY, pixelMinY));
+    float area = xOverlap * yOverlap;
+    if (area <= 0.0) return;
+
+    accum.write(accum.read(gid) + v * (p.weight * area), gid);
+    wtTex.write(wtTex.read(gid) + float4(p.weight * area), gid);
+}
+
 // MARK: - Stack accumulation (running average)
 
 struct StackParams {

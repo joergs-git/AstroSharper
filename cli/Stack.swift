@@ -22,6 +22,8 @@ enum Stack {
         var metricsPath: String?
         var quiet = false
         var sigmaThreshold: Float?
+        var drizzleScale = 1
+        var drizzlePixfrac: Float = 0.7
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -55,6 +57,24 @@ enum Stack {
                     return 64
                 }
                 sigmaThreshold = v
+                i += 2
+            case "--drizzle":
+                guard i + 1 < args.count, let v = Int(args[i + 1]),
+                      v >= 1, v <= 3
+                else {
+                    cliStderr("stack: --drizzle requires an integer in {1, 2, 3} (1 = off)")
+                    return 64
+                }
+                drizzleScale = v
+                i += 2
+            case "--pixfrac":
+                guard i + 1 < args.count, let v = Float(args[i + 1]),
+                      v.isFinite, v > 0, v <= 1
+                else {
+                    cliStderr("stack: --pixfrac requires a number in (0, 1] (BiggSky default 0.7)")
+                    return 64
+                }
+                drizzlePixfrac = v
                 i += 2
             case "--quiet", "-q":
                 quiet = true
@@ -127,6 +147,8 @@ enum Stack {
             var options = LuckyStackOptions()
             options.keepPercent = plan.percent
             options.sigmaThreshold = sigmaThreshold
+            options.drizzleScale = drizzleScale
+            options.drizzlePixfrac = drizzlePixfrac
 
             let started = Date()
             if !quiet, keepPercents.count > 1 {

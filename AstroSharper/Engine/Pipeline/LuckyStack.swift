@@ -90,6 +90,23 @@ struct LuckyStackOptions {
     ///
     /// CPU reference: Engine/Pipeline/SigmaClip.swift.
     var sigmaThreshold: Float? = nil
+
+    /// Drizzle reconstruction factor. 1 = off (default — output at
+    /// input dimensions via the standard accumulator). 2 or 3 = drop-
+    /// based splat onto an upsampled grid; output is `scale²` larger
+    /// in pixel area. Best for undersampled subjects (lunar / solar
+    /// surface at 0.5–1.5 "/px); minimal benefit on well-sampled
+    /// planetary data. Per BiggSky / AS!4 docs the typical operating
+    /// point is 2× with `drizzlePixfrac` 0.7.
+    ///
+    /// CPU reference: Engine/Pipeline/Drizzle.swift.
+    var drizzleScale: Int = 1
+
+    /// Drop size relative to one input pixel (0..1]. 0.7 is the
+    /// AS!4 / BiggSky default; smaller values increase sharpness at
+    /// the cost of coverage gaps in the output (handled by the
+    /// per-pixel weight texture).
+    var drizzlePixfrac: Float = 0.7
 }
 
 enum LuckyStackProgress {
@@ -185,6 +202,8 @@ private final class LuckyRunner {
     lazy var welfordPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_welford_step")
     lazy var clippedAccumPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_accumulate_clipped")
     lazy var perPixelNormPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_normalize_per_pixel")
+    // B.6 drizzle splat — only built when options.drizzleScale > 1.
+    lazy var drizzlePSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_drizzle_splat")
 
     let W: Int, H: Int
     let bytesPerPlane: Int
@@ -376,15 +395,25 @@ private final class LuckyRunner {
             referenceTex = refTex
         }
 
-        // Stage 3: weighted accumulation. Two paths:
-        //   - sigmaThreshold == nil: existing single-pass quality-weighted
-        //     mean + optional multi-AP local refinement.
-        //   - sigmaThreshold != nil: two-pass Welford → clipped accumulate,
-        //     rejecting per-pixel samples > k·σ from the running mean.
-        //     Multi-AP refinement is OFF in this path for v0; the per-AP
-        //     work meets sigma-clip in a later block.
+        // Stage 3: weighted accumulation. Three paths, picked in order:
+        //   - drizzleScale > 1   : per-output reverse-map splatter onto
+        //                          an upsampled grid. v0 is integer-only
+        //                          (2× / 3×) and ignores sigmaThreshold.
+        //   - sigmaThreshold ≠ nil: two-pass Welford → clipped re-accumulate.
+        //                          Multi-AP off in this path for v0.
+        //   - else                : existing single-pass quality-weighted
+        //                          mean + optional multi-AP refinement.
         let stacked: MTLTexture
-        if let sigma = options.sigmaThreshold {
+        if options.drizzleScale > 1 {
+            stacked = try await accumulateAlignedDrizzled(
+                indices: kept,
+                scores: scores,
+                shifts: referenceShifts,
+                scale: options.drizzleScale,
+                pixfrac: options.drizzlePixfrac,
+                progress: progress
+            )
+        } else if let sigma = options.sigmaThreshold {
             stacked = try await accumulateAlignedSigmaClipped(
                 indices: kept,
                 scores: scores,
@@ -868,6 +897,110 @@ private final class LuckyRunner {
         return device.makeTexture(descriptor: desc)!
     }
 
+    /// Drizzle accumulation (Fruchter & Hook 2002, B.6).
+    ///
+    /// Allocates an upsampled accumulator + per-pixel weight texture
+    /// (`scale × W` × `scale × H`) and splats each kept frame's
+    /// pixels onto the larger grid. The per-pixel weight tracks how
+    /// much drop coverage every output pixel received; the final
+    /// divide produces a clean output buffer at the upsampled
+    /// dimensions.
+    ///
+    /// v0 is integer-scale only (2× / 3×). Sub-pixel shifts are
+    /// honoured via the per-output reverse mapping in the splat
+    /// kernel.
+    private func accumulateAlignedDrizzled(
+        indices: [Int],
+        scores: [Float],
+        shifts: [Int: SIMD2<Float>],
+        scale: Int,
+        pixfrac: Float,
+        progress: @escaping (LuckyStackProgress) -> Void
+    ) async throws -> MTLTexture {
+        precondition(scale >= 1, "drizzle scale must be ≥ 1")
+
+        let outW = W * scale
+        let outH = H * scale
+        let accum = Self.makeFloatBuffer(device: device, w: outW, h: outH, format: .rgba16Float)
+        let wtTex = Self.makeFloatBuffer(device: device, w: outW, h: outH, format: .rgba32Float)
+
+        // Quality weighting curve (mirrors accumulateAligned).
+        let keptScores = indices.map { scores[$0] }
+        let lo = keptScores.min() ?? 0
+        let hi = keptScores.max() ?? 1
+        let span = max(1e-6, hi - lo)
+        @inline(__always) func qualityWeight(_ score: Float) -> Float {
+            let t = (score - lo) / span
+            let shaped = t * t
+            return 0.05 + shaped * 1.45
+        }
+
+        progress(.stacking(done: 0, total: indices.count))
+        for (i, idx) in indices.enumerated() {
+            stagingSemaphore.wait()
+            let slot = i % options.stagingPoolSize
+            let staging = stagingTextures[slot]
+            let frameTex = frameTextures[slot]
+
+            reader.withFrameBytes(at: idx) { ptr, _ in
+                staging.replace(
+                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
+                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
+                )
+            }
+            guard let cmd = queue.makeCommandBuffer() else {
+                stagingSemaphore.signal()
+                continue
+            }
+            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+
+            let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
+            let weight = qualityWeight(scores[idx])
+            if let enc = cmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(drizzlePSO)
+                enc.setTexture(frameTex, index: 0)
+                enc.setTexture(accum, index: 1)
+                enc.setTexture(wtTex, index: 2)
+                var p = LuckyDrizzleParamsCPU(
+                    weight: weight,
+                    pixfrac: pixfrac,
+                    scale: UInt32(scale),
+                    pad0: 0,
+                    shift: shift,
+                    inputSize: SIMD2<UInt32>(UInt32(W), UInt32(H))
+                )
+                enc.setBytes(&p, length: MemoryLayout<LuckyDrizzleParamsCPU>.stride, index: 0)
+                let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: drizzlePSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            cmd.addCompletedHandler { [weak self] _ in self?.stagingSemaphore.signal() }
+            cmd.commit()
+
+            if i % 32 == 0 || i == indices.count - 1 {
+                progress(.stacking(done: i + 1, total: indices.count))
+            }
+        }
+        for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
+        for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+
+        // Per-pixel divide: out = accum / weight.
+        if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
+            enc.setComputePipelineState(perPixelNormPSO)
+            enc.setTexture(accum, index: 0)
+            enc.setTexture(wtTex, index: 1)
+            var p = LuckyDivideParamsCPU(weightFloor: 1e-6)
+            enc.setBytes(&p, length: MemoryLayout<LuckyDivideParamsCPU>.stride, index: 0)
+            let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: perPixelNormPSO)
+            enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+            enc.endEncoding()
+            cmd.commit()
+            cmd.waitUntilCompleted()
+        }
+
+        return accum
+    }
+
     /// Two-pass sigma-clipped accumulation.
     ///
     /// Pass 1 builds a per-pixel running (mean, M2) via Welford. Pass
@@ -1148,6 +1281,17 @@ private func nextPow2(_ n: Int) -> Int {
 
 private struct LuckyNormalizeParams {
     var invTotalWeight: Float
+}
+
+// MARK: - Drizzle CPU param struct (B.6)
+
+private struct LuckyDrizzleParamsCPU {
+    var weight: Float
+    var pixfrac: Float
+    var scale: UInt32
+    var pad0: Float
+    var shift: SIMD2<Float>
+    var inputSize: SIMD2<UInt32>
 }
 
 // MARK: - Sigma-clipped CPU param structs (B.1)
