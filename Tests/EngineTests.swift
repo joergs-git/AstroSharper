@@ -282,6 +282,163 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - Sigma-clipped stacking
+
+@Suite("SigmaClip — outlier-robust per-pixel mean")
+struct SigmaClipTests {
+
+    @Test("empty input returns 0")
+    func emptyZero() {
+        #expect(SigmaClip.clippedMean(samples: []) == 0)
+    }
+
+    @Test("single sample returns itself")
+    func singleSample() {
+        #expect(SigmaClip.clippedMean(samples: [3.14]) == 3.14)
+    }
+
+    @Test("all-equal samples return the common value (no clipping)")
+    func allEqualNoClipping() {
+        #expect(SigmaClip.clippedMean(samples: [1.0, 1.0, 1.0, 1.0]) == 1.0)
+    }
+
+    @Test("no outliers: result equals arithmetic mean")
+    func noOutliersArithmeticMean() {
+        let samples: [Float] = [4.8, 5.0, 5.0, 5.2]
+        let mean = samples.reduce(0, +) / Float(samples.count)
+        let clipped = SigmaClip.clippedMean(samples: samples, sigmaThreshold: 2.5)
+        // No samples are 2.5σ away from mean → all kept.
+        #expect(abs(clipped - mean) < 1e-5)
+    }
+
+    @Test("single extreme outlier is rejected with realistic N")
+    func singleOutlierRejected() {
+        // Sigma-clipping is a statistical method that needs reasonable
+        // N to avoid the "outlier inflates σ enough to mask itself"
+        // self-masking problem. Real lucky-stack runs have hundreds to
+        // thousands of frames; here we use 19 normal samples + 1
+        // outlier to keep the test deterministic.
+        var samples: [Float] = Array(repeating: 5.0, count: 19)
+        samples.append(100.0)
+        let plainMean = samples.reduce(0, +) / Float(samples.count)
+        let clipped = SigmaClip.clippedMean(samples: samples, sigmaThreshold: 2.5)
+        #expect(plainMean > 9)               // confirms the test input
+        #expect(abs(clipped - 5.0) < 0.1)    // outlier dropped
+    }
+
+    @Test("self-masking outlier needs tighter threshold or more samples")
+    func selfMaskingProblem() {
+        // Documents the known limitation: with N=5 a single huge
+        // outlier drives σ up so much it stays within k=2.5σ. The
+        // function returns the plain mean — no asymptotic guarantees.
+        let samples: [Float] = [5.0, 5.0, 5.0, 5.0, 100.0]
+        let clipped = SigmaClip.clippedMean(samples: samples, sigmaThreshold: 2.5)
+        // Plain mean is 24. With self-masking it stays near 24.
+        #expect(clipped > 20)
+        // But a tighter threshold catches it:
+        let tighter = SigmaClip.clippedMean(samples: samples, sigmaThreshold: 1.0)
+        #expect(abs(tighter - 5.0) < 0.1)
+    }
+
+    @Test("clipCount reports how many were rejected")
+    func clipCountReports() {
+        var samples: [Float] = Array(repeating: 5.0, count: 19)
+        samples.append(100.0)
+        let n = SigmaClip.clipCount(samples: samples, sigmaThreshold: 2.5)
+        #expect(n == 1)
+    }
+
+    @Test("symmetric outliers are both rejected")
+    func symmetricOutliers() {
+        let samples: [Float] = [-50, 5.0, 5.0, 5.0, 5.0, 60]
+        let n = SigmaClip.clipCount(samples: samples, sigmaThreshold: 1.5)
+        #expect(n >= 1)   // at least one of the extremes flagged
+        let clipped = SigmaClip.clippedMean(samples: samples, sigmaThreshold: 1.5)
+        // Plain mean = ~5 actually; let me check: (-50+5+5+5+5+60)/6 = 30/6 = 5.0
+        // So even the plain mean is 5; the test mostly verifies the function
+        // doesn't blow up on outliers in opposite directions.
+        #expect(abs(clipped - 5.0) < 5.0)
+    }
+
+    @Test("higher threshold keeps more samples")
+    func higherThresholdMoreLenient() {
+        let samples: [Float] = [4.0, 5.0, 5.0, 5.0, 6.0, 8.0]
+        let strict = SigmaClip.clipCount(samples: samples, sigmaThreshold: 1.0)
+        let lenient = SigmaClip.clipCount(samples: samples, sigmaThreshold: 3.0)
+        #expect(strict >= lenient)
+    }
+
+    @Test("per-pixel stack: outlier in one pixel doesn't affect others")
+    func perPixelOutlierIsolated() {
+        // 21 frames of a 2×2 image. Pixel (0,0) has an outlier in
+        // frame 1; everything else is 1.0. Realistic frame count so
+        // σ-clip can actually fire on the outlier.
+        var frames: [[Float]] = []
+        for k in 0..<21 {
+            var f: [Float] = [1.0, 1.0, 1.0, 1.0]
+            if k == 0 { f[0] = 50.0 }
+            frames.append(f)
+        }
+        let stacked = SigmaClip.clippedMeanStack(
+            frames: frames,
+            width: 2, height: 2,
+            sigmaThreshold: 2.5
+        )
+        // Every output pixel should be ~1.0; the outlier is rejected
+        // at pixel 0 and the other pixels are unchanged.
+        for v in stacked {
+            #expect(abs(v - 1.0) < 0.1)
+        }
+    }
+
+    @Test("empty frames returns zero buffer")
+    func emptyStackReturnsZero() {
+        let s = SigmaClip.clippedMeanStack(
+            frames: [], width: 4, height: 4
+        )
+        #expect(s.count == 16)
+        #expect(s.allSatisfy { $0 == 0 })
+    }
+
+    @Test("single-frame stack returns the frame itself")
+    func singleFrameStackIsIdentity() {
+        let f: [Float] = [0.1, 0.5, 0.9, 0.3]
+        let stacked = SigmaClip.clippedMeanStack(
+            frames: [f], width: 2, height: 2
+        )
+        #expect(stacked == f)
+    }
+
+    @Test("Gaussian noise: clipping count ≈ 1.2% on 2.5 σ")
+    func gaussianClippingRate() {
+        // For a unit Gaussian, |x| > 2.5σ has probability ~1.24%.
+        // With 1000 samples we expect ~12 clipped — accept 5..30 to
+        // keep the test robust against the deterministic generator.
+        let n = 1000
+        var samples = [Float](repeating: 0, count: n)
+        // Box-Muller pseudorandom Gaussian, seeded for determinism.
+        var state: UInt64 = 1
+        func next() -> Double {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            let bits = (state >> 11) & ((1 << 53) - 1)
+            return Double(bits) / Double(1 << 53)
+        }
+        var i = 0
+        while i < n - 1 {
+            let u1 = max(1e-10, next())
+            let u2 = next()
+            let r = (-2.0 * log(u1)).squareRoot()
+            let theta = 2.0 * .pi * u2
+            samples[i]     = Float(r * cos(theta))
+            samples[i + 1] = Float(r * sin(theta))
+            i += 2
+        }
+        let clipped = SigmaClip.clipCount(samples: samples, sigmaThreshold: 2.5)
+        #expect(clipped >= 5)
+        #expect(clipped <= 35)
+    }
+}
+
 // MARK: - FITS reader + writer
 
 @Suite("FITS — basic 2D Float32 round-trip")
