@@ -174,8 +174,35 @@ enum ImageTexture {
         return tex
     }
 
-    /// Read a texture back and write to disk. TIFF preserves 16-bit; PNG/JPEG are 8-bit.
-    static func write(texture: MTLTexture, to url: URL) throws {
+    /// Output bit depth for raster file writes.
+    ///
+    /// - `.uint16`: 16-bit unsigned int per channel. Default for TIFF and
+    ///   PNG; pixel values clamp into [0, 65535] before encoding.
+    /// - `.float32`: 32-bit float per channel. TIFF only. Required when
+    ///   downstream pipeline stages — most notably blind deconvolution —
+    ///   push peak intensities above the 16-bit ceiling (BiggSky reports
+    ///   peaks routinely 50–100% over the original 16-bit range, i.e.
+    ///   well past 65535). Linear-light data is preserved so external
+    ///   processing tools (Siril, PixInsight) can apply their own tone
+    ///   curves without our 16-bit clamp throwing detail away.
+    ///
+    /// PNG and JPEG ignore `.float32` and always write 8-bit per the
+    /// format spec.
+    enum BitDepth: String, Codable {
+        case uint16
+        case float32
+    }
+
+    /// Read a texture back and write to disk.
+    ///
+    /// TIFF supports `uint16` (default, current pipeline behaviour) and
+    /// `float32` (new, for high-dynamic-range deconv outputs). PNG/JPEG
+    /// remain 8-bit per the format spec regardless of `bitDepth`.
+    static func write(
+        texture: MTLTexture,
+        to url: URL,
+        bitDepth: BitDepth = .uint16
+    ) throws {
         let ciContext = CIContext(mtlDevice: texture.device)
         guard let ci = CIImage(mtlTexture: texture, options: [.colorSpace: CGColorSpaceCreateDeviceRGB()]) else {
             throw ImageTextureError.cannotWrite(url)
@@ -186,13 +213,17 @@ enum ImageTexture {
         let ext = url.pathExtension.lowercased()
         switch ext {
         case "tif", "tiff":
-            try ciContext.writeTIFFRepresentation(of: flipped, to: url, format: .RGBA16, colorSpace: colorSpace, options: [:])
+            let format: CIFormat = (bitDepth == .float32) ? .RGBAf : .RGBA16
+            try ciContext.writeTIFFRepresentation(of: flipped, to: url, format: format, colorSpace: colorSpace, options: [:])
         case "png":
+            // PNG is always 8-bit; bitDepth has no effect.
             try ciContext.writePNGRepresentation(of: flipped, to: url, format: .RGBA8, colorSpace: colorSpace, options: [:])
         case "jpg", "jpeg":
             try ciContext.writeJPEGRepresentation(of: flipped, to: url, colorSpace: colorSpace, options: [:])
         default:
-            try ciContext.writeTIFFRepresentation(of: flipped, to: url, format: .RGBA16, colorSpace: colorSpace, options: [:])
+            // Unknown extension → fall back to TIFF, honouring bit depth.
+            let format: CIFormat = (bitDepth == .float32) ? .RGBAf : .RGBA16
+            try ciContext.writeTIFFRepresentation(of: flipped, to: url, format: format, colorSpace: colorSpace, options: [:])
         }
     }
 }

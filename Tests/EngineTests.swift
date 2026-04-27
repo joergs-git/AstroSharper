@@ -221,6 +221,44 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - Export format / bit depth
+
+@Suite("ExportFormat — bit-depth + extension regression")
+struct ExportFormatTests {
+
+    @Test("TIFF 16-bit sequence reports uint16")
+    func tiff16Sequence() {
+        #expect(ExportFormat.tiffSequence.bitDepth == .uint16)
+        #expect(ExportFormat.tiffSequence.sequenceExtension == "tif")
+        #expect(ExportFormat.tiffSequence.isSequence == true)
+    }
+
+    @Test("TIFF 32-bit float sequence reports float32")
+    func tiff32FloatSequence() {
+        #expect(ExportFormat.tiff32FloatSequence.bitDepth == .float32)
+        #expect(ExportFormat.tiff32FloatSequence.sequenceExtension == "tif")
+        #expect(ExportFormat.tiff32FloatSequence.isSequence == true)
+    }
+
+    @Test("PNG sequence ignores bit depth (always 8-bit)")
+    func pngSequence() {
+        // PNG always writes 8-bit per the format; the BitDepth is reported
+        // as uint16 by the Engine type but the writer overrides to 8-bit.
+        #expect(ExportFormat.pngSequence.sequenceExtension == "png")
+        #expect(ExportFormat.pngSequence.isSequence == true)
+    }
+
+    @Test("video formats are not sequences")
+    func videoFormats() {
+        #expect(ExportFormat.mp4H264.isSequence == false)
+        #expect(ExportFormat.movProRes.isSequence == false)
+        #expect(ExportFormat.animatedGIF.isSequence == false)
+        #expect(ExportFormat.mp4H264.fileExtension == "mp4")
+        #expect(ExportFormat.movProRes.fileExtension == "mov")
+        #expect(ExportFormat.animatedGIF.fileExtension == "gif")
+    }
+}
+
 // MARK: - Preset auto-detect
 
 @Suite("Preset auto-detect from filename keywords")
