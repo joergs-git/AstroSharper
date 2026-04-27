@@ -439,8 +439,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             DispatchQueue.main.async {
                 self.beforeTex = tex
                 self.afterTex = nil
-                self.zoomScale = 1
-                self.panPx = .zero
+                // Zoom + pan deliberately PRESERVED across file switches — this
+                // matches AstroTriage so blink-compare workflows (clicking
+                // through neighbours in the list while staying zoomed-in on
+                // the same region) work without re-zooming after every click.
+                // Double-click on the preview / ⌘0 still reset to fit.
                 self.app.previewHistogram = hist
                 if let dim = tex.map({ ($0.width, $0.height) }) {
                     self.app.previewStats.dimensions = dim
@@ -635,10 +638,11 @@ final class ZoomableMTKView: MTKView {
 
     private var isZoomDragging = false
     private var isPanDragging = false
-    private var zoomAnchorView: NSPoint = .zero
+    private var zoomAnchorView: NSPoint = .zero       // drawable pixels — for anchoredZoom math
+    private var zoomAnchorPoints: NSPoint = .zero     // points — for the dx → speed calibration (matches AstroTriage's "200 pt = 2x")
     private var zoomStartScale: Float = 1
     private var zoomStartPan: SIMD2<Float> = .zero
-    private var panDragStart: NSPoint = .zero
+    private var panDragStart: NSPoint = .zero         // drawable pixels — panPx is stored in drawable pixels too
     private var panStartOffset: SIMD2<Float> = .zero
 
     override var acceptsFirstResponder: Bool { true }
@@ -694,7 +698,9 @@ final class ZoomableMTKView: MTKView {
         // starting zoom + pan; mouseDragged will compute new pan to keep the
         // pixel under the cursor stationary as zoom changes.
         isZoomDragging = true
-        zoomAnchorView = toDrawable(convert(event.locationInWindow, from: nil))
+        let pt = convert(event.locationInWindow, from: nil)
+        zoomAnchorPoints = pt
+        zoomAnchorView = toDrawable(pt)
         zoomStartScale = c.zoomScale
         zoomStartPan = c.panPx
     }
@@ -704,22 +710,26 @@ final class ZoomableMTKView: MTKView {
 
         if isPanDragging {
             let current = toDrawable(convert(event.locationInWindow, from: nil))
-            // Pan follows the hand 1:1 in drawable pixels. The display shader
-            // has positive panPx.x mapping to "image content shifts LEFT on
-            // screen", so to make the image follow the hand to the right we
-            // *decrease* panPx.x as the cursor moves right. Y stays direct
-            // because NSView coords are y-up and the shader's y-flip cancels.
+            // Hand-tool pan — image follows the cursor on BOTH axes (matches
+            // AstroTriage). The Y axis was previously inverted: dragging the
+            // cursor up moved the image down. Empirically the shader's panPx.y
+            // convention is opposite to what an earlier comment claimed, so
+            // subtracting the Y delta makes the image follow the hand. X
+            // already worked correctly (subtract → image follows hand right).
             c.panPx.x = panStartOffset.x - Float(current.x - panDragStart.x)
-            c.panPx.y = panStartOffset.y + Float(current.y - panDragStart.y)
+            c.panPx.y = panStartOffset.y - Float(current.y - panDragStart.y)
             needsDisplay = true
             return
         }
 
         guard isZoomDragging else { return }
-        let current = toDrawable(convert(event.locationInWindow, from: nil))
-        let dx = current.x - zoomAnchorView.x
-        // ~200 drawable px of horizontal drag = 2× zoom change.
-        let zoomFactor = pow(2.0, dx / 200.0)
+        // Zoom speed in POINTS, not drawable pixels — AstroTriage's "200 pt of
+        // horizontal drag = 2× zoom" calibration. Using drawable pixels here
+        // made the zoom feel 2× too fast on retina because dx in drawable
+        // pixels is 2× the dx in points for the same physical mouse motion.
+        let currentPoints = convert(event.locationInWindow, from: nil)
+        let dxPoints = currentPoints.x - zoomAnchorPoints.x
+        let zoomFactor = pow(2.0, dxPoints / 200.0)
         let newScale = max(0.1, min(50.0, CGFloat(zoomStartScale) * zoomFactor))
         anchoredZoom(toScale: Float(newScale),
                      anchor: zoomAnchorView,
@@ -740,10 +750,11 @@ final class ZoomableMTKView: MTKView {
         }
         // Pan when zoomed in. Multiply by backing scale to keep retina
         // movement in the same drawable-pixel units the shader expects.
-        // Same X sign convention as the ⌥-drag pan above.
+        // Both axes subtract the scroll delta to match the click-drag pan
+        // direction (image follows the scroll).
         let s = Float(window?.backingScaleFactor ?? 1)
         c.panPx.x -= Float(event.scrollingDeltaX) * s
-        c.panPx.y += Float(event.scrollingDeltaY) * s
+        c.panPx.y -= Float(event.scrollingDeltaY) * s
         needsDisplay = true
     }
 
