@@ -221,6 +221,79 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - Calibration policy
+
+@Suite("CalibrationPolicy — auto-skip rule")
+struct CalibrationPolicyTests {
+
+    @Test("Jupiter at short exposure → calibration off")
+    func jupiterShortIsOff() {
+        let on = CalibrationPolicy.recommendsOnByDefault(
+            target: .jupiter, exposureMs: 8
+        )
+        #expect(on == false)
+    }
+
+    @Test("Jupiter at long exposure → calibration on")
+    func jupiterLongIsOn() {
+        let on = CalibrationPolicy.recommendsOnByDefault(
+            target: .jupiter, exposureMs: 50
+        )
+        #expect(on == true)
+    }
+
+    @Test("Moon and Sun follow the same short-exposure rule as Jupiter")
+    func moonSunShortAreOff() {
+        #expect(CalibrationPolicy.recommendsOnByDefault(target: .moon, exposureMs: 5) == false)
+        #expect(CalibrationPolicy.recommendsOnByDefault(target: .sun,  exposureMs: 10) == false)
+    }
+
+    @Test("Mars and Saturn always default to on")
+    func marsSaturnAlwaysOn() {
+        #expect(CalibrationPolicy.recommendsOnByDefault(target: .mars,   exposureMs: 2) == true)
+        #expect(CalibrationPolicy.recommendsOnByDefault(target: .saturn, exposureMs: 3) == true)
+    }
+
+    @Test("Unknown target defaults to on")
+    func unknownTargetOn() {
+        #expect(CalibrationPolicy.recommendsOnByDefault(target: nil,    exposureMs: 5) == true)
+        #expect(CalibrationPolicy.recommendsOnByDefault(target: .other, exposureMs: 5) == true)
+    }
+
+    @Test("Missing exposure data defaults to on")
+    func missingExposureOn() {
+        #expect(CalibrationPolicy.recommendsOnByDefault(target: .jupiter, exposureMs: nil) == true)
+    }
+
+    @Test("Boundary at 15 ms — exactly on the threshold counts as short")
+    func exactlyAtThreshold() {
+        // The rule uses `>` so 15 ms exactly is treated as "short" and
+        // calibration is recommended OFF. This matches BiggSky's
+        // language: "≤ 15 ms is short-exposure bright."
+        let on = CalibrationPolicy.recommendsOnByDefault(
+            target: .jupiter, exposureMs: 15
+        )
+        #expect(on == false)
+    }
+
+    @Test("Explanation text mentions the threshold when ON")
+    func explanationOn() {
+        let s = CalibrationPolicy.explainRecommendation(
+            target: .jupiter, exposureMs: 50, on: true
+        )
+        #expect(s.contains("ON"))
+    }
+
+    @Test("Explanation text references BiggSky guidance when OFF")
+    func explanationOff() {
+        let s = CalibrationPolicy.explainRecommendation(
+            target: .jupiter, exposureMs: 5, on: false
+        )
+        #expect(s.contains("OFF"))
+        #expect(s.contains("BiggSky"))
+    }
+}
+
 // MARK: - File catalog auto target detection
 
 @Suite("FileCatalog — auto target detection on import")
