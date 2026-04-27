@@ -262,6 +262,17 @@ struct ToneCurveSettings: Equatable, Codable {
     /// small boost (1.2–1.5) on planetary captures.
     var saturation: Double = 1.0
 
+    /// Brightness offset added per-channel after the tone curve. 0 =
+    /// identity. Range typically ±0.3 — beyond that the image clips
+    /// hard at 0/1.
+    var brightness: Double = 0.0
+
+    /// Contrast multiplier around the 0.5 mid-point. 1.0 = identity,
+    /// >1 expands contrast (steeper S-curve), <1 compresses. Combined
+    /// with brightness this gives the classic "lightness + contrast"
+    /// pair without forcing the user to drag tone-curve points.
+    var contrast: Double = 1.0
+
     /// Auto-white-balance (gray-world) applied at the START of the post-
     /// stack pipeline, BEFORE any sharpening. Independent of `enabled` —
     /// this fires whenever the toggle is on, regardless of whether the
@@ -276,11 +287,13 @@ struct ToneCurveSettings: Equatable, Codable {
     /// Atmospheric chromatic dispersion correction. Phase-correlates R
     /// and B against G on the stacked output, applies the resulting
     /// sub-pixel shifts so the three channels re-align (green stays
-    /// anchored). Default ON for OSC; collapses to a no-op on mono /
-    /// pre-aligned sources because the channel offsets come out near
-    /// zero. Runs AFTER auto-WB so channel statistics are normalised
-    /// before the alignment search.
-    var chromaticAlignment: Bool = true
+    /// anchored). Default OFF — phase correlation on a small planet
+    /// against a large black sky is noise-dominated, and the resulting
+    /// shift over-corrects and creates the very fringes it's supposed
+    /// to remove. Until the search is confined to the planet's
+    /// bounding box (autoROI) this is opt-in. The internal sanity
+    /// gate also rejects any offset > 5 px as obviously wrong.
+    var chromaticAlignment: Bool = false
 
     // MARK: - Codable
     /// Backwards-compatible decoder so older preset JSON keeps loading. The
@@ -295,7 +308,9 @@ struct ToneCurveSettings: Equatable, Codable {
         ]
         self.saturation         = try c.decodeIfPresent(Double.self, forKey: .saturation)         ?? 1.0
         self.autoWB             = try c.decodeIfPresent(Bool.self,   forKey: .autoWB)             ?? true
-        self.chromaticAlignment = try c.decodeIfPresent(Bool.self,   forKey: .chromaticAlignment) ?? true
+        self.chromaticAlignment = try c.decodeIfPresent(Bool.self,   forKey: .chromaticAlignment) ?? false
+        self.brightness         = try c.decodeIfPresent(Double.self, forKey: .brightness)         ?? 0.0
+        self.contrast           = try c.decodeIfPresent(Double.self, forKey: .contrast)           ?? 1.0
     }
 
     init(
@@ -307,12 +322,16 @@ struct ToneCurveSettings: Equatable, Codable {
         ],
         saturation: Double = 1.0,
         autoWB: Bool = true,
-        chromaticAlignment: Bool = true
+        chromaticAlignment: Bool = false,
+        brightness: Double = 0.0,
+        contrast: Double = 1.0
     ) {
         self.enabled = enabled
         self.controlPoints = controlPoints
         self.saturation = saturation
         self.autoWB = autoWB
         self.chromaticAlignment = chromaticAlignment
+        self.brightness = brightness
+        self.contrast = contrast
     }
 }

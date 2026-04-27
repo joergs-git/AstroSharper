@@ -284,6 +284,35 @@ kernel void noise_reduce_bilateral(
     }
 }
 
+// MARK: - Brightness + Contrast
+//
+// Two-parameter lightness adjustment that runs as a discrete pipeline
+// step right after the tone curve (so it operates on whatever curve
+// the user dialled in) and before saturation.
+//
+//   out = clamp((in - 0.5) * contrast + 0.5 + brightness, 0, 1)
+//
+// Identity = (brightness 0, contrast 1). The pipeline skips this step
+// at identity to avoid the per-pixel cost on the common case.
+
+struct BrightnessContrastParams {
+    float brightness;
+    float contrast;
+};
+
+kernel void apply_brightness_contrast(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    constant BrightnessContrastParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    float3 v = (c.rgb - 0.5) * p.contrast + 0.5 + float3(p.brightness);
+    v = clamp(v, 0.0, 1.0);
+    output.write(float4(v, c.a), gid);
+}
+
 // MARK: - Saturation
 //
 // Mix each RGB sample with its Rec.709 luminance to control colour

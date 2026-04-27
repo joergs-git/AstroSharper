@@ -22,6 +22,7 @@ final class Pipeline {
     private lazy var nrPSO      = makeComputePSO(function: "noise_reduce_bilateral")
     private lazy var wbPSO      = makeComputePSO(function: "apply_white_balance")
     private lazy var acdcPSO    = makeComputePSO(function: "shift_rb_channels")
+    private lazy var bcPSO      = makeComputePSO(function: "apply_brightness_contrast")
     private lazy var shiftPSO   = makeComputePSO(function: "sub_pixel_shift")
     private lazy var stackPSO   = makeComputePSO(function: "stack_accumulate")
     private lazy var subPSO     = makeComputePSO(function: "subtract_textures")
@@ -266,6 +267,31 @@ final class Pipeline {
             current = result
         }
 
+        // Brightness + contrast — independent of the tone-curve sub-step
+        // (fires whenever the values aren't identity, regardless of the
+        // curve toggle). Runs AFTER the curve so it operates on the
+        // user's curve-mapped values, BEFORE saturation so saturation
+        // sees the final luminance the user dialled in.
+        let bcIsIdentity = abs(toneCurve.brightness) < 1e-4 && abs(toneCurve.contrast - 1.0) < 1e-4
+        if toneCurve.enabled, !bcIsIdentity {
+            let result = borrow(width: w, height: h, format: input.pixelFormat)
+            borrowed.append(result)
+            if let enc = finalCmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(bcPSO)
+                enc.setTexture(current, index: 0)
+                enc.setTexture(result, index: 1)
+                var p = BrightnessContrastParamsCPU(
+                    brightness: Float(toneCurve.brightness),
+                    contrast:   Float(toneCurve.contrast)
+                )
+                enc.setBytes(&p, length: MemoryLayout<BrightnessContrastParamsCPU>.stride, index: 0)
+                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: bcPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            current = result
+        }
+
         // Saturation runs even when the tone-curve sub-section is off — it's
         // an independent control on the same panel. Skipped at identity (1.0)
         // so the no-op case costs nothing. Always last in the chain so it
@@ -416,6 +442,12 @@ struct WhiteBalanceParamsCPU {
 struct ChannelShiftParamsCPU {
     var redOffset:  SIMD2<Float>
     var blueOffset: SIMD2<Float>
+}
+
+/// Mirror of the Metal `BrightnessContrastParams` struct.
+struct BrightnessContrastParamsCPU {
+    var brightness: Float
+    var contrast: Float
 }
 
 // Utility for dispatch sizing.

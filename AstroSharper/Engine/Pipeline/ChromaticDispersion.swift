@@ -126,9 +126,21 @@ enum ChromaticDispersion {
         let bShift = Align.phaseCorrelateBuffers(reference: green, frame: blue, log2n: log2n)
                      ?? AlignShift(dx: 0, dy: 0)
 
+        // Sanity gate: real atmospheric dispersion on planetary OSC is
+        // rarely more than ~3 px even at low altitude. Anything beyond
+        // sanityCapPx is almost certainly the FFT locking onto noise
+        // (small planet on large black sky → low signal-to-background
+        // ratio in the downsampled buffer). Reject the offending channel
+        // back to zero rather than apply a shift that would create the
+        // very fringes ACDC is meant to remove.
+        let sanityCapPx: Float = 5.0
+        let rPx = SIMD2<Float>(rShift.dx * scaleX, rShift.dy * scaleY)
+        let bPx = SIMD2<Float>(bShift.dx * scaleX, bShift.dy * scaleY)
+        let rPass = abs(rPx.x) <= sanityCapPx && abs(rPx.y) <= sanityCapPx
+        let bPass = abs(bPx.x) <= sanityCapPx && abs(bPx.y) <= sanityCapPx
         return ChannelOffsets(
-            red:  SIMD2<Float>(rShift.dx * scaleX, rShift.dy * scaleY),
-            blue: SIMD2<Float>(bShift.dx * scaleX, bShift.dy * scaleY)
+            red:  rPass ? rPx : .zero,
+            blue: bPass ? bPx : .zero
         )
     }
 }

@@ -298,6 +298,38 @@ struct ToneCurveSection: View {
                 logHistogram: $app.histogramLogScale
             )
             Divider().padding(.vertical, 4)
+            // Brightness — additive offset, ±0.3 typical. Identity = 0.
+            HStack {
+                Text("Brightness")
+                    .font(.system(size: 11))
+                    .frame(width: 80, alignment: .leading)
+                Slider(value: $app.toneCurve.brightness, in: -0.5...0.5, step: 0.01)
+                Text(String(format: "%+.2f", app.toneCurve.brightness))
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 40, alignment: .trailing)
+                    .foregroundColor(.secondary)
+                Button("Reset") { app.toneCurve.brightness = 0.0 }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .disabled(abs(app.toneCurve.brightness) < 1e-4)
+            }
+            .help("Additive lightness offset, applied after the tone curve. Identity = 0.")
+            // Contrast — multiplicative around 0.5. Identity = 1.0.
+            HStack {
+                Text("Contrast")
+                    .font(.system(size: 11))
+                    .frame(width: 80, alignment: .leading)
+                Slider(value: $app.toneCurve.contrast, in: 0.2...3.0, step: 0.05)
+                Text(String(format: "%.2f", app.toneCurve.contrast))
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 40, alignment: .trailing)
+                    .foregroundColor(.secondary)
+                Button("Reset") { app.toneCurve.contrast = 1.0 }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .disabled(abs(app.toneCurve.contrast - 1.0) < 1e-4)
+            }
+            .help("Contrast multiplier around 0.5 mid-point. >1 expands, <1 compresses.")
             // Saturation — applied around per-pixel Rec.709 luma. 1.0 is
             // identity. Stacking averages noisy frames toward grey, so a
             // small boost (1.2–1.5) typically restores planetary colour
