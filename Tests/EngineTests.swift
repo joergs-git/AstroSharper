@@ -197,6 +197,67 @@ struct PipelineSettingsDefaultsTests {
         let decoded = try JSONDecoder().decode(SharpenSettings.self, from: data)
         #expect(decoded == original)
     }
+
+    @Test("Block C plumbing fields are present with BiggSky defaults")
+    func blockCPlumbingDefaults() {
+        let s = SharpenSettings()
+        #expect(s.denoiseBeforePercent == 75)
+        #expect(s.denoiseAfterPercent  == 75)
+        #expect(s.processLuminanceOnly == true)
+        #expect(s.captureGamma         == 1.0)
+    }
+
+    @Test("Old preset JSON without C.* fields decodes with default values")
+    func backCompatOldPreset() throws {
+        // Encode the v0.3.x field set only — equivalent to a preset
+        // written before Block C plumbing landed. Decoding into the
+        // current struct must apply BiggSky defaults silently.
+        let json = """
+        {
+          "enabled": true,
+          "unsharpEnabled": true,
+          "radius": 2.0,
+          "amount": 0.8,
+          "adaptive": false,
+          "lrEnabled": true,
+          "lrIterations": 30,
+          "lrSigma": 1.3,
+          "wienerEnabled": false,
+          "wienerSigma": 1.4,
+          "wienerSNR": 50,
+          "waveletEnabled": false,
+          "waveletScales": [1.8, 1.4, 1.0, 0.6]
+        }
+        """.data(using: .utf8)!
+
+        let s = try JSONDecoder().decode(SharpenSettings.self, from: json)
+        // v0.3.x payload preserved.
+        #expect(s.enabled == true)
+        #expect(s.lrEnabled == true)
+        #expect(s.amount == 0.8)
+        // Block C fields filled with defaults.
+        #expect(s.denoiseBeforePercent == 75)
+        #expect(s.denoiseAfterPercent  == 75)
+        #expect(s.processLuminanceOnly == true)
+        #expect(s.captureGamma         == 1.0)
+    }
+
+    @Test("Round-trip with custom Block C values preserves them")
+    func blockCRoundTrip() throws {
+        var original = SharpenSettings()
+        original.denoiseBeforePercent = 50
+        original.denoiseAfterPercent  = 100
+        original.processLuminanceOnly = false
+        original.captureGamma         = 2.0
+
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(SharpenSettings.self, from: data)
+        #expect(decoded == original)
+        #expect(decoded.denoiseBeforePercent == 50)
+        #expect(decoded.denoiseAfterPercent  == 100)
+        #expect(decoded.processLuminanceOnly == false)
+        #expect(decoded.captureGamma         == 2.0)
+    }
 }
 
 // MARK: - Lucky stack variants
