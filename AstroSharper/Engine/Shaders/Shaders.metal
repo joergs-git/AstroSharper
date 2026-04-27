@@ -665,6 +665,11 @@ kernel void compute_ap_shifts(
 
     threadgroup float bestSAD[1024];
     threadgroup int   bestIdx[1024];
+    // Preserved copy of every candidate's SAD for the post-reduction sub-
+    // pixel parabolic fit. The reduction overwrites bestSAD as it works,
+    // so without this we'd lose the SAD values for the integer winner's
+    // neighbours and couldn't refine below pixel precision.
+    threadgroup float sadGrid[1024];
 
     // Initialize ALL 1024 slots so the reduction's stride=512 step reads
     // valid data even when the dispatched threadgroup is smaller than 1024
@@ -673,6 +678,7 @@ kernel void compute_ap_shifts(
     for (uint i = candIndex; i < 1024; i += tgSize) {
         bestSAD[i] = 1e30;
         bestIdx[i] = int(i);
+        sadGrid[i] = 1e30;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -730,6 +736,11 @@ kernel void compute_ap_shifts(
 
     bestSAD[candIndex] = sad;
     bestIdx[candIndex] = int(candIndex);
+    // sadGrid is the immutable SAD-per-candidate snapshot the parabolic
+    // fit needs to look up. It mirrors bestSAD pre-reduction.
+    if (int(candIndex) < total) {
+        sadGrid[candIndex] = sad;
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Reduction (assumes threadgroup size is a power of 2 ≥ total).
@@ -745,9 +756,39 @@ kernel void compute_ap_shifts(
 
     if (candIndex == 0) {
         int winnerIdx = bestIdx[0];
-        int wx = (winnerIdx % range) - p.searchRadius;
-        int wy = (winnerIdx / range) - p.searchRadius;
-        shiftMap.write(float4(float(wx), float(wy), 0, 0), uint2(apX, apY));
+        int wxi = winnerIdx % range;
+        int wyi = winnerIdx / range;
+        int wx = wxi - p.searchRadius;
+        int wy = wyi - p.searchRadius;
+
+        // Sub-pixel parabolic refinement of the integer SAD minimum. The
+        // SAD surface in a small neighbourhood of the true offset is well-
+        // approximated by a 2nd-order polynomial; fitting a 1D parabola
+        // through the integer winner and its left/right (and up/down)
+        // neighbours gives a fractional offset to ~0.1 px on smooth
+        // subjects. Clamped to ±0.5 to reject ill-conditioned fits at the
+        // search-window boundary.
+        float subX = 0.0;
+        float subY = 0.0;
+        if (wxi > 0 && wxi < range - 1) {
+            float c = sadGrid[wyi * range + wxi];
+            float l = sadGrid[wyi * range + (wxi - 1)];
+            float r = sadGrid[wyi * range + (wxi + 1)];
+            float denom = (l - 2.0 * c + r);
+            if (abs(denom) > 1e-8) {
+                subX = clamp(0.5 * (l - r) / denom, -0.5, 0.5);
+            }
+        }
+        if (wyi > 0 && wyi < range - 1) {
+            float c = sadGrid[wyi * range + wxi];
+            float u = sadGrid[(wyi - 1) * range + wxi];
+            float d = sadGrid[(wyi + 1) * range + wxi];
+            float denom = (u - 2.0 * c + d);
+            if (abs(denom) > 1e-8) {
+                subY = clamp(0.5 * (u - d) / denom, -0.5, 0.5);
+            }
+        }
+        shiftMap.write(float4(float(wx) + subX, float(wy) + subY, 0, 0), uint2(apX, apY));
     }
 }
 
