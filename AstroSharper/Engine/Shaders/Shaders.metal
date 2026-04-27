@@ -620,9 +620,9 @@ struct APSearchParams {
 };
 
 kernel void compute_ap_shifts(
-    texture2d<float, access::read>  ref      [[texture(0)]],
-    texture2d<float, access::read>  frame    [[texture(1)]],
-    texture2d<float, access::write> shiftMap [[texture(2)]],
+    texture2d<float, access::read>    ref      [[texture(0)]],
+    texture2d<float, access::sample>  frame    [[texture(1)]],
+    texture2d<float, access::write>   shiftMap [[texture(2)]],
     constant APSearchParams& p [[buffer(0)]],
     uint apIndex     [[threadgroup_position_in_grid]],
     uint candIndex   [[thread_index_in_threadgroup]],
@@ -654,21 +654,43 @@ kernel void compute_ap_shifts(
     int cx = int(float(W) * (float(apX) + 0.5) / float(p.gridSize.x));
     int cy = int(float(H) * (float(apY) + 0.5) / float(p.gridSize.y));
 
+    constexpr sampler smp_lin(address::clamp_to_edge, filter::linear);
     float sad = 1e30;
     if (int(candIndex) < total) {
         sad = 0.0;
-        int hp = int(p.patchHalf);  // patch half size
-        // Subsample by 2 for speed — patchHalf=8 → 8×8=64 samples per SAD.
-        int gx = int(round(p.globalShift.x));
-        int gy = int(round(p.globalShift.y));
+        int hp = int(p.patchHalf);
+        // Two corrections vs the previous SAD:
+        //
+        // 1. Use the FULL float globalShift instead of round(globalShift).
+        //    The previous int-rounded version threw away the fractional
+        //    pixel of phase-corr precision INSIDE the search, so the
+        //    "winning" local shift encoded that lost fraction on top of
+        //    any true atmospheric local shift.
+        //
+        // 2. Match lucky_accumulate_local's sign convention. That kernel
+        //    samples frame at `gid - (global + local)`. The previous SAD
+        //    sampled frame at `rx + cand + global` — opposite sign. The
+        //    "best" cand from that SAD therefore minimised SAD against a
+        //    DIFFERENT location than the accumulator later reads from, so
+        //    the local shift was being applied with the wrong sign in
+        //    every frame. With sub-pixel global shifts this misaligned
+        //    every AP cell by ~2× the global shift, producing the visible
+        //    smear that made `--mode scientific --multi-ap` worse than
+        //    the standard single-shift accumulator.
+        //
+        // Both texture reads now use the linear sampler so sub-pixel
+        // candidate positions don't bias the SAD.
         for (int py = -hp; py < hp; py += 2) {
             for (int px = -hp; px < hp; px += 2) {
                 int rx = cx + px, ry = cy + py;
-                int fx = rx + candX + gx, fy = ry + candY + gy;
                 if (rx < 0 || rx >= W || ry < 0 || ry >= H) continue;
-                if (fx < 0 || fx >= W || fy < 0 || fy >= H) continue;
+                float fx_f = float(rx) - p.globalShift.x - float(candX);
+                float fy_f = float(ry) - p.globalShift.y - float(candY);
+                if (fx_f < 0.5 || fx_f >= float(W) - 0.5 ||
+                    fy_f < 0.5 || fy_f >= float(H) - 0.5) continue;
                 float r = ref.read(uint2(rx, ry)).r;
-                float f = frame.read(uint2(fx, fy)).r;
+                float2 fuv = (float2(fx_f, fy_f) + 0.5) / float2(W, H);
+                float f = frame.sample(smp_lin, fuv).r;
                 sad += abs(r - f);
             }
         }
