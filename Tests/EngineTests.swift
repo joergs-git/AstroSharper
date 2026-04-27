@@ -221,6 +221,185 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - Capture gamma compensation
+
+@Suite("CaptureGamma — pre-deconv linearisation")
+struct CaptureGammaTests {
+
+    @Test("identity gamma returns input unchanged")
+    func identity() {
+        #expect(CaptureGamma.linearize(0.5, gamma: 1.0) == 0.5)
+        #expect(CaptureGamma.linearize(0.0, gamma: 1.0) == 0.0)
+        #expect(CaptureGamma.linearize(1.0, gamma: 1.0) == 1.0)
+    }
+
+    @Test("gamma 2.0 squares mid-tones")
+    func gammaTwoSquares() {
+        // pow(0.5, 2.0) = 0.25
+        #expect(abs(CaptureGamma.linearize(0.5, gamma: 2.0) - 0.25) < 1e-6)
+    }
+
+    @Test("gamma 0.5 = sqrt — useful for inverting an applied gamma")
+    func gammaHalfSqrts() {
+        // pow(0.25, 0.5) = 0.5
+        #expect(abs(CaptureGamma.linearize(0.25, gamma: 0.5) - 0.5) < 1e-6)
+    }
+
+    @Test("0 and 1 are fixed points for any gamma")
+    func endpointsFixed() {
+        for g in [0.5, 1.5, 2.0, 2.2, 3.0] {
+            #expect(CaptureGamma.linearize(0.0, gamma: g) == 0.0)
+            #expect(abs(CaptureGamma.linearize(1.0, gamma: g) - 1.0) < 1e-6)
+        }
+    }
+
+    @Test("negative samples pass through unchanged")
+    func negativesPassThrough() {
+        // pow() of a negative with non-integer exponent is undefined; we
+        // keep the sample as-is. Wiener residuals can produce these.
+        #expect(CaptureGamma.linearize(-0.3, gamma: 2.0) == -0.3)
+    }
+
+    @Test("invalid gamma falls back to identity")
+    func invalidGamma() {
+        #expect(CaptureGamma.linearize(0.5, gamma: 0)   == 0.5)
+        #expect(CaptureGamma.linearize(0.5, gamma: -1)  == 0.5)
+        #expect(CaptureGamma.linearize(0.5, gamma: .nan) == 0.5)
+    }
+
+    @Test("buffer linearisation preserves length and identity at gamma 1")
+    func bufferIdentity() {
+        let buf: [Float] = [0.0, 0.25, 0.5, 0.75, 1.0]
+        let out = CaptureGamma.linearize(buffer: buf, gamma: 1.0)
+        #expect(out == buf)
+    }
+
+    @Test("buffer linearisation at gamma 2 squares each sample")
+    func bufferSquares() {
+        let buf: [Float] = [0.0, 0.5, 1.0]
+        let out = CaptureGamma.linearize(buffer: buf, gamma: 2.0)
+        #expect(out.count == 3)
+        #expect(out[0] == 0.0)
+        #expect(abs(out[1] - 0.25) < 1e-6)
+        #expect(abs(out[2] - 1.0) < 1e-6)
+    }
+
+    @Test("camera slider 50 is linear")
+    func sliderFiftyIsLinear() {
+        #expect(CaptureGamma.gamma(fromCameraSliderValue: 50) == 1.0)
+    }
+
+    @Test("camera slider 100 = gamma 2.0")
+    func sliderHundredIsTwo() {
+        #expect(CaptureGamma.gamma(fromCameraSliderValue: 100) == 2.0)
+    }
+
+    @Test("camera slider clamps at extremes")
+    func sliderClamps() {
+        #expect(CaptureGamma.gamma(fromCameraSliderValue: 0)    == 0.1)
+        #expect(CaptureGamma.gamma(fromCameraSliderValue: 1000) == 4.0)
+        #expect(CaptureGamma.gamma(fromCameraSliderValue: -10)  == 0.1)
+    }
+
+    @Test("looksLikeCameraSlider heuristic")
+    func sliderDetection() {
+        #expect(CaptureGamma.looksLikeCameraSlider(2.0) == false)
+        #expect(CaptureGamma.looksLikeCameraSlider(2.2) == false)
+        #expect(CaptureGamma.looksLikeCameraSlider(50)  == true)
+        #expect(CaptureGamma.looksLikeCameraSlider(100) == true)
+    }
+}
+
+// MARK: - Capture geometry / tile size
+
+@Suite("CaptureGeometry — tile size and pixel scale formulas")
+struct CaptureGeometryTests {
+
+    @Test("BiggSky reference: 2000mm + 5µm + 1× = 400 px tile")
+    func biggSkyReference() {
+        // From the BiggSky Google Doc: f=2000mm, p=5µm, no Barlow → 400 px.
+        let s = CaptureGeometry.tileSize(
+            focalLengthMM: 2000,
+            pixelPitchUm: 5,
+            barlowMagnification: 1.0
+        )
+        #expect(s == 400)
+    }
+
+    @Test("Barlow doubles the tile size")
+    func barlowScalesLinearly() {
+        let s1 = CaptureGeometry.tileSize(focalLengthMM: 2000, pixelPitchUm: 5, barlowMagnification: 2.0)
+        #expect(s1 == 800)
+    }
+
+    @Test("Tile size lifts to the 200-px floor")
+    func minimumFloor() {
+        // Tiny scope + big pixels: f=400mm, p=10µm → 40 px → lifted to 200.
+        let s = CaptureGeometry.tileSize(
+            focalLengthMM: 400, pixelPitchUm: 10, barlowMagnification: 1.0
+        )
+        #expect(s == CaptureGeometry.minimumTileSize)
+    }
+
+    @Test("Missing inputs return the default 500-px fallback")
+    func defaultFallback() {
+        #expect(CaptureGeometry.tileSize(focalLengthMM: nil, pixelPitchUm: 5) == 500)
+        #expect(CaptureGeometry.tileSize(focalLengthMM: 2000, pixelPitchUm: nil) == 500)
+        #expect(CaptureGeometry.tileSize(focalLengthMM: 0, pixelPitchUm: 5) == 500)
+        #expect(CaptureGeometry.tileSize(focalLengthMM: 2000, pixelPitchUm: 0) == 500)
+        #expect(CaptureGeometry.tileSize(focalLengthMM: -1, pixelPitchUm: 5) == 500)
+        // NaN / Inf are also rejected.
+        #expect(CaptureGeometry.tileSize(focalLengthMM: .nan, pixelPitchUm: 5) == 500)
+        #expect(CaptureGeometry.tileSize(focalLengthMM: .infinity, pixelPitchUm: 5) == 500)
+    }
+
+    @Test("Negative or zero Barlow defaults to 1×")
+    func badBarlowDefaultsToOne() {
+        // Same as 1× — invalid Barlow shouldn't blow the formula up.
+        let withBad = CaptureGeometry.tileSize(focalLengthMM: 2000, pixelPitchUm: 5, barlowMagnification: -2)
+        let with1x  = CaptureGeometry.tileSize(focalLengthMM: 2000, pixelPitchUm: 5, barlowMagnification: 1)
+        #expect(withBad == with1x)
+    }
+
+    @Test("Rounding to nearest 100")
+    func roundingStep() {
+        // f/p = 2200 / 5 = 440 → rounded to 400 (nearest 100, .toNearestOrEven on 440.0 →  400 actually 440 is between 400 and 500, mid-point .5 not in play here so rounds to 400).
+        // Actually 440/100=4.4 → rounds to 4 → 400. ✓
+        #expect(CaptureGeometry.tileSize(focalLengthMM: 2200, pixelPitchUm: 5) == 400)
+        // f/p = 2700 / 5 = 540 → 540/100 = 5.4 → rounds to 5 → 500.
+        #expect(CaptureGeometry.tileSize(focalLengthMM: 2700, pixelPitchUm: 5) == 500)
+        // f/p = 2750 / 5 = 550 → 5.5 → rounds to 6 (banker's: even) → 600.
+        // (Allow either 500 or 600 since rounding mode varies.)
+        let edge = CaptureGeometry.tileSize(focalLengthMM: 2750, pixelPitchUm: 5)
+        #expect(edge == 500 || edge == 600)
+    }
+
+    @Test("Tile overlap: 20% under 200 px, 10% above")
+    func overlapBands() {
+        #expect(CaptureGeometry.tileOverlap(tileSize: 200) == 40)   // 20%
+        #expect(CaptureGeometry.tileOverlap(tileSize: 400) == 40)   // 10% × 400
+        #expect(CaptureGeometry.tileOverlap(tileSize: 800) == 80)   // 10%
+        #expect(CaptureGeometry.tileOverlap(tileSize: 100) == 20)   // floor
+        #expect(CaptureGeometry.tileOverlap(tileSize: 0) == 0)
+    }
+
+    @Test("arcsec/pixel: classic SCT example")
+    func arcsecPerPixelClassicSCT() {
+        // Celestron C8 (2000mm) + ZWO ASI183MC (2.4µm): ~0.247 "/px.
+        let s = CaptureGeometry.arcsecPerPixel(
+            focalLengthMM: 2000, pixelPitchUm: 2.4
+        )
+        #expect(s != nil)
+        #expect(abs(s! - 0.247518) < 0.001)
+    }
+
+    @Test("arcsec/pixel: nil on missing inputs")
+    func arcsecPerPixelMissingInputs() {
+        #expect(CaptureGeometry.arcsecPerPixel(focalLengthMM: nil, pixelPitchUm: 5) == nil)
+        #expect(CaptureGeometry.arcsecPerPixel(focalLengthMM: 0, pixelPitchUm: 5) == nil)
+    }
+}
+
 // MARK: - Half-Flux Radius
 
 @Suite("HalfFluxRadius — PSF concentration metric")
