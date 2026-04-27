@@ -221,6 +221,123 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - Capture validator
+
+@Suite("CaptureValidator — non-blocking SER warnings")
+struct CaptureValidatorTests {
+
+    /// Build a SER file with the requested attributes and open it via
+    /// SerReader so we exercise the real header pipeline.
+    private static func headerForTest(
+        depth: Int = 16,
+        width: Int = 640,
+        height: Int = 480,
+        frameCount: Int = 2000,
+        colorID: Int32 = 0,
+        dateTimeUTC: Int64 = 0
+    ) throws -> SerHeader {
+        let url = try SyntheticSER.write(
+            width: width, height: height, depth: depth,
+            frameCount: frameCount, colorID: colorID,
+            dateTimeUTC: dateTimeUTC
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        return try SerReader(url: url).header
+    }
+
+    @Test("valid 16-bit planetary capture has no warnings")
+    func cleanCapture() throws {
+        let h = try Self.headerForTest()
+        let issues = CaptureValidator.validate(header: h, target: .jupiter)
+        // Only expected info: missing timestamp on a synthetic SER (UTC=0).
+        #expect(issues.allSatisfy { $0.severity != .warning })
+    }
+
+    @Test("8-bit on Sun raises a bit-depth warning")
+    func eightBitSun() throws {
+        let h = try Self.headerForTest(depth: 8)
+        let issues = CaptureValidator.validate(header: h, target: .sun)
+        #expect(issues.contains { $0.code == "bitdepth.low" && $0.severity == .warning })
+    }
+
+    @Test("8-bit on Jupiter is info-level (planetary tolerates it)")
+    func eightBitJupiter() throws {
+        let h = try Self.headerForTest(depth: 8)
+        let issues = CaptureValidator.validate(header: h, target: .jupiter)
+        let bitWarn = issues.first(where: { $0.code.hasPrefix("bitdepth") })
+        #expect(bitWarn != nil)
+        #expect(bitWarn?.severity == .info)
+    }
+
+    @Test("frame count below 100 raises a warning")
+    func tooFewFrames() throws {
+        let h = try Self.headerForTest(frameCount: 50)
+        let issues = CaptureValidator.validate(header: h, target: .jupiter)
+        #expect(issues.contains { $0.code == "frames.few" && $0.severity == .warning })
+    }
+
+    @Test("frame size below tile floor raises an info note")
+    func tinyFrames() throws {
+        let h = try Self.headerForTest(width: 100, height: 100)
+        let issues = CaptureValidator.validate(header: h, target: .jupiter)
+        #expect(issues.contains { $0.code == "frame.small" })
+    }
+
+    @Test("missing timestamp surfaces an info note")
+    func missingTimestamp() throws {
+        let h = try Self.headerForTest()  // dateTimeUTC defaults to 0
+        let issues = CaptureValidator.validate(header: h, target: .jupiter)
+        #expect(issues.contains { $0.code == "timestamp.missing" })
+    }
+
+    @Test("long exposure is flagged when supplied")
+    func longExposure() throws {
+        let h = try Self.headerForTest()
+        let issues = CaptureValidator.validate(
+            header: h, target: .jupiter, exposureMs: 25
+        )
+        #expect(issues.contains { $0.code == "exposure.long" && $0.severity == .warning })
+    }
+
+    @Test("low frame rate is flagged when supplied")
+    func lowFPS() throws {
+        let h = try Self.headerForTest()
+        let issues = CaptureValidator.validate(
+            header: h, target: .jupiter, frameRateFPS: 15
+        )
+        #expect(issues.contains { $0.code == "fps.low" && $0.severity == .warning })
+    }
+
+    @Test("long capture window on Jupiter recommends derotation")
+    func derotationAdvisory() throws {
+        // 5000 frames at 25 fps = 200 s window — past the 180 s threshold.
+        let h = try Self.headerForTest(frameCount: 5000)
+        let issues = CaptureValidator.validate(
+            header: h, target: .jupiter, frameRateFPS: 25
+        )
+        #expect(issues.contains { $0.code == "derotation.advisory" && $0.severity == .advisory })
+    }
+
+    @Test("short Jupiter capture does not trigger derotation advisory")
+    func shortJupiterNoDerotation() throws {
+        // 1500 frames at 30 fps = 50 s — well below the threshold.
+        let h = try Self.headerForTest(frameCount: 1500)
+        let issues = CaptureValidator.validate(
+            header: h, target: .jupiter, frameRateFPS: 30
+        )
+        #expect(!issues.contains { $0.code == "derotation.advisory" })
+    }
+
+    @Test("derotation advisory only fires on Jupiter / Saturn")
+    func derotationOnlyOnFastRotators() throws {
+        let h = try Self.headerForTest(frameCount: 5000)
+        let issues = CaptureValidator.validate(
+            header: h, target: .moon, frameRateFPS: 25
+        )
+        #expect(!issues.contains { $0.code == "derotation.advisory" })
+    }
+}
+
 // MARK: - Capture gamma compensation
 
 @Suite("CaptureGamma — pre-deconv linearisation")
