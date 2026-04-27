@@ -282,6 +282,326 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - White balance
+
+@Suite("WhiteBalance — gray-world auto-WB for OSC")
+struct WhiteBalanceTests {
+
+    private static let n = 4
+    private static func plane(_ value: Float) -> [Float] {
+        [Float](repeating: value, count: n)
+    }
+
+    @Test("identity is well-defined")
+    func identityIdentity() {
+        let id = WhiteBalanceCorrection.identity
+        #expect(id.redScale == 1 && id.greenScale == 1 && id.blueScale == 1)
+        #expect(id.redOffset == 0 && id.greenOffset == 0 && id.blueOffset == 0)
+    }
+
+    @Test("R=G=B uniform input → unit scales (no correction needed)")
+    func balancedInputIsIdentityScale() {
+        let wb = WhiteBalance.computeGrayWorld(
+            red: Self.plane(0.5), green: Self.plane(0.5), blue: Self.plane(0.5),
+            width: 2, height: 2,
+            backgroundPercentile: 0   // disable offset for clarity
+        )
+        #expect(abs(wb.redScale   - 1.0) < 1e-5)
+        #expect(abs(wb.greenScale - 1.0) < 1e-5)
+        #expect(abs(wb.blueScale  - 1.0) < 1e-5)
+    }
+
+    @Test("R-saturated input gets red scale < 1")
+    func saturatedRedScalesDown() {
+        let wb = WhiteBalance.computeGrayWorld(
+            red:   Self.plane(0.9),
+            green: Self.plane(0.5),
+            blue:  Self.plane(0.5),
+            width: 2, height: 2,
+            backgroundPercentile: 0
+        )
+        // Reference is green at 0.5; red mean is 0.9 → scale = 0.5/0.9 ≈ 0.556.
+        #expect(wb.redScale < 1)
+        #expect(abs(wb.redScale - 0.5/0.9) < 1e-5)
+        #expect(wb.greenScale == 1)
+    }
+
+    @Test("B-deficient input gets blue scale > 1")
+    func deficientBlueScalesUp() {
+        let wb = WhiteBalance.computeGrayWorld(
+            red:   Self.plane(0.5),
+            green: Self.plane(0.5),
+            blue:  Self.plane(0.25),
+            width: 2, height: 2,
+            backgroundPercentile: 0
+        )
+        // Blue mean 0.25, green 0.5 → blue scale = 2.0.
+        #expect(abs(wb.blueScale - 2.0) < 1e-5)
+        #expect(wb.greenScale == 1)
+    }
+
+    @Test("all-zero input returns identity")
+    func allZeroIdentity() {
+        let wb = WhiteBalance.computeGrayWorld(
+            red:   [Float](repeating: 0, count: 4),
+            green: [Float](repeating: 0, count: 4),
+            blue:  [Float](repeating: 0, count: 4),
+            width: 2, height: 2
+        )
+        #expect(wb == .identity)
+    }
+
+    @Test("background percentile shifts the per-channel offset")
+    func backgroundOffsetApplied() {
+        // Channel: 0.05 floor with a few bright pixels above. With
+        // backgroundPercentile=0.05, the offset should be near 0.05.
+        let r: [Float] = [0.05, 0.05, 0.05, 0.5]
+        let g: [Float] = [0.05, 0.05, 0.05, 0.5]
+        let b: [Float] = [0.05, 0.05, 0.05, 0.5]
+        let wb = WhiteBalance.computeGrayWorld(
+            red: r, green: g, blue: b,
+            width: 2, height: 2,
+            backgroundPercentile: 0.10
+        )
+        // Sorted = [0.05, 0.05, 0.05, 0.50]; percentile 0.10 picks
+        // index round(3 × 0.10)=0 → 0.05 floor.
+        #expect(abs(wb.redOffset   - 0.05) < 1e-5)
+        #expect(abs(wb.greenOffset - 0.05) < 1e-5)
+        #expect(abs(wb.blueOffset  - 0.05) < 1e-5)
+    }
+
+    @Test("apply removes offset and scales the channel")
+    func applyChannel() {
+        let pixels: [Float] = [0.5, 1.0, 1.5, 0.0]
+        let out = WhiteBalance.apply(channel: pixels, offset: 0.5, scale: 2.0)
+        // (0.5-0.5)*2 = 0
+        // (1.0-0.5)*2 = 1.0
+        // (1.5-0.5)*2 = 2.0
+        // (0.0-0.5)*2 = -1.0 → clamped to 0
+        #expect(out[0] == 0)
+        #expect(abs(out[1] - 1.0) < 1e-6)
+        #expect(abs(out[2] - 2.0) < 1e-6)
+        #expect(out[3] == 0)
+    }
+
+    @Test("reference channel can be switched to red")
+    func redReferenceSwitchesScales() {
+        let wb = WhiteBalance.computeGrayWorld(
+            red:   Self.plane(0.4),
+            green: Self.plane(0.5),
+            blue:  Self.plane(0.5),
+            width: 2, height: 2,
+            reference: .red,
+            backgroundPercentile: 0
+        )
+        // Now red scale = 1 (reference); g+b scale to red's mean.
+        #expect(wb.redScale == 1)
+        #expect(abs(wb.greenScale - 0.4 / 0.5) < 1e-5)
+        #expect(abs(wb.blueScale  - 0.4 / 0.5) < 1e-5)
+    }
+
+    @Test("plane size mismatch returns identity (graceful degrade)")
+    func mismatchIsIdentity() {
+        let wb = WhiteBalance.computeGrayWorld(
+            red: [0.5, 0.5],            // length 2 — wrong
+            green: Self.plane(0.5),     // length 4
+            blue: Self.plane(0.5),
+            width: 2, height: 2
+        )
+        #expect(wb == .identity)
+    }
+
+    @Test("Codable round-trip preserves correction")
+    func codableRoundTrip() throws {
+        let original = WhiteBalanceCorrection(
+            redOffset: 0.05, greenOffset: 0.04, blueOffset: 0.06,
+            redScale: 1.2, greenScale: 1.0, blueScale: 0.8
+        )
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(WhiteBalanceCorrection.self, from: data)
+        #expect(decoded == original)
+    }
+}
+
+// MARK: - Calibration math
+
+@Suite("Calibration — master darks + flats + per-frame apply")
+struct CalibrationTests {
+
+    @Test("calibrate with no dark and no flat is identity")
+    func noCalibrationIsIdentity() {
+        let light: [Float] = [0.1, 0.5, 0.9, 0.3]
+        let out = Calibration.calibrate(
+            light: light,
+            masterDark: nil,
+            masterFlatNormalized: nil,
+            width: 2, height: 2
+        )
+        #expect(out == light)
+    }
+
+    @Test("dark subtraction works element-wise")
+    func darkSubtraction() {
+        let light: [Float] = [0.5, 0.5, 0.5, 0.5]
+        let dark:  [Float] = [0.1, 0.1, 0.1, 0.1]
+        let out = Calibration.calibrate(
+            light: light, masterDark: dark, masterFlatNormalized: nil,
+            width: 2, height: 2
+        )
+        for v in out { #expect(abs(v - 0.4) < 1e-6) }
+    }
+
+    @Test("identity flat (all 1.0) leaves the image unchanged")
+    func unityFlatIsIdentity() {
+        let light: [Float] = [0.2, 0.4, 0.6, 0.8]
+        let flat: [Float] = [1.0, 1.0, 1.0, 1.0]
+        let out = Calibration.calibrate(
+            light: light, masterDark: nil, masterFlatNormalized: flat,
+            width: 2, height: 2
+        )
+        for (a, b) in zip(out, light) { #expect(abs(a - b) < 1e-6) }
+    }
+
+    @Test("non-unity flat scales pixels inversely")
+    func nonUnityFlatScales() {
+        // 0.5 flat → output doubles. 2.0 flat → output halves.
+        let light: [Float] = [1.0, 1.0]
+        let flat:  [Float] = [0.5, 2.0]
+        let out = Calibration.calibrate(
+            light: light, masterDark: nil, masterFlatNormalized: flat,
+            width: 2, height: 1
+        )
+        #expect(abs(out[0] - 2.0) < 1e-6)
+        #expect(abs(out[1] - 0.5) < 1e-6)
+    }
+
+    @Test("near-zero flat pixel is passed through unchanged")
+    func badFlatPixelPassesThrough() {
+        // A dust-occluded flat pixel (~0) would otherwise blow up to
+        // infinity. Calibration leaves the source pixel untouched.
+        let light: [Float] = [1.0, 1.0]
+        let flat:  [Float] = [1e-6, 1.0]
+        let out = Calibration.calibrate(
+            light: light, masterDark: nil, masterFlatNormalized: flat,
+            width: 2, height: 1
+        )
+        #expect(out[0] == 1.0)        // pass through
+        #expect(abs(out[1] - 1.0) < 1e-6)
+    }
+
+    @Test("negative results are clamped to zero")
+    func negativeResultClamped() {
+        // Dark subtraction that overshoots (overestimated dark) should
+        // never produce negative pixels — log/sqrt-style ops downstream
+        // would NaN.
+        let light: [Float] = [0.1, 0.1]
+        let dark:  [Float] = [0.5, 0.5]
+        let out = Calibration.calibrate(
+            light: light, masterDark: dark, masterFlatNormalized: nil,
+            width: 2, height: 1
+        )
+        #expect(out[0] == 0.0)
+        #expect(out[1] == 0.0)
+    }
+
+    @Test("buildMasterDark averages N frames pixel-wise")
+    func masterDarkAverages() {
+        let d1: [Float] = [0.10, 0.20]
+        let d2: [Float] = [0.30, 0.40]
+        let d3: [Float] = [0.20, 0.30]
+        let m = Calibration.buildMasterDark(
+            darks: [d1, d2, d3], width: 2, height: 1
+        )
+        // (0.10+0.30+0.20)/3 = 0.20; (0.20+0.40+0.30)/3 = 0.30
+        #expect(abs(m[0] - 0.20) < 1e-6)
+        #expect(abs(m[1] - 0.30) < 1e-6)
+    }
+
+    @Test("empty dark list returns zero buffer")
+    func emptyDarksReturnsZero() {
+        let m = Calibration.buildMasterDark(darks: [], width: 2, height: 2)
+        #expect(m.count == 4)
+        #expect(m.allSatisfy { $0 == 0 })
+    }
+
+    @Test("buildMasterFlat normalises to mean 1.0")
+    func masterFlatNormalised() {
+        // Single flat with values [1,2,3,4] → mean 2.5 → normalised
+        // [0.4, 0.8, 1.2, 1.6]. Sum = 4.0; mean of normalised = 1.0.
+        let f1: [Float] = [1, 2, 3, 4]
+        let mf = Calibration.buildMasterFlat(
+            flats: [f1], masterDark: nil, width: 2, height: 2
+        )
+        let sum = mf.reduce(0, +)
+        #expect(abs(sum / Float(mf.count) - 1.0) < 1e-5)
+        #expect(abs(mf[0] - 0.4) < 1e-5)
+        #expect(abs(mf[3] - 1.6) < 1e-5)
+    }
+
+    @Test("buildMasterFlat with dark subtracts dark before averaging")
+    func masterFlatHonoursDark() {
+        let f1: [Float] = [1.5, 2.5]
+        let dark: [Float] = [0.5, 0.5]
+        // (f1 - dark) = [1.0, 2.0], mean 1.5 → normalised [0.667, 1.333]
+        let mf = Calibration.buildMasterFlat(
+            flats: [f1], masterDark: dark, width: 2, height: 1
+        )
+        #expect(abs(mf[0] - (1.0 / 1.5)) < 1e-5)
+        #expect(abs(mf[1] - (2.0 / 1.5)) < 1e-5)
+    }
+
+    @Test("empty flats list returns identity (all 1.0)")
+    func emptyFlatsReturnsIdentity() {
+        let mf = Calibration.buildMasterFlat(
+            flats: [], masterDark: nil, width: 2, height: 2
+        )
+        #expect(mf.count == 4)
+        #expect(mf.allSatisfy { $0 == 1.0 })
+    }
+
+    @Test("all-zero flat falls back to identity to avoid div-by-zero")
+    func zeroFlatFallsBackToIdentity() {
+        let f1 = [Float](repeating: 0, count: 4)
+        let mf = Calibration.buildMasterFlat(
+            flats: [f1], masterDark: nil, width: 2, height: 2
+        )
+        #expect(mf.allSatisfy { $0 == 1.0 })
+    }
+
+    @Test("end-to-end: build-and-apply roundtrip preserves a flat scene")
+    func endToEndRoundTrip() {
+        // Synthesise: scene has uniform brightness 1.0, sensor has
+        // vignetting captured in flat (drops to 0.5 at corners), dark
+        // adds 0.05 offset. After calibration scene should be back at
+        // 1.0 (within float epsilon).
+        let scene: [Float] = [1.0, 1.0, 1.0, 1.0]
+        let vignette: [Float] = [1.0, 0.5, 0.5, 1.0]   // raw flat
+        let darkOffset: Float = 0.05
+        let dark: [Float] = Array(repeating: darkOffset, count: 4)
+
+        // Light = scene × vignette + dark.
+        let light = zip(scene, vignette).map { $0 * $1 + darkOffset }
+        let masterFlat = Calibration.buildMasterFlat(
+            flats: [vignette], masterDark: nil,
+            width: 2, height: 2
+        )
+        let calibrated = Calibration.calibrate(
+            light: light,
+            masterDark: dark,
+            masterFlatNormalized: masterFlat,
+            width: 2, height: 2
+        )
+        // Calibrated should recover the scene up to a global scale
+        // factor (master flat normalises to mean 1.0 on raw flat, not
+        // scene). All four pixels should match each other within float
+        // epsilon — that's the vignetting-removed property.
+        let m = calibrated.reduce(0, +) / Float(calibrated.count)
+        for v in calibrated {
+            #expect(abs(v - m) < 1e-4)
+        }
+    }
+}
+
 // MARK: - DriftCache
 
 @Suite("DriftCache — phase-correlation drift tracking")
