@@ -1,0 +1,17 @@
+{
+  "bytesPerFrame" : 278144,
+  "captureDateUTC" : "2022-09-10T06:48:36Z",
+  "colorID" : "bayerRGGB",
+  "colorIsBayer" : true,
+  "colorIsMono" : false,
+  "colorIsRGB" : false,
+  "filename" : "jupiter_2022-09-10-0649_2-GB-L-Jup_ZWO ASI224MC.ser",
+  "frameCount" : 3749,
+  "imageHeight" : 424,
+  "imageWidth" : 656,
+  "instrument" : "ASI=ZWO ASI224MCtemp=21.0",
+  "observer" : "gamma=50",
+  "pixelDepth" : 8,
+  "telescope" : "fps=50.13gain=247exp=20.00",
+  "totalBytes" : 1042761856
+}

@@ -914,7 +914,14 @@ private final class LuckyRunner {
     }
 
     static func makeAccumulator(device: MTLDevice, w: Int, h: Int) -> MTLTexture {
-        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
+        // rgba32Float (single-precision) — half-precision (rgba16Float)
+        // gives ~10 bits of mantissa in the mid-range, which after
+        // hundreds of weighted-sum updates and a final sharpen pass
+        // surfaced as visible colour banding on smooth Jupiter cloud
+        // bands. Single-precision burns 2x the texture memory but
+        // gives 23 bits of mantissa — quantisation drops below the
+        // 16-bit-int output range so the on-disk TIFF is clean.
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: w, height: h, mipmapped: false)
         desc.storageMode = .private
         desc.usage = [.shaderRead, .shaderWrite]
         return device.makeTexture(descriptor: desc)!
@@ -1174,7 +1181,10 @@ private final class LuckyRunner {
 
         let outW = W * scale
         let outH = H * scale
-        let accum = Self.makeFloatBuffer(device: device, w: outW, h: outH, format: .rgba16Float)
+        // rgba32Float for both accumulator and weight texture — same
+        // rationale as makeAccumulator: half-precision was banding the
+        // smooth-gradient output after sharpening.
+        let accum = Self.makeFloatBuffer(device: device, w: outW, h: outH, format: .rgba32Float)
         let wtTex = Self.makeFloatBuffer(device: device, w: outW, h: outH, format: .rgba32Float)
 
         // Quality weighting curve (mirrors accumulateAligned).

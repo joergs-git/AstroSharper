@@ -1,0 +1,10 @@
+{
+  "inputFile": "jupiter-2022-10-25-0055_2.ser",
+  "keepPercents": [
+    {
+      "keepPercent": 25,
+      "outputBytes": 3277218,
+      "outputFile": "biggsky__jupiter-2022-10-25-0055_2.ser.stack.tif"
+    }
+  ]
+}
