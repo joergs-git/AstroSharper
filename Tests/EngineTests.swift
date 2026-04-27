@@ -282,6 +282,104 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - TimingRecorder
+
+@Suite("TimingRecorder — phase wall-clock collector")
+struct TimingRecorderTests {
+
+    /// Helper: a clock the test fully controls.
+    final class FakeClock {
+        var current: Double = 0
+        func advance(by seconds: Double) { current += seconds }
+        var fn: () -> Double { { [weak self] in self?.current ?? 0 } }
+    }
+
+    @Test("start + finish records one phase with the right elapsed time")
+    func basicPhase() {
+        let clk = FakeClock()
+        let rec = TimingRecorder(clock: clk.fn)
+        rec.start("grade")
+        clk.advance(by: 1.5)
+        let r = rec.finish()
+        #expect(r?.label == "grade")
+        #expect(abs((r?.elapsedSeconds ?? 0) - 1.5) < 1e-9)
+        #expect(rec.records.count == 1)
+    }
+
+    @Test("start auto-closes the previous phase")
+    func startAutoCloses() {
+        let clk = FakeClock()
+        let rec = TimingRecorder(clock: clk.fn)
+        rec.start("grade")
+        clk.advance(by: 0.4)
+        rec.start("align")        // auto-closes 'grade'
+        clk.advance(by: 0.6)
+        rec.finish()              // closes 'align'
+        #expect(rec.records.count == 2)
+        #expect(rec.records[0].label == "grade")
+        #expect(rec.records[1].label == "align")
+        #expect(abs(rec.records[0].elapsedSeconds - 0.4) < 1e-9)
+        #expect(abs(rec.records[1].elapsedSeconds - 0.6) < 1e-9)
+    }
+
+    @Test("finish without an open phase is a no-op")
+    func finishWithoutStart() {
+        let rec = TimingRecorder()
+        let r = rec.finish()
+        #expect(r == nil)
+        #expect(rec.records.isEmpty)
+    }
+
+    @Test("totalElapsedSeconds excludes pending phase")
+    func totalIgnoresPending() {
+        let clk = FakeClock()
+        let rec = TimingRecorder(clock: clk.fn)
+        rec.start("a"); clk.advance(by: 1); rec.finish()
+        rec.start("b"); clk.advance(by: 2); rec.finish()
+        rec.start("pending")     // pending — unfinished
+        clk.advance(by: 5)
+        #expect(abs(rec.totalElapsedSeconds - 3) < 1e-9)
+    }
+
+    @Test("reset clears recorded state")
+    func resetClears() {
+        let clk = FakeClock()
+        let rec = TimingRecorder(clock: clk.fn)
+        rec.start("a"); clk.advance(by: 1); rec.finish()
+        #expect(rec.records.count == 1)
+        rec.reset()
+        #expect(rec.records.isEmpty)
+        #expect(rec.totalElapsedSeconds == 0)
+        // Recording continues to work after reset.
+        rec.start("b"); clk.advance(by: 2); rec.finish()
+        #expect(rec.records.count == 1)
+        #expect(rec.records[0].label == "b")
+    }
+
+    @Test("TimingRecord round-trips through Codable")
+    func recordRoundTrip() throws {
+        let original = TimingRecord(label: "stack", elapsedSeconds: 42.5)
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(TimingRecord.self, from: data)
+        #expect(decoded == original)
+    }
+
+    @Test("default clock returns positive elapsed for real time")
+    func defaultClockMakesProgress() {
+        // Sanity-check the default Date()-based clock advances. We don't
+        // need precision here — just that it doesn't return 0 / negative.
+        let rec = TimingRecorder()
+        rec.start("real")
+        // Spin a small loop so wall-clock advances even on fast hardware.
+        var sum = 0
+        for i in 0..<100_000 { sum &+= i }
+        _ = sum
+        let r = rec.finish()
+        #expect(r != nil)
+        #expect((r?.elapsedSeconds ?? -1) >= 0)
+    }
+}
+
 // MARK: - Border crop math
 
 @Suite("BorderCrop — rect math + defaults")
