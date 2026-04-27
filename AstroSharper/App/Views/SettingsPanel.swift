@@ -262,6 +262,26 @@ struct ToneCurveSection: View {
                 logHistogram: $app.histogramLogScale
             )
             Divider().padding(.vertical, 4)
+            // Saturation — applied around per-pixel Rec.709 luma. 1.0 is
+            // identity. Stacking averages noisy frames toward grey, so a
+            // small boost (1.2–1.5) typically restores planetary colour
+            // without touching luminance.
+            HStack {
+                Text("Saturation")
+                    .font(.system(size: 11))
+                    .frame(width: 80, alignment: .leading)
+                Slider(value: $app.toneCurve.saturation, in: 0...2, step: 0.05)
+                Text(String(format: "%.2f", app.toneCurve.saturation))
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 40, alignment: .trailing)
+                    .foregroundColor(.secondary)
+                Button("Reset") { app.toneCurve.saturation = 1.0 }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .disabled(abs(app.toneCurve.saturation - 1.0) < 1e-4)
+            }
+            .help("0 = grayscale, 1 = unchanged, 2 = double saturation. Applied after the tone curve.")
+            Divider().padding(.vertical, 4)
             LuckyRunButton(
                 disabled: false,
                 title: "Apply Tone Curve",

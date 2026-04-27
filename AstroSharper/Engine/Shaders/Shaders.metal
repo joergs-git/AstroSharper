@@ -163,6 +163,38 @@ kernel void apply_tone_curve(
     output.write(float4(r, g, b, c.a), gid);
 }
 
+// MARK: - Saturation
+//
+// Mix each RGB sample with its Rec.709 luminance to control colour
+// saturation around the per-pixel luma:
+//   sat = 0.0  → grayscale (luma in all three channels)
+//   sat = 1.0  → identity (no change)
+//   sat > 1.0  → boosted saturation; the colour pulls further away
+//                from the grey luma. Capped only by the float range —
+//                clipping happens at display.
+//
+// Stacked planetary frames trend toward the desaturated mean because
+// per-channel weighted averaging pulls colour toward the achromatic
+// noise. A modest boost (1.2–1.5) restores the visible colour the user
+// captured without nuking the limb darkening.
+
+struct SaturationParams {
+    float saturation;
+};
+
+kernel void apply_saturation(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    constant SaturationParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    float luma = dot(c.rgb, float3(0.2126, 0.7152, 0.0722));
+    float3 mixed = mix(float3(luma), c.rgb, p.saturation);
+    output.write(float4(mixed, c.a), gid);
+}
+
 // MARK: - Sub-pixel shift (stabilization)
 
 struct ShiftParams {

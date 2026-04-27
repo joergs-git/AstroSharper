@@ -150,7 +150,8 @@ struct PipelineSettingsDefaultsTests {
     @Test("SharpenSettings defaults are stable")
     func sharpenDefaults() {
         let s = SharpenSettings()
-        #expect(s.enabled == true)
+        // Section default flipped to OFF — see PipelineSettings.swift comment.
+        #expect(s.enabled == false)
         #expect(s.unsharpEnabled == true)
         #expect(s.radius == 1.5)
         #expect(s.amount == 1.0)
@@ -183,6 +184,7 @@ struct PipelineSettingsDefaultsTests {
         #expect(s.controlPoints.count == 3)
         #expect(s.controlPoints.first == CGPoint(x: 0, y: 0))
         #expect(s.controlPoints.last == CGPoint(x: 1, y: 1))
+        #expect(s.saturation == 1.0)  // identity — no colour change by default
     }
 
     @Test("Codable round-trip preserves SharpenSettings")

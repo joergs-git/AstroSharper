@@ -18,6 +18,7 @@ final class Pipeline {
     private lazy var divPSO     = makeComputePSO(function: "lr_divide")
     private lazy var mulPSO     = makeComputePSO(function: "lr_multiply")
     private lazy var tonePSO    = makeComputePSO(function: "apply_tone_curve")
+    private lazy var satPSO     = makeComputePSO(function: "apply_saturation")
     private lazy var shiftPSO   = makeComputePSO(function: "sub_pixel_shift")
     private lazy var stackPSO   = makeComputePSO(function: "stack_accumulate")
     private lazy var subPSO     = makeComputePSO(function: "subtract_textures")
@@ -179,6 +180,26 @@ final class Pipeline {
             current = result
         }
 
+        // Saturation runs even when the tone-curve sub-section is off — it's
+        // an independent control on the same panel. Skipped at identity (1.0)
+        // so the no-op case costs nothing. Always last in the chain so it
+        // operates on the final RGB the user will see.
+        if toneCurve.enabled, abs(toneCurve.saturation - 1.0) > 1e-4 {
+            let result = borrow(width: w, height: h, format: input.pixelFormat)
+            borrowed.append(result)
+            if let enc = finalCmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(satPSO)
+                enc.setTexture(current, index: 0)
+                enc.setTexture(result, index: 1)
+                var p = SaturationParamsCPU(saturation: Float(toneCurve.saturation))
+                enc.setBytes(&p, length: MemoryLayout<SaturationParamsCPU>.stride, index: 0)
+                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: satPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            current = result
+        }
+
         if let blit = finalCmd.makeBlitCommandEncoder() {
             blit.copy(from: current, to: output)
             blit.endEncoding()
@@ -212,6 +233,11 @@ final class Pipeline {
     var stackPipeline: MTLComputePipelineState { stackPSO }
     var subtractPipeline: MTLComputePipelineState { subPSO }
     var waddPipeline: MTLComputePipelineState { waddPSO }
+}
+
+/// Mirror of the Metal `SaturationParams` struct; sent via `setBytes`.
+struct SaturationParamsCPU {
+    var saturation: Float
 }
 
 // Utility for dispatch sizing.

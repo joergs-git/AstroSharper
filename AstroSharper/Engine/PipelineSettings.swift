@@ -12,7 +12,11 @@ import CoreGraphics
 import Foundation
 
 struct SharpenSettings: Equatable, Codable {
-    var enabled: Bool = true
+    // Section default OFF — user opts in once they want sharpening. Earlier
+    // default-on showed every freshly-opened file pre-sharpened with halo
+    // ringing on bright planet limbs, surprising users who just wanted to
+    // see the raw stack first. Stabilize / Tone Curve already default off.
+    var enabled: Bool = false
 
     // Classical Unsharp Mask.
     var unsharpEnabled: Bool = true
@@ -89,7 +93,7 @@ struct SharpenSettings: Equatable, Codable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         // Existing fields.
-        self.enabled         = try c.decodeIfPresent(Bool.self,    forKey: .enabled)         ?? true
+        self.enabled         = try c.decodeIfPresent(Bool.self,    forKey: .enabled)         ?? false
         self.unsharpEnabled  = try c.decodeIfPresent(Bool.self,    forKey: .unsharpEnabled)  ?? true
         self.radius          = try c.decodeIfPresent(Double.self,  forKey: .radius)          ?? 1.5
         self.amount          = try c.decodeIfPresent(Double.self,  forKey: .amount)          ?? 1.0
@@ -113,7 +117,7 @@ struct SharpenSettings: Equatable, Codable {
     /// alongside a custom `init(from:)` in some compiler versions, so
     /// we provide it explicitly with all defaults preserved.
     init(
-        enabled: Bool = true,
+        enabled: Bool = false,
         unsharpEnabled: Bool = true,
         radius: Double = 1.5,
         amount: Double = 1.0,
@@ -215,4 +219,39 @@ struct ToneCurveSettings: Equatable, Codable {
         CGPoint(x: 0.5, y: 0.5),
         CGPoint(x: 1.0, y: 1.0),
     ]
+
+    /// RGB saturation multiplier applied around the per-pixel luma. 1.0 =
+    /// pass-through, 0 = grayscale, >1 = boost saturation. Default 1.0 so
+    /// existing presets behave unchanged. Stacking weighted-mean tends to
+    /// desaturate noisy frames toward grey, so the user typically wants a
+    /// small boost (1.2–1.5) on planetary captures.
+    var saturation: Double = 1.0
+
+    // MARK: - Codable
+    /// Backwards-compatible decoder so older preset JSON keeps loading. The
+    /// synthesised encoder is fine — new files always carry the field.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.enabled       = try c.decodeIfPresent(Bool.self,      forKey: .enabled)       ?? false
+        self.controlPoints = try c.decodeIfPresent([CGPoint].self, forKey: .controlPoints) ?? [
+            CGPoint(x: 0.0, y: 0.0),
+            CGPoint(x: 0.5, y: 0.5),
+            CGPoint(x: 1.0, y: 1.0),
+        ]
+        self.saturation    = try c.decodeIfPresent(Double.self,    forKey: .saturation)    ?? 1.0
+    }
+
+    init(
+        enabled: Bool = false,
+        controlPoints: [CGPoint] = [
+            CGPoint(x: 0.0, y: 0.0),
+            CGPoint(x: 0.5, y: 0.5),
+            CGPoint(x: 1.0, y: 1.0),
+        ],
+        saturation: Double = 1.0
+    ) {
+        self.enabled = enabled
+        self.controlPoints = controlPoints
+        self.saturation = saturation
+    }
 }
