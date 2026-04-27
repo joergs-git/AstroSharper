@@ -36,8 +36,7 @@ case "analyze":
     exitCode = Analyze.run(args: subargs)
 
 case "stack":
-    cliStderr("stack: not yet implemented (Block A/B foundation work)")
-    exitCode = 2
+    exitCode = await Stack.run(args: subargs)
 
 case "validate":
     cliStderr("validate: not yet implemented (F3 regression harness work)")
