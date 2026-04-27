@@ -282,6 +282,156 @@ struct LuckyStackVariantsTests {
     }
 }
 
+// MARK: - Auto ROI
+
+@Suite("AutoROI — best high-contrast window")
+struct AutoROITests {
+
+    private static func buffer(width: Int, height: Int, _ f: (Int, Int) -> Float) -> [Float] {
+        var out = [Float](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                out[y * width + x] = f(x, y)
+            }
+        }
+        return out
+    }
+
+    @Test("bright textured patch wins the ROI")
+    func texturedPatchWins() {
+        // 64×64 buffer: dim 0.1 background, with a 16×16 alternating
+        // checker patch at top-left of position (32, 32). The checker
+        // has the highest LAPD score in the image.
+        let W = 64, H = 64
+        var buf = Self.buffer(width: W, height: H) { _, _ in 0.1 }
+        for y in 32..<48 {
+            for x in 32..<48 {
+                buf[y * W + x] = ((x + y) & 1) == 0 ? 0.0 : 1.0
+            }
+        }
+        // Saturation threshold above 1.0 → checker pixels (1.0) are
+        // accepted. Border inset 0 to allow window starting anywhere.
+        let roi = AutoROI.bestROI(
+            luma: buf, width: W, height: H,
+            roiSize: 16, borderInset: 0,
+            saturationThreshold: 1.5,
+            stride: 4
+        )
+        #expect(roi != nil)
+        // Window should land near the patch — top-left in [16, 48]
+        // accommodates the patch fully.
+        #expect(roi?.x ?? -1 >= 16)
+        #expect(roi?.x ?? -1 <= 48)
+        #expect(roi?.width  == 16)
+        #expect(roi?.height == 16)
+    }
+
+    @Test("uniform field returns nil (no contrast)")
+    func uniformIsNil() {
+        let buf = Self.buffer(width: 64, height: 64) { _, _ in 0.5 }
+        let roi = AutoROI.bestROI(
+            luma: buf, width: 64, height: 64,
+            roiSize: 16, borderInset: 0,
+            saturationThreshold: 1.5,
+            stride: 4
+        )
+        // LAPD of a uniform field is exactly 0 → bestScore stays at
+        // -1 → returns nil. Caller should fall back to image centre.
+        #expect(roi == nil)
+    }
+
+    @Test("saturation rejection skips windows with bright pixels")
+    func saturationRejection() {
+        let W = 64, H = 64
+        // Texture-rich patch at (8,8) with a saturated centre, plus
+        // mild-contrast patch at (40,40) without saturation. Auto-ROI
+        // must pick the second.
+        var buf = Self.buffer(width: W, height: H) { _, _ in 0.1 }
+        for y in 8..<24 {
+            for x in 8..<24 {
+                buf[y * W + x] = ((x + y) & 1) == 0 ? 0.0 : 1.0
+            }
+        }
+        // Saturating value at the centre of the bright patch.
+        buf[16 * W + 16] = 1.0   // exactly threshold (≥ 0.95)
+        // Lower-contrast patch elsewhere.
+        for y in 40..<56 {
+            for x in 40..<56 {
+                buf[y * W + x] = ((x + y) & 2) == 0 ? 0.3 : 0.5
+            }
+        }
+
+        let roi = AutoROI.bestROI(
+            luma: buf, width: W, height: H,
+            roiSize: 16, borderInset: 0,
+            saturationThreshold: 0.95,
+            stride: 4
+        )
+        #expect(roi != nil)
+        // Result should NOT include pixel (16, 16). The saturated
+        // patch's possible windows all contain (16, 16) as long as
+        // window covers x ∈ [1..16] AND y ∈ [1..16]. Picked window
+        // must start past x = 16 so (16, 16) isn't in its interior.
+        guard let r = roi else { return }
+        let containsSat = r.x <= 16 && (r.x + r.width  - 1) >= 16
+                       && r.y <= 16 && (r.y + r.height - 1) >= 16
+        #expect(containsSat == false)
+    }
+
+    @Test("borderInset excludes border-adjacent windows")
+    func borderInsetEnforced() {
+        let W = 64, H = 64
+        var buf = Self.buffer(width: W, height: H) { _, _ in 0.1 }
+        // Texture only along the top row.
+        for x in 0..<W {
+            buf[x] = (x & 1) == 0 ? 0.0 : 0.8
+        }
+
+        // Without inset → ROI lands at top edge.
+        let unrestricted = AutoROI.bestROI(
+            luma: buf, width: W, height: H,
+            roiSize: 16, borderInset: 0,
+            saturationThreshold: 1.5,
+            stride: 1
+        )
+        #expect(unrestricted?.y == 0)
+
+        // With inset 8 → top row is excluded from the search.
+        let restricted = AutoROI.bestROI(
+            luma: buf, width: W, height: H,
+            roiSize: 16, borderInset: 8,
+            saturationThreshold: 1.5,
+            stride: 1
+        )
+        if let r = restricted {
+            #expect(r.y >= 8)
+        }
+        // (Restricted may also be nil if the rest of the buffer is
+        // uniform — both outcomes are acceptable here; we just assert
+        // the inset is honoured when a result exists.)
+    }
+
+    @Test("ROI larger than image returns nil")
+    func roiTooLargeIsNil() {
+        let buf = Self.buffer(width: 16, height: 16) { _, _ in 0.5 }
+        #expect(AutoROI.bestROI(luma: buf, width: 16, height: 16, roiSize: 32) == nil)
+        #expect(AutoROI.bestROI(luma: buf, width: 16, height: 16, roiSize: 16, borderInset: 1) == nil)
+    }
+
+    @Test("zero-size or zero-stride returns nil")
+    func degenerateInputsReturnNil() {
+        let buf = Self.buffer(width: 16, height: 16) { _, _ in 0.5 }
+        #expect(AutoROI.bestROI(luma: buf, width: 16, height: 16, roiSize: 0) == nil)
+        #expect(AutoROI.bestROI(luma: buf, width: 16, height: 16, roiSize: 4, stride: 0) == nil)
+    }
+
+    @Test("ROIRect.asCGRect mirrors the integer coordinates")
+    func roiRectCGRectConversion() {
+        let r = ROIRect(x: 10, y: 20, width: 50, height: 60)
+        #expect(r.asCGRect == CGRect(x: 10, y: 20, width: 50, height: 60))
+    }
+}
+
 // MARK: - White balance
 
 @Suite("WhiteBalance — gray-world auto-WB for OSC")
