@@ -18,6 +18,10 @@ TESTIMAGES/
 **/_luckystack/
 **/.astrosharper-probe-*
 
+# Regression harness scratch (per-run JSON results, build logs).
+# Tests/Regression/baselines/ IS committed.
+.regression/
+
 # Swift Package Manager
 .build/
 Packages/

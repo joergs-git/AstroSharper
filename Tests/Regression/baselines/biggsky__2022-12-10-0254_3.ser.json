@@ -1,0 +1,17 @@
+{
+  "bytesPerFrame" : 123904,
+  "captureDateUTC" : "2022-12-10T02:49:49Z",
+  "colorID" : "bayerRGGB",
+  "colorIsBayer" : true,
+  "colorIsMono" : false,
+  "colorIsRGB" : false,
+  "filename" : "2022-12-10-0254_3.ser",
+  "frameCount" : 32282,
+  "imageHeight" : 352,
+  "imageWidth" : 352,
+  "instrument" : "ZWO ASI678MC",
+  "observer" : "Observer",
+  "pixelDepth" : 8,
+  "telescope" : "Telescope",
+  "totalBytes" : 3999868928
+}

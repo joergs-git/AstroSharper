@@ -84,8 +84,11 @@ enum Analyze {
 
     private static func emit(json reader: SerReader) {
         let h = reader.header
+        // Emit basename only (not absolute path) so the regression
+        // harness's baselines are stable across machines and clones.
+        // The full path is still in the input argument and the run log.
         var payload: [String: Any] = [
-            "file": reader.url.path,
+            "filename": reader.url.lastPathComponent,
             "imageWidth": h.imageWidth,
             "imageHeight": h.imageHeight,
             "frameCount": h.frameCount,
