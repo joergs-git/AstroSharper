@@ -1609,100 +1609,12 @@ final class AppModel: ObservableObject {
 }
 
 // MARK: - Settings
-
-struct SharpenSettings: Equatable, Codable {
-    var enabled: Bool = true
-
-    // Classical Unsharp Mask.
-    var unsharpEnabled: Bool = true
-    var radius: Double = 1.5         // Gaussian sigma in pixels
-    var amount: Double = 1.0         // Unsharp amount
-    var adaptive: Bool = false
-
-    // Lucy-Richardson deconvolution.
-    var lrEnabled: Bool = false
-    var lrIterations: Int = 30
-    var lrSigma: Double = 1.3
-
-    // Wiener deconvolution (synthetic Gaussian PSF).
-    // Linear MSE-optimal inverse — sharper edges than L-R for known PSFs,
-    // but ringing risk if SNR is mis-set. Best for crisp planetary frames
-    // where the optical PSF is well-modelled by a Gaussian.
-    var wienerEnabled: Bool = false
-    var wienerSigma: Double = 1.4
-    var wienerSNR: Double = 50
-
-    // Wavelet sharpening (à-trous / starlet) — 4 dyadic scales, independently
-    // boosted. Standard tool for solar/planetary sharpening (Registax-style).
-    var waveletEnabled: Bool = false
-    var waveletScales: [Double] = [1.8, 1.4, 1.0, 0.6]  // amounts for scales 1..4
-}
-
-struct StabilizeSettings: Equatable, Codable {
-    var enabled: Bool = false
-    var referenceMode: ReferenceMode = .marked
-    var cropMode: CropMode = .crop
-    var stackAverage: Bool = false
-    var alignmentMode: AlignmentMode = .fullFrame
-    /// User-defined region of interest in *normalised* reference-frame
-    /// coordinates (0…1, top-left origin). Only consulted when
-    /// `alignmentMode == .referenceROI`.
-    var roi: NormalisedRect? = nil
-
-    enum ReferenceMode: String, CaseIterable, Identifiable, Codable {
-        /// Use the frame the user explicitly tagged with the gold-star
-        /// "Reference" marker. Default — clearest user intent.
-        case marked = "Marked Reference"
-        case firstSelected = "First Selected"
-        case brightestQuality = "Best-Quality Frame"
-        var id: String { rawValue }
-    }
-
-    enum CropMode: String, CaseIterable, Identifiable, Codable {
-        case pad = "Pad to Bounding Box"       // output stays at input size, black borders
-        case crop = "Crop to Intersection"     // output = overlap region of all frames
-        var id: String { rawValue }
-    }
-
-    /// Picks how the per-frame shift is computed. Each mode shines on a
-    /// different subject:
-    ///   - `.fullFrame`: phase-correlation on the whole image — robust for
-    ///     general scenes with widely-distributed detail.
-    ///   - `.discCentroid`: locks onto the bright disc's centre of mass
-    ///     against a dark background. Designed for full-disc Sun / Moon
-    ///     where surface detail is faint relative to the disc edge — the
-    ///     limb itself becomes the anchor and works even on featureless
-    ///     surfaces or thin clouds.
-    ///   - `.referenceROI`: phase-correlate only inside a user-drawn rect
-    ///     on the reference frame. Pin alignment to a specific feature —
-    ///     a sunspot group, prominence, lunar crater, planetary moon
-    ///     transit. Other parts of the frame are ignored entirely.
-    enum AlignmentMode: String, CaseIterable, Identifiable, Codable {
-        case fullFrame      = "Full Frame"
-        case discCentroid   = "Disc Centroid (Sun / Moon)"
-        case referenceROI   = "Reference ROI (feature lock)"
-        var id: String { rawValue }
-    }
-}
-
-/// Plain-Codable rect used for normalised ROI storage. CGRect isn't
-/// Codable directly, so we keep our own minimal type.
-struct NormalisedRect: Equatable, Codable {
-    var x: Double      // 0…1, left
-    var y: Double      // 0…1, top
-    var w: Double      // 0…1
-    var h: Double      // 0…1
-    var asCGRect: CGRect { CGRect(x: x, y: y, width: w, height: h) }
-}
-
-struct ToneCurveSettings: Equatable, Codable {
-    var enabled: Bool = false
-    var controlPoints: [CGPoint] = [
-        CGPoint(x: 0.0, y: 0.0),
-        CGPoint(x: 0.5, y: 0.5),
-        CGPoint(x: 1.0, y: 1.0),
-    ]
-}
+//
+// `SharpenSettings`, `StabilizeSettings`, `NormalisedRect`, and
+// `ToneCurveSettings` moved to `Engine/PipelineSettings.swift` so the
+// headless CLI and test targets can consume them without dragging in
+// SwiftUI / @MainActor / AppModel itself. Their definitions and
+// defaults are unchanged — preset JSON on disk keeps loading.
 
 // MARK: - Lucky Stack UI state
 
@@ -1751,18 +1663,9 @@ enum LuckyStackFilenameMode: String, CaseIterable, Identifiable, Equatable, Coda
     var id: String { rawValue }
 }
 
-/// Optional extra stack outputs requested per .ser, on top of the default
-/// "keep best N%" slider value. Each non-zero entry triggers a *separate*
-/// stack run for that file, written to a subdirectory of the output folder
-/// (e.g. `f100/`, `p25/`). Default values are all zero meaning "off".
-struct LuckyStackVariants: Codable, Equatable {
-    var absoluteCounts: [Int] = [0, 0, 0]   // f-slots
-    var percentages: [Int] = [0, 0, 0]      // p-slots
-
-    var isEmpty: Bool {
-        absoluteCounts.allSatisfy { $0 == 0 } && percentages.allSatisfy { $0 == 0 }
-    }
-}
+// `LuckyStackVariants` moved to Engine/Pipeline/LuckyStack.swift in v1.0
+// foundation work — Preset.swift consumes it, so it must be in Engine
+// for the headless CLI build.
 
 struct LuckyStackUIState {
     var mode: LuckyStackMode = .lightspeed
@@ -1810,30 +1713,10 @@ enum LuckyStackNaming {
 }
 
 // MARK: - Playback (in-memory sequence)
-
-struct PlaybackFrame: Identifiable {
-    let id: UUID         // matches FileEntry.id of the source file
-    let sourceURL: URL
-    var texture: MTLTexture
-    /// Trail of operations that have been applied to this in-memory frame.
-    /// Drives the smart filename suffixes when the user saves to disk —
-    /// e.g. ["aligned", "sharp", "tone"] → `<source>_aligned_sharp_tone.tif`.
-    var appliedOps: [String] = []
-}
-
-struct PlaybackState {
-    var frames: [PlaybackFrame] = []
-    var currentIndex: Int = 0
-    var isPlaying: Bool = false
-    var fps: Double = 18
-    var loop: Bool = true
-
-    var hasFrames: Bool { !frames.isEmpty }
-    var currentFrame: PlaybackFrame? {
-        guard frames.indices.contains(currentIndex) else { return nil }
-        return frames[currentIndex]
-    }
-}
+//
+// `PlaybackFrame` and `PlaybackState` moved to Engine/PlaybackState.swift
+// in v1.0 foundation work so Engine/Exporter.swift and the headless CLI
+// can reference them without dragging in SwiftUI.
 
 // MARK: - Job status
 

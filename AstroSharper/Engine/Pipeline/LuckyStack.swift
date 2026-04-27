@@ -46,6 +46,22 @@ struct LuckyStackBakeIn {
     var toneCurveLUT: MTLTexture?
 }
 
+/// Optional extra stack outputs requested per .ser, on top of the default
+/// "keep best N%" slider value. Each non-zero entry triggers a *separate*
+/// stack run for that file, written to a subdirectory of the output folder
+/// (e.g. `f100/`, `p25/`). Default values are all zero meaning "off".
+///
+/// Lives in Engine because Preset.swift carries it; the GUI owns its own
+/// editing surface in AppModel.luckyStackUI.
+struct LuckyStackVariants: Codable, Equatable {
+    var absoluteCounts: [Int] = [0, 0, 0]   // f-slots
+    var percentages: [Int] = [0, 0, 0]      // p-slots
+
+    var isEmpty: Bool {
+        absoluteCounts.allSatisfy { $0 == 0 } && percentages.allSatisfy { $0 == 0 }
+    }
+}
+
 struct LuckyStackOptions {
     var mode: LuckyStackMode = .lightspeed
     var keepPercent: Int = 25            // top-N% of frames to stack
