@@ -831,13 +831,23 @@ kernel void quality_partials_per_ap(
     }
 }
 
-// Per-AP keep-mask weighted accumulator (A.2). Same shape as
-// `lucky_accumulate` but reads a (apIndex × frameIndex) keep-mask
-// buffer; pixels outside their AP's keep set don't contribute. A
-// per-pixel weight texture tracks how many frames each output pixel
-// drew from, so the final divide produces a clean mean even when
-// neighbouring APs picked very different frame counts. Hard-edge AP
-// boundaries here; B.2 (feathered AP blending) softens them later.
+// Per-AP keep-mask accumulator with bilinear AP blending (A.2 + B.2).
+//
+// Each output pixel reads the keep flags from the FOUR nearest AP
+// cells, blends them with bilinear weights based on sub-cell
+// position, and contributes the bilinearly-weighted result. AP
+// centres land on integer coords of the (gridSize × gridSize) grid;
+// pixels at AP centres get full contribution from one cell only,
+// pixels at AP boundaries get a smooth blend across cells. This
+// kills the rectangular tile artifacts the hard-edge first version
+// produced (visible in two-stage output as blocky bands).
+//
+// effectiveKeep = Σᵢ keep[apᵢ, frame] × bilinearWeight[apᵢ]
+//                ∈ [0, 1]
+//
+// The per-pixel weight texture accumulates `effectiveKeep × weight`
+// across frames so the final divide produces a clean mean even
+// where neighbouring APs picked different frame counts.
 
 struct LuckyPerAPParams {
     float  weight;
@@ -860,21 +870,45 @@ kernel void lucky_accumulate_per_ap_keep(
     if (gid.x >= W || gid.y >= H) return;
     if (p.apGridSize == 0) return;
 
-    uint cellW = max(1u, W / p.apGridSize);
-    uint cellH = max(1u, H / p.apGridSize);
-    uint apX = min(p.apGridSize - 1, gid.x / cellW);
-    uint apY = min(p.apGridSize - 1, gid.y / cellH);
-    uint apLinearIdx = apY * p.apGridSize + apX;
+    // Position in AP-grid space (sub-cell coords). The "-0.5" shift
+    // lines AP centres up with integer coords of this space, so the
+    // four nearest APs are at (floor(fx), floor(fy)) and its three
+    // neighbours.
+    float gridF = float(p.apGridSize);
+    float fx = (float(gid.x) + 0.5) * gridF / float(W) - 0.5;
+    float fy = (float(gid.y) + 0.5) * gridF / float(H) - 0.5;
+    int apX0 = int(floor(fx));
+    int apY0 = int(floor(fy));
+    float dx = fx - float(apX0);
+    float dy = fy - float(apY0);
+    int gridMax = int(p.apGridSize) - 1;
+    int x0c = clamp(apX0,     0, gridMax);
+    int y0c = clamp(apY0,     0, gridMax);
+    int x1c = clamp(apX0 + 1, 0, gridMax);
+    int y1c = clamp(apY0 + 1, 0, gridMax);
 
-    uint maskIdx = apLinearIdx * p.frameCount + p.frameIndex;
-    float keep = keepMask[maskIdx];
-    if (keep <= 0.0) return;
+    // Bilinear weights for the 4 surrounding APs (sum to 1).
+    float w00 = (1.0 - dx) * (1.0 - dy);
+    float w10 =        dx  * (1.0 - dy);
+    float w01 = (1.0 - dx) *        dy;
+    float w11 =        dx  *        dy;
+
+    // Look up keep flags. Buffer layout: [apLinear × frameCount + frameIndex].
+    uint frameC = p.frameCount;
+    float k00 = keepMask[(uint(y0c) * p.apGridSize + uint(x0c)) * frameC + p.frameIndex];
+    float k10 = keepMask[(uint(y0c) * p.apGridSize + uint(x1c)) * frameC + p.frameIndex];
+    float k01 = keepMask[(uint(y1c) * p.apGridSize + uint(x0c)) * frameC + p.frameIndex];
+    float k11 = keepMask[(uint(y1c) * p.apGridSize + uint(x1c)) * frameC + p.frameIndex];
+
+    float effectiveKeep = k00 * w00 + k10 * w10 + k01 * w01 + k11 * w11;
+    if (effectiveKeep <= 0.0) return;
 
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     float2 uv = (float2(gid) + 0.5 - p.shift) / float2(W, H);
     float4 v = frame.sample(s, uv);
-    accum.write(accum.read(gid) + v * p.weight, gid);
-    wtTex.write(wtTex.read(gid) + float4(p.weight), gid);
+    float blended = p.weight * effectiveKeep;
+    accum.write(accum.read(gid) + v * blended, gid);
+    wtTex.write(wtTex.read(gid) + float4(blended), gid);
 }
 
 // MARK: - Sigma-clipped stacking (B.1)
