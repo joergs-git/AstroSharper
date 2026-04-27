@@ -29,6 +29,8 @@ enum Stack {
         var mode: LuckyStackMode = .lightspeed
         var useMultiAP = false
         var multiAPGrid = 8
+        var doSharpen = false
+        var sharpenAmount: Double = 1.0  // applied only when --sharpen is set
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -134,6 +136,26 @@ enum Stack {
                 useMultiAP = true
                 if mode == .lightspeed { mode = .scientific }
                 i += 2
+            case "--sharpen":
+                // Enable post-stack sharpen baked into the output TIFF.
+                // Engages unsharp (radius=1.5, amount=1.0 by default) +
+                // 4-scale à-trous wavelet ([1.8, 1.4, 1.0, 0.6]). Without
+                // this flag the CLI writes the raw stacked accumulator,
+                // which by design looks soft — the GUI applies the same
+                // pipeline live before display, so the saved file then
+                // doesn't match what the user sees on screen.
+                doSharpen = true
+                i += 1
+            case "--sharpen-amount":
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v >= 0, v <= 5
+                else {
+                    cliStderr("stack: --sharpen-amount requires a number in [0, 5] (default 1.0)")
+                    return 64
+                }
+                sharpenAmount = v
+                doSharpen = true
+                i += 2
             case "--quiet", "-q":
                 quiet = true
                 i += 1
@@ -155,7 +177,7 @@ enum Stack {
 
         guard let input = inputPath, let output = outputPath else {
             cliStderr("stack: missing input or output path")
-            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--metrics file.json] [--quiet]")
+            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--sharpen [--sharpen-amount X]] [--metrics file.json] [--quiet]")
             return 64
         }
 
@@ -212,6 +234,21 @@ enum Stack {
             options.mode = mode
             options.useMultiAP = useMultiAP
             options.multiAPGrid = multiAPGrid
+            if doSharpen {
+                // Engine defaults: unsharp on, wavelet OFF. Flip wavelet on
+                // and override `amount` so a single --sharpen flag delivers
+                // the BiggSky / Registax-style "sharpened final" look.
+                var sharpen = SharpenSettings()
+                sharpen.enabled = true
+                sharpen.unsharpEnabled = true
+                sharpen.amount = sharpenAmount
+                sharpen.waveletEnabled = true
+                options.bakeIn = LuckyStackBakeIn(
+                    sharpen: sharpen,
+                    toneCurve: ToneCurveSettings(),  // disabled by default — keep the float TIFF linear
+                    toneCurveLUT: nil
+                )
+            }
 
             let started = Date()
             if !quiet, keepPercents.count > 1 {

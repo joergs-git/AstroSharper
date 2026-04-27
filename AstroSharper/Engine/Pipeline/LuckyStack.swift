@@ -1030,10 +1030,29 @@ private final class LuckyRunner {
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
 
-        // CPU: per-AP top-k selection → keep mask.
+        // CPU: per-AP CONTINUOUS quality weights.
+        //
+        // Earlier hard top-K per-AP selection (binary 0/1 mask) made
+        // adjacent cells lock onto disjoint frame subsets, biasing
+        // their accumulated brightness — visible as blob/tile
+        // artifacts even after bilinear AP blending. The fix is to
+        // weight EVERY globally-kept frame continuously per AP by a
+        // rank-based sigmoid so neighbouring APs see the same frames
+        // with smoothly-varying weights. Bilinear blending then sees
+        // continuous gradients across cell boundaries, not on/off
+        // steps.
+        //
+        // keepFractionPerAP keeps its meaning as the 50%-point of the
+        // sigmoid centred at that rank: best-ranked frames pull
+        // toward weight 1, frames well past the rank pull toward 0.
+        // Transition width = 10% of frameCount so the taper is
+        // selective but not abrupt — the per-AP "luckiness" survives
+        // without the visual artifacts.
         let perAPRaw = perAPBuf.contents().assumingMemoryBound(to: Float.self)
-        var perAPScores = Array(UnsafeBufferPointer(start: perAPRaw, count: apCount * frameCount))
+        let perAPScores = Array(UnsafeBufferPointer(start: perAPRaw, count: apCount * frameCount))
         let perAPKeepCount = max(1, Int((Double(frameCount) * max(0.01, min(1.0, keepFractionPerAP))).rounded(.up)))
+        let kSoft = Float(perAPKeepCount)
+        let widthSoft = max(1.0, Float(frameCount) * 0.1)
 
         var keepMask = [Float](repeating: 0, count: apCount * frameCount)
         for ap in 0..<apCount {
@@ -1045,13 +1064,14 @@ private final class LuckyRunner {
                 frameAndScore.append((f, perAPScores[bufIdx]))
             }
             frameAndScore.sort { $0.score > $1.score }
-            let kept = min(perAPKeepCount, frameAndScore.count)
-            for k in 0..<kept {
-                let f = frameAndScore[k].frameIdx
-                keepMask[ap * frameCount + f] = 1.0
+
+            for r in 0..<frameCount {
+                let f = frameAndScore[r].frameIdx
+                // 1/(1+e^x): rank 0 → ~1, rank=kSoft → 0.5, rank≫kSoft → ~0.
+                let arg = (Float(r) - kSoft) / widthSoft
+                keepMask[ap * frameCount + f] = 1.0 / (1.0 + exp(arg))
             }
         }
-        _ = perAPScores  // silence unused warning
 
         guard let keepBuf = device.makeBuffer(
             bytes: keepMask,
