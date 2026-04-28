@@ -242,7 +242,11 @@ enum AutoPSF {
 
     // MARK: - Texture luminance readback (Metal-side)
 
-    private static func readLuminance(
+    /// Public version of the luminance readback so other passes
+    /// (the tiled-deconv classifier, future per-frame metrics) can
+    /// reuse the same blit-to-shared-staging path without each
+    /// implementing it separately.
+    static func readLuminance(
         texture tex: MTLTexture,
         device: MTLDevice
     ) -> ([Float], Int, Int)? {

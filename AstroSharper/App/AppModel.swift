@@ -1087,6 +1087,8 @@ final class AppModel: ObservableObject {
         perItemOpts.autoPSFSNR = luckyStack.autoPSFSNR
         perItemOpts.denoisePrePercent = luckyStack.denoisePrePercent
         perItemOpts.denoisePostPercent = luckyStack.denoisePostPercent
+        perItemOpts.useTiledDeconv = luckyStack.tiledDeconv
+        perItemOpts.tiledDeconvAPGrid = luckyStack.tiledDeconvAPGrid
 
         if luckyStack.bakeInProcessing {
             let lut: MTLTexture? = toneCurve.enabled
@@ -1707,6 +1709,14 @@ struct LuckyStackUIState {
     /// only fire when `autoPSF == true`.
     var denoisePrePercent: Int = 0
     var denoisePostPercent: Int = 0
+
+    /// Tiled deconvolution with green/yellow/red mask (Block C.3 v0).
+    /// Classifies each AP cell by content: surface (full deconv),
+    /// limb (half deconv), background (skip). Soft mask blend
+    /// suppresses noise amplification in dark regions. Only fires
+    /// when `autoPSF == true`.
+    var tiledDeconv: Bool = false
+    var tiledDeconvAPGrid: Int = 8
 }
 
 enum LuckyStackNaming {

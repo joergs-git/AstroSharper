@@ -1017,6 +1017,65 @@ kernel void lucky_combine_channel_planes(
     dst.write(float4(r, g, b, 1.0), gid);
 }
 
+// MARK: - Tiled-deconv mask blend (Block C.3 v0)
+//
+// Reads a (apGrid × apGrid) per-cell mask `m ∈ [0, 1]` and blends
+// `base` (pre-deconv) with `deconv` (post-Wiener) per pixel:
+//
+//   output = mix(base, deconv, m_sampled_at_pixel)
+//
+// Cell coords are bilinear-sampled for smooth tile boundaries.
+// `m = 0` → output is base (skip deconv on background tiles);
+// `m = 1` → output is deconv (full deconv on bright surface tiles);
+// `m = 0.5` → 50/50 blend (limb / featureless surface — gentle
+// deconv to avoid ringing without losing all structure).
+//
+// Cell coordinates are computed as `(pixel + 0.5) / cellSize - 0.5`
+// so the centre of each cell aligns with integer mask sample
+// positions — exactly the same convention the per-channel combine
+// kernel uses to align Bayer half-res samples.
+
+struct LuckyMaskBlendParams {
+    uint apGrid;        // edge length of the mask (apGrid × apGrid)
+};
+
+kernel void lucky_mask_blend(
+    texture2d<float, access::read>  baseTex   [[texture(0)]],
+    texture2d<float, access::read>  deconvTex [[texture(1)]],
+    texture2d<float, access::read>  maskTex   [[texture(2)]],
+    texture2d<float, access::write> output    [[texture(3)]],
+    constant LuckyMaskBlendParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+
+    float W = float(output.get_width());
+    float H = float(output.get_height());
+    float cellW = W / float(p.apGrid);
+    float cellH = H / float(p.apGrid);
+
+    float fx = (float(gid.x) + 0.5) / cellW - 0.5;
+    float fy = (float(gid.y) + 0.5) / cellH - 0.5;
+
+    int gMax = int(p.apGrid) - 1;
+    int x0 = clamp(int(floor(fx)), 0, gMax);
+    int y0 = clamp(int(floor(fy)), 0, gMax);
+    int x1 = clamp(x0 + 1,         0, gMax);
+    int y1 = clamp(y0 + 1,         0, gMax);
+    float wx = clamp(fx - float(x0), 0.0, 1.0);
+    float wy = clamp(fy - float(y0), 0.0, 1.0);
+
+    float m00 = maskTex.read(uint2(x0, y0)).r;
+    float m10 = maskTex.read(uint2(x1, y0)).r;
+    float m01 = maskTex.read(uint2(x0, y1)).r;
+    float m11 = maskTex.read(uint2(x1, y1)).r;
+    float m = mix(mix(m00, m10, wx), mix(m01, m11, wx), wy);
+
+    float4 base   = baseTex  .read(gid);
+    float4 deconv = deconvTex.read(gid);
+    output.write(mix(base, deconv, m), gid);
+}
+
 // MARK: - Quality grading
 //
 // Per-frame quality scoring via Diagonal Laplacian (LAPD) variance,

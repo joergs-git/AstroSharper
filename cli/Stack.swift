@@ -45,6 +45,8 @@ enum Stack {
         var autoPSFSNR: Double = 50
         var denoisePrePercent: Int = 0
         var denoisePostPercent: Int = 0
+        var useTiledDeconv = false
+        var tiledDeconvAPGrid = 8
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -233,6 +235,23 @@ enum Stack {
                 }
                 denoisePrePercent = v
                 i += 2
+            case "--tiled-deconv":
+                // Block C.3 v0: green/yellow/red mask blend around the
+                // auto-PSF + Wiener output. Skips deconv on background
+                // tiles (no noise amplification), full strength on
+                // bright surface tiles, half strength on limb / dim
+                // surface tiles. Requires --auto-psf.
+                useTiledDeconv = true
+                i += 1
+            case "--tiled-grid":
+                guard i + 1 < args.count, let v = Int(args[i + 1]),
+                      v >= 4, v <= 16
+                else {
+                    cliStderr("stack: --tiled-grid requires an integer in [4, 16] (default 8)")
+                    return 64
+                }
+                tiledDeconvAPGrid = v
+                i += 2
             case "--denoise-post":
                 // C.5 dual-stage denoise — strength [0, 100] applied
                 // AFTER the Wiener restore (cleans up amplified noise).
@@ -353,6 +372,8 @@ enum Stack {
             options.autoPSFSNR = autoPSFSNR
             options.denoisePrePercent = denoisePrePercent
             options.denoisePostPercent = denoisePostPercent
+            options.useTiledDeconv = useTiledDeconv
+            options.tiledDeconvAPGrid = tiledDeconvAPGrid
             options.sigmaThreshold = sigmaThreshold
             options.drizzleScale = drizzleScale
             options.drizzlePixfrac = drizzlePixfrac

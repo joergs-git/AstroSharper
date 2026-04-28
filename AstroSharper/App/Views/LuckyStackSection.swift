@@ -275,6 +275,31 @@ struct LuckyStackSection: View {
                         .controlSize(.small)
                     }
                     .help("Wavelet soft-threshold applied after the Wiener restore. Suppresses residual ringing and amplified noise from the deconvolution. BiggSky-typical 75. Set to 1 for low-noise sources.")
+
+                    // Block C.3 — tiled deconv with green/yellow/red mask.
+                    HStack(spacing: 4) {
+                        Toggle("Tiled deconv (mask bg)", isOn: $app.luckyStack.tiledDeconv)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                        if app.luckyStack.tiledDeconv {
+                            Spacer()
+                            Text("\(app.luckyStack.tiledDeconvAPGrid)×\(app.luckyStack.tiledDeconvAPGrid)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .help("Classifies each AP cell green/yellow/red. Background tiles skip deconv (no noise amplification), limb tiles get half-strength, surface tiles get full strength. The big BiggSky-documented benefit when stacking has visible noise floor in dark regions.")
+
+                    if app.luckyStack.tiledDeconv {
+                        Slider(
+                            value: Binding(
+                                get: { Double(app.luckyStack.tiledDeconvAPGrid) },
+                                set: { app.luckyStack.tiledDeconvAPGrid = Int($0) }
+                            ),
+                            in: 4...16, step: 1
+                        )
+                        .controlSize(.small)
+                    }
                 }
 
                 Picker("Filename", selection: $app.luckyStack.filenameMode) {

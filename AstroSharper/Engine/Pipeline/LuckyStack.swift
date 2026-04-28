@@ -185,6 +185,25 @@ struct LuckyStackOptions {
     /// Only fires when `useAutoPSF == true`.
     var denoisePrePercent: Int = 0
     var denoisePostPercent: Int = 0
+
+    /// Tiled deconvolution with green / yellow / red mask (Block C.3 v0).
+    /// Classifies each cell of an `apGrid × apGrid` AP grid by content:
+    ///   - GREEN (high LAPD + bright luma) — surface, full deconv
+    ///   - YELLOW (bright luma but lower LAPD) — limb, gentle deconv
+    ///   - RED (dim luma) — background, deconv skipped
+    /// The classification feeds a soft mask that bilinear-blends the
+    /// pre-deconv (background) with the post-Wiener (foreground)
+    /// output. The main BiggSky-documented benefit: no noise
+    /// amplification in dark background regions, since the inverse
+    /// filter doesn't fire there. v0 uses a single global PSF (the
+    /// AutoPSF estimate) — per-tile PSF refinement is C.3 v1+.
+    /// Only fires when `useAutoPSF == true`.
+    var useTiledDeconv: Bool = false
+    /// Edge length of the tile grid. 8 = 8×8 = 64 cells (matches the
+    /// default multi-AP grid). Smaller = more aggressive
+    /// classification on small details; larger = smoother boundaries.
+    /// Range [4, 16] in practice.
+    var tiledDeconvAPGrid: Int = 8
 }
 
 enum LuckyStackProgress {
@@ -214,6 +233,106 @@ enum LuckyStack {
     /// as the manual `sharpen.waveletNoiseThreshold` slider in the
     /// SettingsPanel, so 100% here is "as strong as the user can
     /// already dial in by hand".
+    /// Build the green/yellow/red tile classification + run the GPU
+    /// mask-blend that combines the pre-deconv (background) with the
+    /// post-Wiener (foreground). Returns nil on any error so the
+    /// caller can fall back to plain deconv.
+    ///
+    /// Classification rules (Block C.3 v0):
+    ///   1. APPlanner.plan(...) labels each cell with a LAPD score +
+    ///      kept/dropped flag (drops dim background outright).
+    ///   2. Cells dropped by APPlanner → mask 0 (RED, no deconv).
+    ///   3. Surviving cells split at the median APPlanner score:
+    ///        top half  → mask 1 (GREEN, full deconv)
+    ///        bottom    → mask 0.5 (YELLOW, half-strength deconv)
+    ///   4. Mask uploaded as r32Float (apGrid × apGrid); GPU shader
+    ///      bilinear-samples it for smooth tile boundaries.
+    static func tiledDeconvBlend(
+        pre: MTLTexture,
+        deconv: MTLTexture,
+        apGrid: Int,
+        pipeline: Pipeline,
+        device: MTLDevice
+    ) -> MTLTexture? {
+        let safeGrid = max(2, min(16, apGrid))
+        guard let (luma, W, H) = AutoPSF.readLuminance(texture: pre, device: device) else {
+            return nil
+        }
+
+        let plan = APPlanner.plan(
+            luma: luma, width: W, height: H, apGrid: safeGrid
+        )
+        guard !plan.scores.isEmpty else { return nil }
+
+        // Score-based green/yellow split among the surviving cells.
+        let surviving = plan.mask.enumerated().compactMap { $1 ? $0 : nil }
+        var mask = [Float](repeating: 0, count: safeGrid * safeGrid) // RED default
+        if !surviving.isEmpty {
+            let scoresOfSurviving = surviving.map { plan.scores[$0] }.sorted()
+            let medianScore = scoresOfSurviving[scoresOfSurviving.count / 2]
+            for cellIdx in surviving {
+                mask[cellIdx] = plan.scores[cellIdx] >= medianScore ? 1.0 : 0.5
+            }
+        }
+
+        // Upload mask as r32Float texture.
+        let maskDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r32Float, width: safeGrid, height: safeGrid,
+            mipmapped: false
+        )
+        maskDesc.storageMode = .shared
+        maskDesc.usage = [.shaderRead]
+        guard let maskTex = device.makeTexture(descriptor: maskDesc) else { return nil }
+        mask.withUnsafeBufferPointer { buf in
+            maskTex.replace(
+                region: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: safeGrid, height: safeGrid, depth: 1)
+                ),
+                mipmapLevel: 0,
+                withBytes: buf.baseAddress!,
+                bytesPerRow: safeGrid * MemoryLayout<Float>.size
+            )
+        }
+
+        // Build the blend kernel PSO on demand. Cached by the static
+        // closure: cheap to call repeatedly even though we go through
+        // the library lookup each time (the pipeline state itself is
+        // cached by Metal once compiled).
+        guard let lib = MetalDevice.shared.library,
+              let fn = lib.makeFunction(name: "lucky_mask_blend"),
+              let pso = try? device.makeComputePipelineState(function: fn) else {
+            return nil
+        }
+
+        let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: pre.pixelFormat,
+            width: pre.width, height: pre.height,
+            mipmapped: false
+        )
+        outDesc.storageMode = .private
+        outDesc.usage = [.shaderRead, .shaderWrite]
+        guard let output = device.makeTexture(descriptor: outDesc) else { return nil }
+
+        let queue = MetalDevice.shared.commandQueue
+        guard let cmd = queue.makeCommandBuffer(),
+              let enc = cmd.makeComputeCommandEncoder() else { return nil }
+        enc.setComputePipelineState(pso)
+        enc.setTexture(pre,    index: 0)
+        enc.setTexture(deconv, index: 1)
+        enc.setTexture(maskTex, index: 2)
+        enc.setTexture(output,  index: 3)
+        var p = LuckyMaskBlendParamsCPU(apGrid: UInt32(safeGrid))
+        enc.setBytes(&p, length: MemoryLayout<LuckyMaskBlendParamsCPU>.stride, index: 0)
+        let (tgC, tgS) = dispatchThreadgroups(for: output, pso: pso)
+        enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+        enc.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+
+        return output
+    }
+
     static func denoiseTexture(
         input: MTLTexture,
         percent: Int,
@@ -352,7 +471,28 @@ enum LuckyStack {
                                 snr: Float(options.autoPSFSNR),
                                 device: device
                             )
-                            final = deconvTex
+
+                            if options.useTiledDeconv {
+                                // Block C.3 v0: blend pre-deconv (final)
+                                // and post-Wiener (deconvTex) using a
+                                // soft mask classified from APPlanner —
+                                // skip deconv on background tiles, full
+                                // deconv on bright surface tiles, half
+                                // strength on limb / featureless tiles.
+                                if let blended = Self.tiledDeconvBlend(
+                                    pre: final,
+                                    deconv: deconvTex,
+                                    apGrid: options.tiledDeconvAPGrid,
+                                    pipeline: pipeline,
+                                    device: device
+                                ) {
+                                    final = blended
+                                } else {
+                                    final = deconvTex
+                                }
+                            } else {
+                                final = deconvTex
+                            }
                         }
                     }
                     // Estimation failure: fall through with the bake-in
@@ -1782,6 +1922,12 @@ private struct LuckyClipParamsCPU {
 
 private struct LuckyDivideParamsCPU {
     var weightFloor: Float
+}
+
+// MARK: - C.3 mask-blend CPU param struct
+
+private struct LuckyMaskBlendParamsCPU {
+    var apGrid: UInt32
 }
 
 // MARK: - Phase correlation (CPU FFT on small luma buffers)
