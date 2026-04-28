@@ -200,7 +200,8 @@ final class Pipeline {
                 enc.setTexture(result, index: 1)
                 var p = AutoStretchParamsCPU(
                     blackPoint: pts.black,
-                    scale: 0.95 / (pts.white - pts.black)
+                    scale: 0.85 / (pts.white - pts.black),
+                    gamma: 0.8  // gentle midtone lift; 1.0 = pure linear
                 )
                 enc.setBytes(&p, length: MemoryLayout<AutoStretchParamsCPU>.stride, index: 0)
                 let (tgC, tgS) = dispatchThreadgroups(for: result, pso: stretchPSO)
@@ -429,8 +430,14 @@ final class Pipeline {
                    + 0.0722 * rgba[i * 4 + 2]
         }
         luma.sort()
-        let blackIdx = max(0, min(pixelCount - 1, Int(Double(pixelCount - 1) * 0.005)))
-        let whiteIdx = max(0, min(pixelCount - 1, Int(Double(pixelCount - 1) * 0.995)))
+        // Wider clip than the original 0.5%/99.5% — that aggressive cut
+        // washed out band detail by mapping the dim sky tail and a few
+        // bright noise spikes to extremes, leaving the planet body sitting
+        // in the middle of an over-stretched range. 2%/98% leaves more
+        // headroom on both ends so the planet's existing band contrast
+        // survives the stretch.
+        let blackIdx = max(0, min(pixelCount - 1, Int(Double(pixelCount - 1) * 0.02)))
+        let whiteIdx = max(0, min(pixelCount - 1, Int(Double(pixelCount - 1) * 0.98)))
         let black = luma[blackIdx]
         let white = luma[whiteIdx]
         // Degenerate input (uniform plane) → no useful stretch possible.
@@ -567,6 +574,7 @@ struct BrightnessContrastParamsCPU {
 struct AutoStretchParamsCPU {
     var blackPoint: Float
     var scale: Float
+    var gamma: Float
 }
 
 // Utility for dispatch sizing.

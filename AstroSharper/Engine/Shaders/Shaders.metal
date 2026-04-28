@@ -244,7 +244,8 @@ kernel void apply_white_balance(
 
 struct AutoStretchParams {
     float blackPoint;
-    float scale;          // pre-computed = 0.95 / (whitePoint - blackPoint)
+    float scale;          // pre-computed = 0.85 / (whitePoint - blackPoint)
+    float gamma;          // midtone gamma — typically 0.7..0.9 to lift midtones
 };
 
 kernel void apply_auto_stretch(
@@ -255,7 +256,13 @@ kernel void apply_auto_stretch(
 ) {
     if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
     float4 c = input.read(gid);
-    float3 v = clamp((c.rgb - p.blackPoint) * p.scale, 0.0, 0.95);
+    // Linear stretch into [0, 0.85] (leaves ≥15% headroom for downstream
+    // sharpen so unsharp halos don't immediately clip), then a gentle
+    // midtone-gamma boost so band features don't flatten near the white
+    // tail. gamma 0.8 ≈ +10% lift on midtones, ≈ +0% on extremes —
+    // preserves the tonal hierarchy the user is comparing against.
+    float3 stretched = clamp((c.rgb - p.blackPoint) * p.scale, 0.0, 0.85);
+    float3 v = pow(stretched, float3(p.gamma));
     output.write(float4(v, c.a), gid);
 }
 

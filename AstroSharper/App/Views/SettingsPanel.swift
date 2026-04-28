@@ -337,18 +337,34 @@ struct ToneCurveSection: View {
     @EnvironmentObject private var app: AppModel
 
     var body: some View {
-        SectionContainer(title: "Tone Curve", icon: "waveform.path.ecg", isOn: $app.toneCurve.enabled) {
-            // Auto white balance — independent of the Tone Curve toggle.
-            // Runs as the FIRST step of the post-stack pipeline (before
-            // any sharpening) so saturation / unsharp don't amplify a
-            // green cast that's invisible at neutral colour.
-            Toggle("Auto White Balance (gray-world)", isOn: $app.toneCurve.autoWB)
-                .help("Computes a per-channel offset+scale on the input so the three channels share a neutral mean. Critical for OSC stacks — Bayer green is naturally amplified by 2× photosite count, so post-stack OSC images otherwise look greenish once saturation > 1. Mono / pre-balanced sources are unaffected.")
-            Toggle("Atmospheric Chromatic Dispersion Correction", isOn: $app.toneCurve.chromaticAlignment)
-                .help("Phase-correlates R and B against G on the post-stack output and applies sub-pixel shifts so the three channels re-align (G stays anchored). Atmospheric refraction shifts blue more than red, so OSC planets at low altitude show coloured limb fringes; ACDC removes them. No-op on mono / pre-aligned sources because the offsets come out near zero.")
-            Toggle("Auto Stretch (histogram normalisation)", isOn: $app.toneCurve.autoStretch)
-                .help("Maps the dim camera-native pixel range to fill the display range. Finds the 0.5%-percentile dark floor and 99.5%-percentile bright tail, scales linearly so the bright tail lands at ~95%. This is the default behaviour of every external export tool (BiggSky, Registax) — without it the stacked output looks washed out and low-contrast even though the underlying detail is the same. Closes most of the visible gap to reference exports in one step.")
-            Divider().padding(.vertical, 4)
+        VStack(alignment: .leading, spacing: 8) {
+            // Auto WB / ACDC / Auto Stretch are conceptually 'colour and
+            // levels' — they sit BEFORE the user's tone curve in the
+            // pipeline and operate independently of the curve toggle.
+            // Pulled OUT of the Tone Curve SectionContainer so the
+            // section's `disabled(!isOn)` doesn't grey them out: the
+            // user shouldn't need to drag curve points just to enable
+            // an auto-stretch or fix the OSC green cast.
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "slider.horizontal.below.rectangle")
+                        .foregroundColor(.accentColor)
+                    Text("Colour & Levels")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.primary)
+                }
+                Toggle("Auto White Balance (gray-world)", isOn: $app.toneCurve.autoWB)
+                    .help("Computes a per-channel offset+scale so the three channels share a neutral mean. Critical for OSC stacks — Bayer green is naturally amplified by 2× photosite count, so post-stack OSC images otherwise look greenish once saturation > 1. Mono / pre-balanced sources are unaffected.")
+                Toggle("Atmospheric Chromatic Dispersion Correction", isOn: $app.toneCurve.chromaticAlignment)
+                    .help("Phase-correlates R and B against G on the post-stack output and applies sub-pixel shifts so the three channels re-align (G stays anchored). Atmospheric refraction shifts blue more than red, so OSC planets at low altitude show coloured limb fringes; ACDC removes them. No-op on mono / pre-aligned sources because the offsets come out near zero.")
+                Toggle("Auto Stretch (histogram normalisation)", isOn: $app.toneCurve.autoStretch)
+                    .help("Maps the dim camera-native pixel range to fill the display range. 2%-percentile dark floor and 98%-percentile bright tail, with a midtone-gamma boost so highlights don't blow out. Note: stretch only widens contrast, it doesn't recover sharpness — if your image still looks soft after enabling this, the gap is detail (which sharpening / wavelet / blind deconvolution address).")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.06)))
+
+            SectionContainer(title: "Tone Curve", icon: "waveform.path.ecg", isOn: $app.toneCurve.enabled) {
             ToneCurveEditor(
                 points: $app.toneCurve.controlPoints,
                 histogram: app.previewHistogram,
@@ -416,7 +432,8 @@ struct ToneCurveSection: View {
                 app.runToneOnActiveSection()
             }
             .help("Apply the current tone curve to the active section: Memory edits in-place (ops accumulate), Inputs/Outputs writes a toned TIFF to the output folder.")
-        }
+            }   // SectionContainer
+        }       // outer VStack
     }
 
     private var toneApplySubtitle: String {
