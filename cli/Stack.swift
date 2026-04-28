@@ -38,6 +38,7 @@ enum Stack {
         var wienerSNR: Double = 50
         var lrSigma: Double? = nil
         var lrIterations: Int = 30
+        var keepCountAbsolute: Int? = nil
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -190,6 +191,18 @@ enum Stack {
                 }
                 lrSigma = v
                 i += 2
+            case "--keep-count":
+                // Absolute frame count override (e.g. --keep-count 1 to
+                // stack the single best-quality frame, no averaging).
+                // Beats --keep when both are passed.
+                guard i + 1 < args.count, let v = Int(args[i + 1]),
+                      v >= 1
+                else {
+                    cliStderr("stack: --keep-count requires a positive integer (e.g. 1 = single best frame)")
+                    return 64
+                }
+                keepCountAbsolute = v
+                i += 2
             case "--lr-iter":
                 guard i + 1 < args.count, let v = Int(args[i + 1]),
                       v >= 1, v <= 200
@@ -269,6 +282,11 @@ enum Stack {
         for plan in outputPlan {
             var options = LuckyStackOptions()
             options.keepPercent = plan.percent
+            // --keep-count overrides the percentage: stack exactly N
+            // best-quality frames. Use 1 to extract the single best
+            // frame (no averaging) and isolate 'lucky imaging' from
+            // 'stacking averages'.
+            if let kc = keepCountAbsolute { options.keepCount = kc }
             options.sigmaThreshold = sigmaThreshold
             options.drizzleScale = drizzleScale
             options.drizzlePixfrac = drizzlePixfrac
