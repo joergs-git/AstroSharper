@@ -3,23 +3,51 @@
 // Used by the preview view when the user selects a `.ser` row in the file
 // list, so they see frame 0 immediately and can adjust sharpening / tone
 // against it before kicking off the full lucky-stack run.
+import Foundation
 import Metal
+import os
 
 enum SerFrameLoader {
     enum Error: Swift.Error {
         case unsupportedColor
         case decodeFailed
+        case readerOpenFailed(String)
+        case stagingTextureFailed(width: Int, height: Int)
+        case destTextureFailed(width: Int, height: Int)
+        case kernelMissing(String)
+        case commandBufferMissing
     }
+
+    private static let log = OSLog(subsystem: "com.joergsflow.AstroSharper", category: "SerFrameLoader")
 
     /// Returns a private-storage rgba16Float texture containing frame `index`
     /// of the SER at `url`. Supports mono 8/16 and 4 Bayer patterns
     /// (RGGB / GRBG / GBRG / BGGR) at 8/16 bit. Bayer is bilinearly
     /// demosaiced on the GPU during unpack.
     static func loadFrame(url: URL, frameIndex: Int = 0, device: MTLDevice) throws -> MTLTexture {
-        let reader = try SerReader(url: url)
+        let reader: SerReader
+        do {
+            reader = try SerReader(url: url)
+        } catch {
+            os_log("SerReader open failed for %{public}@ — %{public}@",
+                   log: log, type: .error, url.lastPathComponent, String(describing: error))
+            throw Error.readerOpenFailed("\(error)")
+        }
         let h = reader.header
-        guard h.colorID.isMono || h.colorID.isBayer else { throw Error.unsupportedColor }
-        guard frameIndex >= 0 && frameIndex < h.frameCount else { throw Error.decodeFailed }
+        os_log("SER opened %{public}@ — %dx%d, %d frames, %d-bit, colorID=%{public}@, bytesPerFrame=%d",
+               log: log, type: .info,
+               url.lastPathComponent, h.imageWidth, h.imageHeight, h.frameCount,
+               h.pixelDepthPerPlane, String(describing: h.colorID), h.bytesPerFrame)
+        guard h.colorID.isMono || h.colorID.isBayer else {
+            os_log("SerFrameLoader: unsupported colorID %{public}@", log: log, type: .error,
+                   String(describing: h.colorID))
+            throw Error.unsupportedColor
+        }
+        guard frameIndex >= 0 && frameIndex < h.frameCount else {
+            os_log("SerFrameLoader: frame index %d out of range [0, %d)", log: log, type: .error,
+                   frameIndex, h.frameCount)
+            throw Error.decodeFailed
+        }
 
         let mono16 = h.bytesPerPlane == 2
 
@@ -30,7 +58,11 @@ enum SerFrameLoader {
         )
         stageDesc.storageMode = .shared
         stageDesc.usage = [.shaderRead]
-        guard let staging = device.makeTexture(descriptor: stageDesc) else { throw Error.decodeFailed }
+        guard let staging = device.makeTexture(descriptor: stageDesc) else {
+            os_log("SerFrameLoader: staging texture allocation failed (%dx%d, mono16=%{public}@)",
+                   log: log, type: .error, h.imageWidth, h.imageHeight, mono16 ? "true" : "false")
+            throw Error.stagingTextureFailed(width: h.imageWidth, height: h.imageHeight)
+        }
 
         reader.withFrameBytes(at: frameIndex) { ptr, _ in
             staging.replace(
@@ -50,7 +82,12 @@ enum SerFrameLoader {
         )
         dstDesc.storageMode = .private
         dstDesc.usage = [.shaderRead, .shaderWrite, .renderTarget]
-        guard let dst = device.makeTexture(descriptor: dstDesc) else { throw Error.decodeFailed }
+        guard let dst = device.makeTexture(descriptor: dstDesc) else {
+            os_log("SerFrameLoader: rgba16Float dst allocation failed (%dx%d ≈ %d MB)",
+                   log: log, type: .error, h.imageWidth, h.imageHeight,
+                   (h.imageWidth * h.imageHeight * 8) / (1024 * 1024))
+            throw Error.destTextureFailed(width: h.imageWidth, height: h.imageHeight)
+        }
 
         // Pick the right unpack kernel based on colour layout.
         let isBayer = h.colorID.isBayer
@@ -60,12 +97,28 @@ enum SerFrameLoader {
         } else {
             kernelName = mono16 ? "unpack_mono16_to_rgba" : "unpack_mono8_to_rgba"
         }
-        guard let lib = MetalDevice.shared.library,
-              let fn = lib.makeFunction(name: kernelName),
-              let pso = try? device.makeComputePipelineState(function: fn),
-              let cmd = MetalDevice.shared.commandQueue.makeCommandBuffer(),
+        guard let lib = MetalDevice.shared.library else {
+            os_log("SerFrameLoader: Metal library missing", log: log, type: .error)
+            throw Error.kernelMissing(kernelName)
+        }
+        guard let fn = lib.makeFunction(name: kernelName) else {
+            os_log("SerFrameLoader: kernel function %{public}@ not found", log: log, type: .error, kernelName)
+            throw Error.kernelMissing(kernelName)
+        }
+        let pso: MTLComputePipelineState
+        do {
+            pso = try device.makeComputePipelineState(function: fn)
+        } catch {
+            os_log("SerFrameLoader: PSO build for %{public}@ failed: %{public}@",
+                   log: log, type: .error, kernelName, String(describing: error))
+            throw Error.kernelMissing(kernelName)
+        }
+        guard let cmd = MetalDevice.shared.commandQueue.makeCommandBuffer(),
               let enc = cmd.makeComputeCommandEncoder()
-        else { throw Error.decodeFailed }
+        else {
+            os_log("SerFrameLoader: command buffer / encoder unavailable", log: log, type: .error)
+            throw Error.commandBufferMissing
+        }
 
         enc.setComputePipelineState(pso)
         if isBayer {

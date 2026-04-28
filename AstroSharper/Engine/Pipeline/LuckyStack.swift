@@ -434,28 +434,44 @@ enum LuckyStack {
                 }
 
                 // Auto-PSF post-pass (Block C.1 v0): estimate σ from the
-                // limb LSF and apply Wiener deconv. Wrapped by dual-
-                // stage denoise (Block C.5) — pre-denoise improves the
-                // PSF-estimation LSF + the deconv input; post-denoise
-                // suppresses ringing in the Wiener restore. Single code
-                // path for GUI and CLI; both just set the options.
+                // limb LSF and apply Wiener deconv, wrapped by dual-
+                // stage denoise (Block C.5). The whole post-pass gates
+                // on a successful AutoPSF result — when the estimator
+                // bails (lunar / textured / cropped subjects with no
+                // clean planetary limb) we want to preserve the bare
+                // stack, not run the dual-denoise without the deconv
+                // it's supposed to wrap (which would soften the output
+                // for no benefit). Single code path for GUI + CLI;
+                // both just set the options.
                 if options.useAutoPSF {
                     let device = MetalDevice.shared.device
 
-                    // Stage 1: pre-denoise (Block C.5 first half).
-                    if options.denoisePrePercent > 0 {
-                        if let denoised = Self.denoiseTexture(
-                            input: final,
-                            percent: options.denoisePrePercent,
-                            pipeline: pipeline,
-                            device: device
-                        ) {
-                            final = denoised
-                        }
-                    }
+                    // Pre-flight PSF estimate on the bare stack — if
+                    // this fails we skip the entire post-pass and
+                    // write the stack as-is.
+                    let psfPreflight = AutoPSF.estimate(texture: final, device: device)
 
-                    // Stage 2: PSF estimate + Wiener deconvolution.
-                    if let psf = AutoPSF.estimate(texture: final, device: device) {
+                    if let psf = psfPreflight {
+                        NSLog("AutoPSF: σ=%.2f conf=%.2f r=%.0f at (%.0f, %.0f)",
+                              psf.sigma, psf.confidence, psf.discRadius,
+                              psf.discCenter.x, psf.discCenter.y)
+
+                        // Stage 1: pre-denoise (Block C.5 first half).
+                        if options.denoisePrePercent > 0 {
+                            if let denoised = Self.denoiseTexture(
+                                input: final,
+                                percent: options.denoisePrePercent,
+                                pipeline: pipeline,
+                                device: device
+                            ) {
+                                final = denoised
+                            }
+                        }
+
+                        // Stage 2: Wiener deconvolution with the
+                        // pre-flight σ (still valid — pre-denoise
+                        // shouldn't shift the PSF estimate by much,
+                        // and re-running estimate is wasted work).
                         let outDesc = MTLTextureDescriptor.texture2DDescriptor(
                             pixelFormat: final.pixelFormat,
                             width: final.width, height: final.height,
@@ -475,10 +491,7 @@ enum LuckyStack {
                             if options.useTiledDeconv {
                                 // Block C.3 v0: blend pre-deconv (final)
                                 // and post-Wiener (deconvTex) using a
-                                // soft mask classified from APPlanner —
-                                // skip deconv on background tiles, full
-                                // deconv on bright surface tiles, half
-                                // strength on limb / featureless tiles.
+                                // soft mask classified from APPlanner.
                                 if let blended = Self.tiledDeconvBlend(
                                     pre: final,
                                     deconv: deconvTex,
@@ -494,21 +507,20 @@ enum LuckyStack {
                                 final = deconvTex
                             }
                         }
-                    }
-                    // Estimation failure: fall through with the bake-in
-                    // result. Better to write a stack-without-deconv
-                    // than to fail the whole job.
 
-                    // Stage 3: post-denoise (Block C.5 second half).
-                    if options.denoisePostPercent > 0 {
-                        if let denoised = Self.denoiseTexture(
-                            input: final,
-                            percent: options.denoisePostPercent,
-                            pipeline: pipeline,
-                            device: device
-                        ) {
-                            final = denoised
+                        // Stage 3: post-denoise (Block C.5 second half).
+                        if options.denoisePostPercent > 0 {
+                            if let denoised = Self.denoiseTexture(
+                                input: final,
+                                percent: options.denoisePostPercent,
+                                pipeline: pipeline,
+                                device: device
+                            ) {
+                                final = denoised
+                            }
                         }
+                    } else {
+                        NSLog("AutoPSF: estimation skipped (no clean disc — likely lunar / textured subject); bare stack written, dual-stage denoise also skipped since it wraps the deconv it has nothing to do without")
                     }
                 }
 

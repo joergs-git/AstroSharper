@@ -111,6 +111,29 @@ enum AutoPSF {
         let radius = sqrtf(Float(pxCount) / .pi)
         guard radius > 20 else { return nil }    // disc too small to LSF reliably
 
+        // Bail-out for "no clean disc" subjects — primarily lunar shots
+        // where the moon fills most of the frame. The limb-LSF approach
+        // assumes a clean step from disc-bright to background-dark, but
+        // a lunar full-frame has no dark background at all (terrain
+        // everywhere) — the LSF picks up the strongest crater-rim
+        // gradient as the "limb" and reports a wild σ that Wiener then
+        // uses to over-deconvolve. Better to bail and let LuckyStack
+        // skip the deconv entirely (which it does on a nil result).
+        //
+        // Heuristic 1: bright-pixel area as a fraction of the frame.
+        // A clean planetary disc covers ≤ 35-40% of the frame even
+        // in tight crops; lunar full-frame covers 70%+. Cut at 45%
+        // to leave headroom for legitimately-large planetary discs.
+        let brightFraction = Float(pxCount) / Float(W * H)
+        guard brightFraction < 0.45 else { return nil }
+
+        // Heuristic 2: disc must have actual background space outside
+        // it. If the disc centre is within `radius` of any frame edge,
+        // the limb is cropped and the LSF won't capture a clean step.
+        let cxOk = cx > radius * 0.9 && cx < Float(W) - radius * 0.9
+        let cyOk = cy > radius * 0.9 && cy < Float(H) - radius * 0.9
+        guard cxOk, cyOk else { return nil }
+
         // Step 3: 64 radial profiles outward from (cx, cy), out to
         // 1.5× radius so we capture limb + dark background.
         let nDirs = 64
@@ -143,6 +166,47 @@ enum AutoPSF {
         }
         for r in 0..<nRadii where profileCount[r] > 0 {
             profile[r] /= Float(profileCount[r])
+        }
+
+        // Sanity check: clean planetary discs have a roughly uniform
+        // interior (atmospheric bands cause band-pass variation in
+        // brightness on Jupiter, but the gradient is gentle). Lunar
+        // terrain — craters, mare boundaries, terminator — gives a
+        // wildly variable inner radial profile, and the partial /
+        // cropped frames typical of lunar imaging often don't even
+        // have a clean limb to LSF-fit. Without this guard the
+        // estimator picks up the largest crater-rim gradient as
+        // the "limb" and reports a huge σ that Wiener then uses
+        // to over-deconvolve and halo the output (visible in
+        // 19_moon_full_kit.png vs 16_moon_bare.png).
+        //
+        // Coefficient-of-variation across the inner radial profile
+        // ([0.2r, 0.7r]) is the cleanest signal: cap at 30%. Above
+        // that we bail out of AutoPSF and let LuckyStack.run skip
+        // the deconv entirely. Better than a wrong deconv.
+        let innerLo = max(1, Int(radius * 0.2))
+        let innerHi = min(nRadii - 1, Int(radius * 0.7))
+        if innerHi > innerLo {
+            var innerSum: Double = 0
+            var innerSumSq: Double = 0
+            var innerCount: Int = 0
+            for r in innerLo...innerHi where profileCount[r] > 0 {
+                let v = Double(profile[r])
+                innerSum += v
+                innerSumSq += v * v
+                innerCount += 1
+            }
+            if innerCount > 4 {
+                let innerMean = innerSum / Double(innerCount)
+                let innerVar = max(0, innerSumSq / Double(innerCount) - innerMean * innerMean)
+                let innerStd = sqrt(innerVar)
+                let innerCV = innerMean > 1e-4 ? innerStd / innerMean : 0
+                if innerCV > 0.30 {
+                    // Lunar / textured surface. AutoPSF can't reliably
+                    // measure a Gaussian PSF here.
+                    return nil
+                }
+            }
         }
 
         // Step 4: LSF = |dI/dr|.

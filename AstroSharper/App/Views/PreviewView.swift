@@ -425,7 +425,12 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             guard let self else { return }
             var tex: MTLTexture?
             if isSER {
-                tex = try? SerFrameLoader.loadFrame(url: url, frameIndex: 0, device: MetalDevice.shared.device)
+                do {
+                    tex = try SerFrameLoader.loadFrame(url: url, frameIndex: 0, device: MetalDevice.shared.device)
+                } catch {
+                    NSLog("PreviewView: SerFrameLoader.loadFrame failed for %@ — %@",
+                          url.lastPathComponent, String(describing: error))
+                }
             } else if let avi = aviForBackground {
                 tex = try? avi.loadFrame(at: 0, device: MetalDevice.shared.device)
             } else {

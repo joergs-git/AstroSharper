@@ -9,17 +9,35 @@ import Foundation
 
 enum Analyze {
     static func run(args: [String]) -> Int32 {
-        // Single positional: input file path. Optional flag: --json.
+        // Single positional: input file path. Optional flags:
+        //   --json            JSON output instead of pretty text
+        //   --probe-frame N   read bytes for frame N + report stats. Used
+        //                     to diagnose >4GB memory-map issues: the
+        //                     header parse alone reads only the first 178
+        //                     bytes, which never trips a 4GB-offset bug.
+        //                     Probing a frame past the 4GB boundary
+        //                     forces a real read at the failing offset.
         var path: String?
         var emitJSON = false
+        var probeFrame: Int?
 
-        for arg in args {
+        var i = 0
+        while i < args.count {
+            let arg = args[i]
             switch arg {
             case "--json":
                 emitJSON = true
+                i += 1
+            case "--probe-frame":
+                guard i + 1 < args.count, let v = Int(args[i + 1]), v >= 0 else {
+                    cliStderr("analyze: --probe-frame requires a non-negative integer")
+                    return 64
+                }
+                probeFrame = v
+                i += 2
             case let opt where opt.hasPrefix("--"):
                 cliStderr("analyze: unknown option '\(opt)'")
-                cliStderr("usage: astrosharper analyze <file.ser> [--json]")
+                cliStderr("usage: astrosharper analyze <file.ser> [--json] [--probe-frame N]")
                 return 64
             default:
                 if path != nil {
@@ -27,6 +45,7 @@ enum Analyze {
                     return 64
                 }
                 path = arg
+                i += 1
             }
         }
 
@@ -49,11 +68,78 @@ enum Analyze {
             } else {
                 emit(text: reader)
             }
+            if let probeIdx = probeFrame {
+                return runFrameProbe(reader: reader, frameIndex: probeIdx)
+            }
             return 0
         } catch {
             cliStderr("analyze: failed to open '\(url.path)': \(error)")
             return 1
         }
+    }
+
+    /// Read the raw bytes of frame `frameIndex` and report min / max /
+    /// mean. The byte offset of the frame start is also printed; if the
+    /// offset is > 4 GB and the read fails, the SER reader has a
+    /// 32-bit-truncation bug somewhere in its memory-map path.
+    private static func runFrameProbe(reader: SerReader, frameIndex: Int) -> Int32 {
+        let h = reader.header
+        guard frameIndex >= 0, frameIndex < h.frameCount else {
+            cliStderr("analyze: --probe-frame \(frameIndex) is out of range [0, \(h.frameCount - 1)]")
+            return 1
+        }
+
+        // Compute and print the byte offset.
+        let frameOffset = 178 + frameIndex * h.bytesPerFrame
+        let offsetGB = Double(frameOffset) / 1_000_000_000.0
+        print("")
+        print("--- probe frame \(frameIndex) ---")
+        print("byte offset : \(frameOffset.formatted()) (\(String(format: "%.3f", offsetGB)) GB)")
+        print("frame bytes : \(h.bytesPerFrame.formatted())")
+
+        // Touch every byte in the frame. If the memory map is truncated
+        // past the 4GB boundary, this will crash or read zeros where
+        // there should be real data.
+        let bytesPerPlane = h.bytesPerPlane
+        var minVal: Int = Int.max
+        var maxVal: Int = Int.min
+        var sum: Double = 0
+        let pxCount = h.imageWidth * h.imageHeight
+
+        reader.withFrameBytes(at: frameIndex) { ptr, len in
+            if bytesPerPlane == 2 {
+                ptr.withMemoryRebound(to: UInt16.self, capacity: pxCount) { u16 in
+                    for i in 0..<pxCount {
+                        let v = Int(u16[i].littleEndian)
+                        if v < minVal { minVal = v }
+                        if v > maxVal { maxVal = v }
+                        sum += Double(v)
+                    }
+                }
+            } else {
+                for i in 0..<pxCount {
+                    let v = Int(ptr[i])
+                    if v < minVal { minVal = v }
+                    if v > maxVal { maxVal = v }
+                    sum += Double(v)
+                }
+            }
+            _ = len
+        }
+
+        let mean = sum / Double(pxCount)
+        let scale: Double = bytesPerPlane == 2 ? 65535.0 : 255.0
+        print("pixel min   : \(minVal) (\(String(format: "%.4f", Double(minVal) / scale)))")
+        print("pixel max   : \(maxVal) (\(String(format: "%.4f", Double(maxVal) / scale)))")
+        print("pixel mean  : \(String(format: "%.1f", mean)) (\(String(format: "%.4f", mean / scale)))")
+        if minVal == 0 && maxVal == 0 {
+            print("WARNING: frame is all zeros — likely a >4GB memory-map truncation")
+            return 2
+        }
+        if Double(maxVal) / scale < 0.01 {
+            print("WARNING: frame is extremely dim (max < 1%) — preview will look black without auto-stretch")
+        }
+        return 0
     }
 
     // MARK: - Output
