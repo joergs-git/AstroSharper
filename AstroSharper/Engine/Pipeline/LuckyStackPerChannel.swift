@@ -256,22 +256,102 @@ private final class LuckyChannelStacker {
 
     // MARK: - Driver
 
-    /// Runs three channel passes in sequence and recombines.
+    /// Per-channel run with a SHARED grading + reference frame across
+    /// all three channels. Per-channel grading + per-channel reference
+    /// (the v0 design) was the source of the visible chromatic
+    /// fringing reported on first runs:
+    ///
+    ///   1. Each channel's argmax-by-quality picked a different "best
+    ///      frame", so the three accumulators ended up centred on three
+    ///      different physical scene moments. Per-frame seeing jitter
+    ///      between those reference frames showed as channel-vs-channel
+    ///      offset in the recombined output.
+    ///   2. Each channel's quality-weight curve was scaled to ITS OWN
+    ///      [lo..hi] score range, so the same physical frame
+    ///      contributed at very different weights to R vs G vs B —
+    ///      another channel-bias source.
+    ///
+    /// Fix: grade ONCE, on green (the channel with the most measured
+    /// pixels under any Bayer pattern → best signal for the LAPD
+    /// variance score). The same scores → same sort → same reference
+    /// frame index → same kept set → same per-frame quality weights
+    /// drive all three channel runs. Only the alignment phase remains
+    /// per-channel, because that's the actual atmospheric-chromatic-
+    /// dispersion correction Path B exists to make.
     func run(progress: @escaping (LuckyStackProgress) -> Void) async throws -> MTLTexture {
-        // Sequential channel runs. Parallel-across-channels would cut
-        // wall time by ~3× but triple the staging memory and contend
-        // on the same SER memory map. Sequential keeps the pool simple
-        // and the wall time still ~3× a single run, which on Apple
-        // Silicon is well inside the per-frame budget set by the
-        // Foundation block.
-        let redStack   = try await runChannel(channel: 0, progress: progress)
-        let greenStack = try await runChannel(channel: 1, progress: progress)
-        let blueStack  = try await runChannel(channel: 2, progress: progress)
+        let total = reader.header.frameCount
+
+        // 1. Single grading + luma-cache pass on the green channel.
+        let gradeResult = try await gradeAndCacheLuma(channel: 1, progress: progress)
+        progress(.sorting)
+
+        let scores = gradeResult.scores
+        let kept: [Int]
+        if let count = options.keepCount, count > 0 {
+            kept = topNIndices(scores: scores, count: count)
+        } else {
+            kept = topNIndices(scores: scores, percent: options.keepPercent)
+        }
+        let referenceIndex = scores.argmax()
+
+        _ = total
+
+        // Quality-weight curve (shared across channels — see fix note above).
+        let keptScores = kept.map { scores[$0] }
+        let lo = keptScores.min() ?? 0
+        let hi = keptScores.max() ?? 1
+        let span = max(1e-6, hi - lo)
+        @inline(__always) func qualityWeight(_ score: Float) -> Float {
+            let t = (score - lo) / span
+            let shaped = t * t
+            return 0.05 + shaped * 1.45
+        }
+        var qWeights = [Int: Float]()
+        for idx in kept { qWeights[idx] = qualityWeight(scores[idx]) }
+        let totalWeight = qWeights.values.reduce(0.0) { $0 + Double($1) }
+
+        // 2. Three sequential channel passes — each does its own per-
+        // channel phase correlation against the shared reference frame
+        // (in its own channel-extract space) and accumulates. Phase
+        // correlation re-uses the green-channel luma cache only for
+        // the green pass; R and B re-extract on the fly because their
+        // luma differs from green's (no benefit to cross-channel cache).
+        let greenStack = try await stackChannel(
+            channel: 1,
+            kept: kept,
+            referenceIndex: referenceIndex,
+            quality: qWeights,
+            totalWeight: totalWeight,
+            cachedLumas: gradeResult.lumas,
+            progress: progress
+        )
+        let redStack = try await stackChannel(
+            channel: 0,
+            kept: kept,
+            referenceIndex: referenceIndex,
+            quality: qWeights,
+            totalWeight: totalWeight,
+            cachedLumas: nil,
+            progress: progress
+        )
+        let blueStack = try await stackChannel(
+            channel: 2,
+            kept: kept,
+            referenceIndex: referenceIndex,
+            quality: qWeights,
+            totalWeight: totalWeight,
+            cachedLumas: nil,
+            progress: progress
+        )
 
         progress(.writing)
 
         // Combine: 3 half-res mono-replicated rgba32Float planes →
-        // 1 full-res rgba32Float via bilinear upsample.
+        // 1 full-res rgba32Float. The combine kernel applies per-
+        // channel Bayer-site sampling offsets so R / G / B sample
+        // from raw-coord-aligned half-res positions for every output
+        // pixel, eliminating the 1-raw-pixel R-vs-B diagonal mismatch
+        // the v0 same-coord sampling produced.
         let output = Self.makeOutputFullRes(device: device, w: rawW, h: rawH)
         guard let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() else {
             throw NSError(domain: "LuckyChannel", code: 1)
@@ -281,6 +361,8 @@ private final class LuckyChannelStacker {
         enc.setTexture(greenStack, index: 1)
         enc.setTexture(blueStack,  index: 2)
         enc.setTexture(output,     index: 3)
+        var combineP = LuckyCombineParamsCPU(pattern: bayerPattern)
+        enc.setBytes(&combineP, length: MemoryLayout<LuckyCombineParamsCPU>.stride, index: 0)
         let (tgC, tgS) = dispatchThreadgroups(for: output, pso: combinePSO)
         enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
         enc.endEncoding()
@@ -290,20 +372,26 @@ private final class LuckyChannelStacker {
         return output
     }
 
-    // MARK: - Single-channel run
+    // MARK: - Phase 1: grade green + cache its half-res luma
 
-    /// Full lucky-imaging pipeline for ONE Bayer channel. Returns a
-    /// half-res rgba32Float texture with the channel value in r/g/b/a
-    /// (replicated by the channel-extract kernel and preserved through
-    /// quality-weighted accumulation + per-frame normalisation).
-    private func runChannel(
+    private struct GradeResult {
+        let scores: [Float]
+        let lumas: [Int: [Float]]
+    }
+
+    /// Streams every frame, runs the channel-extract unpack for the
+    /// requested channel (green by default — the best LAPD signal),
+    /// grades it via `quality_partials`, and caches the half-res luma
+    /// for downstream phase correlation. Returns per-frame quality
+    /// scores + the green luma cache. The same buffers feed all three
+    /// channel-stack passes.
+    private func gradeAndCacheLuma(
         channel: UInt32,
         progress: @escaping (LuckyStackProgress) -> Void
-    ) async throws -> MTLTexture {
+    ) async throws -> GradeResult {
         let total = reader.header.frameCount
         let n = options.alignmentResolution
 
-        // ---- Pass 1: grade + cache luma ----
         let grader = LuckyChannelQualityGrader(
             device: device, frameCount: total, w: halfW, h: halfH, pso: qualityPSO
         )
@@ -330,28 +418,9 @@ private final class LuckyChannelStacker {
                 continue
             }
 
-            // Channel-extract unpack into the half-res frame texture.
-            if let enc = cmd.makeComputeCommandEncoder() {
-                let pso = isMono16 ? bayerChan16PSO : bayerChan8PSO
-                enc.setComputePipelineState(pso)
-                let scale: Float = isMono16 ? 1.0 / 65535.0 : 1.0
-                let flip: UInt32 = options.meridianFlipped ? 1 : 0
-                var p = BayerChannelParamsCPU(
-                    scale: scale, flip: flip,
-                    pattern: bayerPattern, channel: channel
-                )
-                enc.setBytes(&p, length: MemoryLayout<BayerChannelParamsCPU>.stride, index: 0)
-                enc.setTexture(staging, index: 0)
-                enc.setTexture(frameTex, index: 1)
-                let (tgC, tgS) = dispatchThreadgroups(for: frameTex, pso: pso)
-                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
-                enc.endEncoding()
-            }
-
-            // Quality grade.
+            encodeChannelUnpack(cmd: cmd, staging: staging, frameTex: frameTex, channel: channel)
             grader.encodeGrade(commandBuffer: cmd, frameTex: frameTex, frameIndex: frameIndex)
 
-            // Cache half-res luma (for phase correlation in pass 2).
             let lumaBuf = device.makeBuffer(
                 length: n * n * MemoryLayout<Float>.size,
                 options: .storageModeShared
@@ -386,45 +455,47 @@ private final class LuckyChannelStacker {
                 progress(.grading(done: frameIndex + 1, total: total))
             }
         }
-        // Drain in-flight slots so grade buffer + luma cache are realised.
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
 
-        progress(.sorting)
-        let scores = grader.computeVariances()
-        let kept: [Int]
-        if let count = options.keepCount, count > 0 {
-            kept = topNIndices(scores: scores, count: count)
-        } else {
-            kept = topNIndices(scores: scores, percent: options.keepPercent)
-        }
+        return GradeResult(scores: grader.computeVariances(), lumas: lumaCache)
+    }
 
-        // ---- Pass 2: phase-correlate kept frames vs best frame ----
-        let referenceIndex = scores.argmax()
+    // MARK: - Phase 2: stack one channel using the shared grading
+
+    /// Aligns and accumulates the kept frames for a single channel,
+    /// using the SHARED `referenceIndex` and `quality` weights.
+    /// `cachedLumas` holds the green-channel luma cache from phase 1
+    /// — passed in for the green run only (re-using saves the second
+    /// extract pass). For R and B the function does its own per-frame
+    /// channel-extract + luma-extract during the align pass since the
+    /// green luma can't be reused (different physical samples).
+    private func stackChannel(
+        channel: UInt32,
+        kept: [Int],
+        referenceIndex: Int,
+        quality: [Int: Float],
+        totalWeight: Double,
+        cachedLumas: [Int: [Float]]?,
+        progress: @escaping (LuckyStackProgress) -> Void
+    ) async throws -> MTLTexture {
+        let n = options.alignmentResolution
         let scaleX = Float(halfW) / Float(n)
         let scaleY = Float(halfH) / Float(n)
 
+        // Phase 2a: gather (or extract) the half-res luma for the
+        // reference frame + every kept frame, on this channel.
         let refLuma: [Float]
-        lumaCacheLock.lock()
-        let cachedRef = lumaCache[referenceIndex]
-        lumaCacheLock.unlock()
-        if let cached = cachedRef {
+        if let cached = cachedLumas?[referenceIndex] {
             refLuma = cached
         } else {
-            // Defensive fallback — if the reference wasn't cached for any
-            // reason, re-extract by reading + unpacking on a fresh
-            // command buffer. Should not fire in practice because
-            // pass 1 caches every frame's luma.
             refLuma = try await extractLumaFromIndex(referenceIndex, channel: channel, n: n)
         }
 
         var lumas: [(idx: Int, data: [Float])] = []
         lumas.reserveCapacity(kept.count)
         for idx in kept {
-            lumaCacheLock.lock()
-            let cached = lumaCache[idx]
-            lumaCacheLock.unlock()
-            if let cached {
+            if let cached = cachedLumas?[idx] {
                 lumas.append((idx, cached))
             } else {
                 let extracted = try await extractLumaFromIndex(idx, channel: channel, n: n)
@@ -432,6 +503,8 @@ private final class LuckyChannelStacker {
             }
         }
 
+        // Phase 2b: phase-correlate every kept frame against the
+        // reference (in this channel's space).
         var shifts = [SIMD2<Float>](repeating: .zero, count: lumas.count)
         shifts.withUnsafeMutableBufferPointer { buf in
             let cpu = SharedCPUFFT(log2n: Int(log2(Double(n))))
@@ -447,21 +520,9 @@ private final class LuckyChannelStacker {
         var shiftMap: [Int: SIMD2<Float>] = [:]
         for (i, item) in lumas.enumerated() { shiftMap[item.idx] = shifts[i] }
 
-        // ---- Pass 3: quality-weighted accumulation ----
+        // Phase 2c: accumulate.
         let accum = Self.makeAccumulator(device: device, w: halfW, h: halfH)
         progress(.stacking(done: 0, total: kept.count))
-
-        // Same shaped quality weighting as the standard runner.
-        let keptScores = kept.map { scores[$0] }
-        let lo = keptScores.min() ?? 0
-        let hi = keptScores.max() ?? 1
-        let span = max(1e-6, hi - lo)
-        var totalWeight: Double = 0
-        @inline(__always) func qualityWeight(_ score: Float) -> Float {
-            let t = (score - lo) / span
-            let shaped = t * t
-            return 0.05 + shaped * 1.45
-        }
 
         for (i, idx) in kept.enumerated() {
             stagingSemaphore.wait()
@@ -483,27 +544,10 @@ private final class LuckyChannelStacker {
                 continue
             }
 
-            // Channel-extract unpack.
-            if let enc = cmd.makeComputeCommandEncoder() {
-                let pso = isMono16 ? bayerChan16PSO : bayerChan8PSO
-                enc.setComputePipelineState(pso)
-                let scale: Float = isMono16 ? 1.0 / 65535.0 : 1.0
-                let flip: UInt32 = options.meridianFlipped ? 1 : 0
-                var p = BayerChannelParamsCPU(
-                    scale: scale, flip: flip,
-                    pattern: bayerPattern, channel: channel
-                )
-                enc.setBytes(&p, length: MemoryLayout<BayerChannelParamsCPU>.stride, index: 0)
-                enc.setTexture(staging, index: 0)
-                enc.setTexture(frameTex, index: 1)
-                let (tgC, tgS) = dispatchThreadgroups(for: frameTex, pso: pso)
-                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
-                enc.endEncoding()
-            }
+            encodeChannelUnpack(cmd: cmd, staging: staging, frameTex: frameTex, channel: channel)
 
-            let weight = qualityWeight(scores[idx])
+            let weight = quality[idx] ?? 0.05
             let shift = shiftMap[idx] ?? SIMD2<Float>(0, 0)
-            totalWeight += Double(weight)
 
             if let enc = cmd.makeComputeCommandEncoder() {
                 enc.setComputePipelineState(accumPSO)
@@ -526,7 +570,9 @@ private final class LuckyChannelStacker {
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
 
-        // Normalize.
+        // Normalize using the SHARED total weight so all three channels
+        // share the same overall scale — preserves white balance across
+        // the recombined output.
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
             enc.setComputePipelineState(normalizePSO)
             enc.setTexture(accum, index: 0)
@@ -540,6 +586,31 @@ private final class LuckyChannelStacker {
         }
 
         return accum
+    }
+
+    /// Encode the channel-extract unpack from `staging` (raw mosaic) →
+    /// `frameTex` (half-res mono-replicated rgba) for a given channel.
+    private func encodeChannelUnpack(
+        cmd: MTLCommandBuffer,
+        staging: MTLTexture,
+        frameTex: MTLTexture,
+        channel: UInt32
+    ) {
+        guard let enc = cmd.makeComputeCommandEncoder() else { return }
+        let pso = isMono16 ? bayerChan16PSO : bayerChan8PSO
+        enc.setComputePipelineState(pso)
+        let scale: Float = isMono16 ? 1.0 / 65535.0 : 1.0
+        let flip: UInt32 = options.meridianFlipped ? 1 : 0
+        var p = BayerChannelParamsCPU(
+            scale: scale, flip: flip,
+            pattern: bayerPattern, channel: channel
+        )
+        enc.setBytes(&p, length: MemoryLayout<BayerChannelParamsCPU>.stride, index: 0)
+        enc.setTexture(staging, index: 0)
+        enc.setTexture(frameTex, index: 1)
+        let (tgC, tgS) = dispatchThreadgroups(for: frameTex, pso: pso)
+        enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+        enc.endEncoding()
     }
 
     /// Cold-path luma extractor. Reads the SER frame, runs the channel-
@@ -630,6 +701,10 @@ private struct LuckyAccumParamsCPU {
 
 private struct LuckyNormalizeParamsCPU {
     var invTotalWeight: Float
+}
+
+private struct LuckyCombineParamsCPU {
+    var pattern: UInt32
 }
 
 // MARK: - Quality grading helper

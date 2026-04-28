@@ -933,22 +933,63 @@ kernel void unpack_bayer8_channel_to_rgba(
 }
 
 /// Combine three half-res mono-replicated stacks (R, G, B) into one
-/// full-res rgba32Float output via bilinear upsample. Reads `.r` from
-/// each input plane (the channel value was replicated into all four
-/// components by the channel-extract kernel and preserved through
-/// quality-weighted accumulation).
+/// full-res rgba32Float output. Reads `.r` from each input plane (the
+/// channel value was replicated into all four components by the
+/// channel-extract kernel and preserved through quality-weighted
+/// accumulation).
 ///
-/// Sampling: the half-res plane represents the 2×2 raw cells. To map
-/// full-res output pixel (x, y) back to half-res space we use
-/// `(x - 0.5) / 2.0` so that the centre of each 2×2 raw cell lands
-/// exactly between half-res samples — this preserves the geometric
-/// alignment of the Bayer mosaic when the result is later blended
-/// with whole-frame deconv / sharpen kernels at full resolution.
+/// **Geometric correctness — per-channel sampling offsets:**
+/// Within every 2×2 Bayer cell, R and B sit at diagonally opposite
+/// corners (1 raw-pixel diagonal apart) and G is split between the
+/// remaining two corners. The channel-extract kernel collapses each
+/// 2×2 cell to ONE half-res pixel, so the half-res value for R at
+/// half-cell (cx, cy) physically came from raw site
+/// (2cx + rOff.x, 2cy + rOff.y) while B's half-res pixel (cx, cy)
+/// physically came from raw site (2cx + 1 - rOff.x, 2cy + 1 - rOff.y),
+/// and G's averaged centre sits at raw (2cx + 0.5, 2cy + 0.5).
+///
+/// If we sample all three channels at the same half-res coordinate
+/// for a given full-res output pixel (the v0 bug), R from raw (0,0)
+/// gets combined with B from raw (1,1) at output pixel (0,0) → a
+/// 1-pixel diagonal mismatch between R and B that shows as visible
+/// color fringing. Fix: each channel uses a different sub-pixel
+/// sampling offset so that for every full-res output pixel (x, y),
+/// the sampled R value comes from the same raw-coord neighbourhood
+/// as the sampled B value.
+///
+/// For Bayer pattern with R offset `rOff` (0..1, 0..1), full-res
+/// output (x, y) maps to half-res lookups at:
+///   R   : (x - rOff.x,           y - rOff.y          ) / 2
+///   B   : (x - (1 - rOff.x),     y - (1 - rOff.y)    ) / 2
+///   G   : (x - 0.5,              y - 0.5             ) / 2
+struct LuckyCombineParams {
+    uint pattern;   // 0..3, RGGB/GRBG/GBRG/BGGR
+};
+
+inline float sample_bilinear_half(
+    texture2d<float, access::read> tex,
+    float2 fx,
+    int halfW, int halfH
+) {
+    int x0 = clamp(int(floor(fx.x)), 0, halfW - 1);
+    int y0 = clamp(int(floor(fx.y)), 0, halfH - 1);
+    int x1 = clamp(x0 + 1,           0, halfW - 1);
+    int y1 = clamp(y0 + 1,           0, halfH - 1);
+    float wx = clamp(fx.x - float(x0), 0.0, 1.0);
+    float wy = clamp(fx.y - float(y0), 0.0, 1.0);
+    float v00 = tex.read(uint2(x0, y0)).r;
+    float v10 = tex.read(uint2(x1, y0)).r;
+    float v01 = tex.read(uint2(x0, y1)).r;
+    float v11 = tex.read(uint2(x1, y1)).r;
+    return mix(mix(v00, v10, wx), mix(v01, v11, wx), wy);
+}
+
 kernel void lucky_combine_channel_planes(
     texture2d<float, access::read>  redPlane   [[texture(0)]],
     texture2d<float, access::read>  greenPlane [[texture(1)]],
     texture2d<float, access::read>  bluePlane  [[texture(2)]],
     texture2d<float, access::write> dst        [[texture(3)]],
+    constant LuckyCombineParams& p [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
@@ -956,33 +997,22 @@ kernel void lucky_combine_channel_planes(
     int halfW = int(redPlane.get_width());
     int halfH = int(redPlane.get_height());
 
-    // Centre-aligned half-res lookup (sub-pixel coords in half-res space).
-    float fx = (float(gid.x) - 0.5) * 0.5;
-    float fy = (float(gid.y) - 0.5) * 0.5;
+    float rOffX = float(p.pattern & 1u);
+    float rOffY = float((p.pattern >> 1) & 1u);
 
-    int x0 = clamp(int(floor(fx)), 0, halfW - 1);
-    int y0 = clamp(int(floor(fy)), 0, halfH - 1);
-    int x1 = clamp(x0 + 1,         0, halfW - 1);
-    int y1 = clamp(y0 + 1,         0, halfH - 1);
-    float wx = clamp(fx - float(x0), 0.0, 1.0);
-    float wy = clamp(fy - float(y0), 0.0, 1.0);
+    float fx = float(gid.x);
+    float fy = float(gid.y);
 
-    float r00 = redPlane  .read(uint2(x0, y0)).r;
-    float r10 = redPlane  .read(uint2(x1, y0)).r;
-    float r01 = redPlane  .read(uint2(x0, y1)).r;
-    float r11 = redPlane  .read(uint2(x1, y1)).r;
-    float g00 = greenPlane.read(uint2(x0, y0)).r;
-    float g10 = greenPlane.read(uint2(x1, y0)).r;
-    float g01 = greenPlane.read(uint2(x0, y1)).r;
-    float g11 = greenPlane.read(uint2(x1, y1)).r;
-    float b00 = bluePlane .read(uint2(x0, y0)).r;
-    float b10 = bluePlane .read(uint2(x1, y0)).r;
-    float b01 = bluePlane .read(uint2(x0, y1)).r;
-    float b11 = bluePlane .read(uint2(x1, y1)).r;
+    // R sampled where R's source sites live (rOffX, rOffY within each cell).
+    float2 fxR = float2((fx - rOffX) * 0.5, (fy - rOffY) * 0.5);
+    // B sampled at the diagonally-opposite corner.
+    float2 fxB = float2((fx - (1.0 - rOffX)) * 0.5, (fy - (1.0 - rOffY)) * 0.5);
+    // G sampled at the cell-centre (the average of the two G sites).
+    float2 fxG = float2((fx - 0.5) * 0.5, (fy - 0.5) * 0.5);
 
-    float r = mix(mix(r00, r10, wx), mix(r01, r11, wx), wy);
-    float g = mix(mix(g00, g10, wx), mix(g01, g11, wx), wy);
-    float b = mix(mix(b00, b10, wx), mix(b01, b11, wx), wy);
+    float r = sample_bilinear_half(redPlane,   fxR, halfW, halfH);
+    float g = sample_bilinear_half(greenPlane, fxG, halfW, halfH);
+    float b = sample_bilinear_half(bluePlane,  fxB, halfW, halfH);
 
     dst.write(float4(r, g, b, 1.0), gid);
 }
