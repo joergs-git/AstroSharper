@@ -564,6 +564,29 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         }
         let sharpen = app.sharpen
         let tone = app.toneCurve
+
+        // Identity short-circuit at the call site too — when the user has
+        // nothing turned on, don't kick a background pipeline pass at all.
+        // The display falls back to `beforeTex` when `afterTex` is nil,
+        // which is exactly the unmodified raw frame the user wants to see
+        // when no panel is active. Match the engine-side guard in
+        // Pipeline.process so adding new pipeline steps stays in sync.
+        let bcIsIdentity = abs(tone.brightness) < 1e-4 && abs(tone.contrast - 1.0) < 1e-4
+        let satIsIdentity = abs(tone.saturation - 1.0) < 1e-4
+        let toneCurveActive = tone.enabled && !tone.controlPoints.isEmpty
+            && (tone.controlPoints.count > 2
+                || tone.controlPoints.first != .zero
+                || tone.controlPoints.last != CGPoint(x: 1, y: 1))
+        let nothingActive = !tone.autoWB
+            && !tone.chromaticAlignment
+            && !sharpen.enabled
+            && (!tone.enabled || (!toneCurveActive && bcIsIdentity && satIsIdentity))
+        if nothingActive {
+            afterTex = nil
+            view?.needsDisplay = true
+            return
+        }
+
         let lut = ensureLUT(for: tone)
         inFlight = true
 

@@ -292,13 +292,13 @@ struct ToneCurveSettings: Equatable, Codable {
     /// Auto-white-balance (gray-world) applied at the START of the post-
     /// stack pipeline, BEFORE any sharpening. Independent of `enabled` —
     /// this fires whenever the toggle is on, regardless of whether the
-    /// tone-curve sub-step is active. Default ON because OSC stacks
-    /// otherwise come out with a green cast that surfaces visibly the
-    /// moment saturation > 1 (Bayer-green has 2× the photosite count of
-    /// red/blue, so its mean is consistently higher post-stack).
-    /// On mono / pre-balanced sources the gray-world correction collapses
-    /// to identity because all three channels share the same statistics.
-    var autoWB: Bool = true
+    /// tone-curve sub-step is active. Default OFF: with nothing else
+    /// enabled the user expects an unmodified view of the raw frame, and
+    /// the previous default-on caused a visible blink as the WB readback
+    /// + GPU pass completed after each file load. OSC users still need
+    /// it — turn it on when stacking finishes (or before saturation > 1)
+    /// to neutralise the green cast Bayer demosaic produces.
+    var autoWB: Bool = false
 
     /// Atmospheric chromatic dispersion correction. Phase-correlates R
     /// and B against G on the stacked output, applies the resulting
@@ -323,7 +323,7 @@ struct ToneCurveSettings: Equatable, Codable {
             CGPoint(x: 1.0, y: 1.0),
         ]
         self.saturation         = try c.decodeIfPresent(Double.self, forKey: .saturation)         ?? 1.0
-        self.autoWB             = try c.decodeIfPresent(Bool.self,   forKey: .autoWB)             ?? true
+        self.autoWB             = try c.decodeIfPresent(Bool.self,   forKey: .autoWB)             ?? false
         self.chromaticAlignment = try c.decodeIfPresent(Bool.self,   forKey: .chromaticAlignment) ?? false
         self.brightness         = try c.decodeIfPresent(Double.self, forKey: .brightness)         ?? 0.0
         self.contrast           = try c.decodeIfPresent(Double.self, forKey: .contrast)           ?? 1.0
@@ -337,7 +337,7 @@ struct ToneCurveSettings: Equatable, Codable {
             CGPoint(x: 1.0, y: 1.0),
         ],
         saturation: Double = 1.0,
-        autoWB: Bool = true,
+        autoWB: Bool = false,
         chromaticAlignment: Bool = false,
         brightness: Double = 0.0,
         contrast: Double = 1.0

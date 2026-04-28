@@ -91,6 +91,18 @@ final class Pipeline {
         let w = input.width
         let h = input.height
 
+        // Identity short-circuit: when nothing in the pipeline is enabled,
+        // skip the entire alloc + GPU dispatch and just hand back a copy
+        // of the input. Live preview hits this every file scrub when the
+        // user has no panels active; without the early return the user
+        // saw a brief 'blink' as Pipeline.process completed and replaced
+        // the freshly-painted raw frame with a re-drawn-equal copy.
+        let bcIsIdentity = abs(toneCurve.brightness) < 1e-4 && abs(toneCurve.contrast - 1.0) < 1e-4
+        let satIsIdentity = abs(toneCurve.saturation - 1.0) < 1e-4
+        let nothingActive = !toneCurve.autoWB
+            && !toneCurve.chromaticAlignment
+            && !sharpen.enabled
+            && (!toneCurve.enabled || (toneCurveLUT == nil && bcIsIdentity && satIsIdentity))
         // Allocate a persistent output — not from pool, caller owns.
         let outDesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: input.pixelFormat, width: w, height: h, mipmapped: false
@@ -98,6 +110,10 @@ final class Pipeline {
         outDesc.usage = [.shaderRead, .shaderWrite, .renderTarget]
         outDesc.storageMode = .private
         let output = device.makeTexture(descriptor: outDesc)!
+
+        if nothingActive {
+            return copyTexture(input, into: output)
+        }
 
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return copyTexture(input, into: output) }
 
@@ -272,8 +288,8 @@ final class Pipeline {
         // (fires whenever the values aren't identity, regardless of the
         // curve toggle). Runs AFTER the curve so it operates on the
         // user's curve-mapped values, BEFORE saturation so saturation
-        // sees the final luminance the user dialled in.
-        let bcIsIdentity = abs(toneCurve.brightness) < 1e-4 && abs(toneCurve.contrast - 1.0) < 1e-4
+        // sees the final luminance the user dialled in. (`bcIsIdentity`
+        // is computed earlier as part of the nothing-active guard.)
         if toneCurve.enabled, !bcIsIdentity {
             let result = borrow(width: w, height: h, format: input.pixelFormat)
             borrowed.append(result)
