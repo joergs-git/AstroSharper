@@ -193,6 +193,90 @@ struct LuckyStackSection: View {
                     }
                 }
 
+                // Per-channel stacking (Path B). Bayer-only — mono SER
+                // captures ignore the flag and use the standard runner.
+                HStack(spacing: 4) {
+                    Toggle("Per-channel (Path B)", isOn: $app.luckyStack.perChannelStacking)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                .help("Path B: split Bayer SER into R/G/B planes, align + stack each independently, recombine. Catches per-frame chromatic dispersion. Bayer captures only — mono SER ignored. ~3× runtime cost.")
+
+                // Auto-PSF post-pass (Block C.1 v0).
+                HStack(spacing: 4) {
+                    Toggle("Auto-PSF + Wiener", isOn: $app.luckyStack.autoPSF)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                    if app.luckyStack.autoPSF {
+                        Spacer()
+                        Text("SNR")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                        Text("\(Int(app.luckyStack.autoPSFSNR))")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .help("Estimates Gaussian PSF sigma from the planetary limb and applies Wiener deconvolution. Skipped silently if no clear disc edge is present in the stacked output. Use lower SNR (~30) for aggressive sharpening, higher (~100) for soft results on noisy data.")
+
+                if app.luckyStack.autoPSF {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("Wiener SNR").font(.caption)
+                            Spacer()
+                            Text("\(Int(app.luckyStack.autoPSFSNR))")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(
+                            value: $app.luckyStack.autoPSFSNR,
+                            in: 20...200, step: 10
+                        )
+                        .controlSize(.small)
+                    }
+
+                    // Block C.5 dual-stage denoise — visible only when
+                    // auto-PSF is on, since the engine ignores these
+                    // values otherwise.
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("Denoise (PSF estimate)").font(.caption)
+                            Spacer()
+                            Text("\(app.luckyStack.denoisePrePercent)%")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(
+                            value: Binding(
+                                get: { Double(app.luckyStack.denoisePrePercent) },
+                                set: { app.luckyStack.denoisePrePercent = Int($0) }
+                            ),
+                            in: 0...100, step: 5
+                        )
+                        .controlSize(.small)
+                    }
+                    .help("Wavelet soft-threshold applied before the PSF estimate + Wiener deconv. Cleans up the LSF measurement and prevents the inverse filter from amplifying noise. BiggSky-typical 75. Set to 0 for clean low-noise SERs.")
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("Denoise (After restore)").font(.caption)
+                            Spacer()
+                            Text("\(app.luckyStack.denoisePostPercent)%")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(
+                            value: Binding(
+                                get: { Double(app.luckyStack.denoisePostPercent) },
+                                set: { app.luckyStack.denoisePostPercent = Int($0) }
+                            ),
+                            in: 0...100, step: 5
+                        )
+                        .controlSize(.small)
+                    }
+                    .help("Wavelet soft-threshold applied after the Wiener restore. Suppresses residual ringing and amplified noise from the deconvolution. BiggSky-typical 75. Set to 1 for low-noise sources.")
+                }
+
                 Picker("Filename", selection: $app.luckyStack.filenameMode) {
                     ForEach(LuckyStackFilenameMode.allCases) { m in
                         Text(m.rawValue).tag(m)

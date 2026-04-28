@@ -43,6 +43,8 @@ enum Stack {
         var usePerChannelStacking = false
         var useAutoPSF = false
         var autoPSFSNR: Double = 50
+        var denoisePrePercent: Int = 0
+        var denoisePostPercent: Int = 0
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -220,6 +222,28 @@ enum Stack {
                 }
                 autoPSFSNR = v
                 i += 2
+            case "--denoise-pre":
+                // C.5 dual-stage denoise — strength [0, 100] applied
+                // BEFORE the auto-PSF estimate + Wiener deconv.
+                guard i + 1 < args.count, let v = Int(args[i + 1]),
+                      v >= 0, v <= 100
+                else {
+                    cliStderr("stack: --denoise-pre requires an integer in [0, 100] (BiggSky default 75)")
+                    return 64
+                }
+                denoisePrePercent = v
+                i += 2
+            case "--denoise-post":
+                // C.5 dual-stage denoise — strength [0, 100] applied
+                // AFTER the Wiener restore (cleans up amplified noise).
+                guard i + 1 < args.count, let v = Int(args[i + 1]),
+                      v >= 0, v <= 100
+                else {
+                    cliStderr("stack: --denoise-post requires an integer in [0, 100] (BiggSky default 75)")
+                    return 64
+                }
+                denoisePostPercent = v
+                i += 2
             case "--keep-count":
                 // Absolute frame count override (e.g. --keep-count 1 to
                 // stack the single best-quality frame, no averaging).
@@ -325,6 +349,10 @@ enum Stack {
             // 'stacking averages'.
             if let kc = keepCountAbsolute { options.keepCount = kc }
             options.perChannelStacking = usePerChannelStacking
+            options.useAutoPSF = useAutoPSF
+            options.autoPSFSNR = autoPSFSNR
+            options.denoisePrePercent = denoisePrePercent
+            options.denoisePostPercent = denoisePostPercent
             options.sigmaThreshold = sigmaThreshold
             options.drizzleScale = drizzleScale
             options.drizzlePixfrac = drizzlePixfrac
@@ -378,58 +406,6 @@ enum Stack {
                         Self.printProgress(progress)
                     }
                 }
-                // --auto-psf post-pass: load the bare stack, estimate
-                // sigma from the limb LSF, apply Wiener deconv with the
-                // estimated sigma. Runs OUTSIDE the bake-in so its
-                // contract is "post-process the stacked file" — same
-                // shape the GUI 'apply ALL stuff' flow will eventually
-                // call into.
-                if useAutoPSF {
-                    let device = MetalDevice.shared.device
-                    do {
-                        let baseTex = try ImageTexture.load(url: resultURL, device: device)
-                        if let psf = AutoPSF.estimate(texture: baseTex, device: device) {
-                            if !quiet {
-                                cliStderr(String(format:
-                                    "stack: auto-PSF sigma=%.2f px (confidence %.2f, disc r=%.0f at %.0f,%.0f)",
-                                    psf.sigma, psf.confidence, psf.discRadius,
-                                    psf.discCenter.x, psf.discCenter.y))
-                            }
-                            // Apply Wiener with the estimated sigma. Out-of-
-                            // place into a fresh texture, then re-write to
-                            // the same output URL. Confidence below 2.0
-                            // means the fit didn't lock onto a clean limb
-                            // — log a warning but still attempt deconv at
-                            // the (clamped) estimated value rather than
-                            // silently skip.
-                            if psf.confidence < 2.0, !quiet {
-                                cliStderr("stack: auto-PSF confidence is low (<2.0) — disc edge wasn't clean; result may be over- or under-sharpened")
-                            }
-                            let outDesc = MTLTextureDescriptor.texture2DDescriptor(
-                                pixelFormat: baseTex.pixelFormat,
-                                width: baseTex.width, height: baseTex.height,
-                                mipmapped: false
-                            )
-                            outDesc.storageMode = .private
-                            outDesc.usage = [.shaderRead, .shaderWrite]
-                            if let deconvTex = device.makeTexture(descriptor: outDesc) {
-                                Wiener.deconvolve(
-                                    input: baseTex,
-                                    output: deconvTex,
-                                    sigma: psf.sigma,
-                                    snr: Float(autoPSFSNR),
-                                    device: device
-                                )
-                                try ImageTexture.write(texture: deconvTex, to: resultURL)
-                            }
-                        } else if !quiet {
-                            cliStderr("stack: auto-PSF estimation failed (no clear disc found) — skipping deconv")
-                        }
-                    } catch {
-                        cliStderr("stack: auto-PSF post-pass failed: \(error.localizedDescription)")
-                    }
-                }
-
                 let elapsed = Date().timeIntervalSince(started)
                 let outputBytes = (
                     (try? FileManager.default.attributesOfItem(atPath: resultURL.path))?[.size] as? Int

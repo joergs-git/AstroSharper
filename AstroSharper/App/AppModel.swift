@@ -1082,6 +1082,11 @@ final class AppModel: ObservableObject {
         perItemOpts.useMultiAP = (luckyStack.mode == .scientific) && luckyStack.multiAP.enabled
         perItemOpts.multiAPGrid = luckyStack.multiAP.grid
         perItemOpts.multiAPSearch = max(4, min(16, luckyStack.multiAP.patchHalf))
+        perItemOpts.perChannelStacking = luckyStack.perChannelStacking
+        perItemOpts.useAutoPSF = luckyStack.autoPSF
+        perItemOpts.autoPSFSNR = luckyStack.autoPSFSNR
+        perItemOpts.denoisePrePercent = luckyStack.denoisePrePercent
+        perItemOpts.denoisePostPercent = luckyStack.denoisePostPercent
 
         if luckyStack.bakeInProcessing {
             let lut: MTLTexture? = toneCurve.enabled
@@ -1675,6 +1680,33 @@ struct LuckyStackUIState {
     /// Optional target tag used to fill the WinJUPOS `<obj>` field. Defaults
     /// to whatever is in the active preset's target if any.
     var winjuposTarget: String = "Sun"
+
+    /// Per-channel stacking (Path B). On Bayer captures, splits the
+    /// SER into independent R/G/B channel planes, aligns + stacks
+    /// each one separately against a shared reference, then
+    /// recombines via a Bayer-pattern-aware bilinear upsample.
+    /// Mono SER captures ignore this flag. ~3× runtime cost.
+    var perChannelStacking: Bool = false
+
+    /// Auto-PSF post-pass (Block C.1 v0). When ON, after the bake-in
+    /// runs, the engine estimates Gaussian PSF sigma from the
+    /// planetary limb's line-spread function and applies Wiener
+    /// deconvolution with the estimated sigma. Works on planetary
+    /// captures (lunar/solar/Jupiter/Saturn/Mars/Venus); skipped
+    /// silently if no clear limb is found in the stacked output.
+    var autoPSF: Bool = false
+    /// Wiener SNR for the auto-PSF post-pass. 50 = balanced default,
+    /// 30 = aggressive (rings on bright planets), 100 = soft (gentle
+    /// on noisy data).
+    var autoPSFSNR: Double = 50
+
+    /// Dual-stage denoise around the auto-PSF + Wiener path (Block C.5).
+    /// 0..100. Pre-denoise wraps the input before PSF estimation +
+    /// deconv (cleaner LSF, less noise amplification). Post-denoise
+    /// runs after Wiener restore (suppresses residual ringing). Both
+    /// only fire when `autoPSF == true`.
+    var denoisePrePercent: Int = 0
+    var denoisePostPercent: Int = 0
 }
 
 enum LuckyStackNaming {

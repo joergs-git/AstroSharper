@@ -150,6 +150,41 @@ struct LuckyStackOptions {
     ///
     /// Mono SER captures ignore this flag.
     var perChannelStacking: Bool = false
+
+    /// Auto-PSF post-pass (Block C.1 v0). After the stack writes, the
+    /// engine estimates Gaussian PSF sigma from the planetary limb's
+    /// line-spread function and runs Wiener deconvolution with the
+    /// estimated sigma. Applies AFTER the bake-in (so unsharp +
+    /// wavelet inside bake-in run first, then the deconv pass on the
+    /// already-cooked output). Set `autoPSFSNR` to control Wiener
+    /// regularisation (50 = balanced, 30 = aggressive, 100 = soft).
+    ///
+    /// Mutually exclusive with `bakeIn.sharpen.wienerEnabled` /
+    /// `bakeIn.sharpen.lrEnabled` — the auto-PSF path provides its
+    /// own deconv with the auto-estimated sigma, so passing manual
+    /// sigmas in bake-in alongside this flag would deconvolve twice.
+    /// `LuckyStack.run` enforces this by running auto-PSF only when
+    /// `useAutoPSF == true`.
+    var useAutoPSF: Bool = false
+    var autoPSFSNR: Double = 50
+
+    /// Dual-stage denoise around the auto-PSF + Wiener path (Block C.5).
+    /// Pre-denoise (default 0 = off) wraps the input BEFORE PSF
+    /// estimation + deconvolution — suppresses noise so the limb
+    /// LSF measurement is cleaner and the deconv inverse filter
+    /// doesn't amplify noise. Post-denoise (default 0 = off) cleans
+    /// up residual ringing AFTER the Wiener restore.
+    ///
+    /// Both are wavelet soft-threshold (perfect-reconstruction
+    /// pyramid with per-band thresholding). 0..100 maps linearly
+    /// to wavelet noise threshold ∈ [0, 0.025] — same scale as
+    /// the existing manual wavelet denoise. Typical values:
+    ///   75 / 75  : strong dual-stage (BiggSky default)
+    ///    0 /  1  : low-noise SER (clean dataset)
+    ///   50 / 30  : balanced
+    /// Only fires when `useAutoPSF == true`.
+    var denoisePrePercent: Int = 0
+    var denoisePostPercent: Int = 0
 }
 
 enum LuckyStackProgress {
@@ -164,6 +199,53 @@ enum LuckyStackProgress {
 }
 
 enum LuckyStack {
+
+    /// Wavelet-based denoise wrapper used by the dual-stage path
+    /// around the auto-PSF + Wiener pipeline (Block C.5). Calls
+    /// `Wavelet.sharpen` with amounts = [1, 1, 1, 1, 1, 1] (perfect
+    /// reconstruction — no actual sharpening) and a per-band
+    /// soft-threshold scaled from the user's 0..100 percent. The
+    /// existing wavelet engine already implements per-band
+    /// thresholding that decays with band index (finest scales =
+    /// most denoised), so this wrapper is just a convenient
+    /// "denoise only" entry point.
+    ///
+    /// Threshold mapping: percent / 100 × 0.025 — same upper end
+    /// as the manual `sharpen.waveletNoiseThreshold` slider in the
+    /// SettingsPanel, so 100% here is "as strong as the user can
+    /// already dial in by hand".
+    static func denoiseTexture(
+        input: MTLTexture,
+        percent: Int,
+        pipeline: Pipeline,
+        device: MTLDevice
+    ) -> MTLTexture? {
+        guard percent > 0 else { return input }
+        let queue = MetalDevice.shared.commandQueue
+        guard let cmd = queue.makeCommandBuffer() else { return nil }
+        let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: input.pixelFormat,
+            width: input.width, height: input.height,
+            mipmapped: false
+        )
+        outDesc.storageMode = .private
+        outDesc.usage = [.shaderRead, .shaderWrite]
+        guard let output = device.makeTexture(descriptor: outDesc) else { return nil }
+        var borrowed: [MTLTexture] = []
+        let strength: Float = Float(min(100, max(0, percent))) / 100.0
+        Wavelet.sharpen(
+            input: input, output: output,
+            amounts: [1, 1, 1, 1, 1, 1],   // perfect reconstruction
+            baseSigma: 1.0,
+            noiseThreshold: strength * 0.025,
+            pipeline: pipeline,
+            commandBuffer: cmd,
+            borrowed: &borrowed
+        )
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        return output
+    }
 
     static func run(
         sourceURL: URL,
@@ -220,7 +302,7 @@ enum LuckyStack {
                 // Optional bake-in: route the stacked texture through the
                 // user's current sharpen + tone pipeline before writing so
                 // the saved file matches the live preview.
-                let final: MTLTexture
+                var final: MTLTexture
                 if let bake = options.bakeIn {
                     final = pipeline.process(
                         input: stacked,
@@ -231,6 +313,65 @@ enum LuckyStack {
                 } else {
                     final = stacked
                 }
+
+                // Auto-PSF post-pass (Block C.1 v0): estimate σ from the
+                // limb LSF and apply Wiener deconv. Wrapped by dual-
+                // stage denoise (Block C.5) — pre-denoise improves the
+                // PSF-estimation LSF + the deconv input; post-denoise
+                // suppresses ringing in the Wiener restore. Single code
+                // path for GUI and CLI; both just set the options.
+                if options.useAutoPSF {
+                    let device = MetalDevice.shared.device
+
+                    // Stage 1: pre-denoise (Block C.5 first half).
+                    if options.denoisePrePercent > 0 {
+                        if let denoised = Self.denoiseTexture(
+                            input: final,
+                            percent: options.denoisePrePercent,
+                            pipeline: pipeline,
+                            device: device
+                        ) {
+                            final = denoised
+                        }
+                    }
+
+                    // Stage 2: PSF estimate + Wiener deconvolution.
+                    if let psf = AutoPSF.estimate(texture: final, device: device) {
+                        let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+                            pixelFormat: final.pixelFormat,
+                            width: final.width, height: final.height,
+                            mipmapped: false
+                        )
+                        outDesc.storageMode = .private
+                        outDesc.usage = [.shaderRead, .shaderWrite]
+                        if let deconvTex = device.makeTexture(descriptor: outDesc) {
+                            Wiener.deconvolve(
+                                input: final,
+                                output: deconvTex,
+                                sigma: psf.sigma,
+                                snr: Float(options.autoPSFSNR),
+                                device: device
+                            )
+                            final = deconvTex
+                        }
+                    }
+                    // Estimation failure: fall through with the bake-in
+                    // result. Better to write a stack-without-deconv
+                    // than to fail the whole job.
+
+                    // Stage 3: post-denoise (Block C.5 second half).
+                    if options.denoisePostPercent > 0 {
+                        if let denoised = Self.denoiseTexture(
+                            input: final,
+                            percent: options.denoisePostPercent,
+                            pipeline: pipeline,
+                            device: device
+                        ) {
+                            final = denoised
+                        }
+                    }
+                }
+
                 try ImageTexture.write(texture: final, to: outputURL)
                 await onProgress(.finished(outputURL))
             } catch {
