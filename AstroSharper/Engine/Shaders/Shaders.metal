@@ -798,6 +798,195 @@ kernel void unpack_bayer8_to_rgba(
     dst.write(float4(rgb, 1.0), gid);
 }
 
+// MARK: - Bayer single-channel extraction (Path B per-channel stacking)
+//
+// Each kernel emits a half-resolution (W/2 × H/2) plane containing TRUE
+// MEASURED pixels for one of R / G / B — no demosaic interpolation. The
+// extracted scalar is replicated into r/g/b/a so the existing rgba*Float
+// pipeline (quality grader, phase correlator, accumulator) operates on
+// these planes without modification: every kernel reads `.r` / `.rgb`
+// and gets the same value.
+//
+// Pattern decoding (mirrors malvar_demosaic_*):
+//   pattern bit 0 → R column offset within 2×2 cell
+//   pattern bit 1 → R row    offset within 2×2 cell
+// → R site coords: (rOff.x,        rOff.y)
+//   B site coords: (1-rOff.x,      1-rOff.y)
+//   G sites      : (1-rOff.x, rOff.y) and (rOff.x, 1-rOff.y)
+//
+// Per output (gid.x, gid.y) covering the half-res plane, we work inside
+// the 2×2 source cell starting at (2·gid.x, 2·gid.y). Source addresses
+// are clamped at the edge to avoid out-of-bounds reads on odd-sized
+// captures. G output averages the two G sites of the 2×2 cell — the
+// classic AS!4 / BiggSky convention so the signal stays balanced across
+// frames without splitting Gr/Gb into separate channels.
+//
+// `channel` parameter: 0 = R, 1 = G, 2 = B.
+
+struct BayerChannelParams {
+    float scale;       // 1/65535 for u16, 1.0 for u8
+    uint  flip;        // mirror raw frame 180° (meridian flip)
+    uint  pattern;     // 0..3, RGGB/GRBG/GBRG/BGGR
+    uint  channel;     // 0 = R, 1 = G, 2 = B
+};
+
+/// Map (cell-x, cell-y) → raw source coords for the requested channel.
+/// `cellSize` is the W,H of the raw mosaic in 2×2 cells (= dst size).
+inline int2 bayer_channel_site_u(
+    int2 cell,
+    uint pattern,
+    uint channel,
+    int cellSize_x,       // dst.width
+    int cellSize_y,       // dst.height
+    int srcW,
+    int srcH,
+    int gIdx              // 0 or 1 — which of the two G sites
+) {
+    int2 rOff = int2(int(pattern & 1u), int((pattern >> 1) & 1u));
+    int2 cellOrigin = cell * 2;
+    int2 site;
+    if (channel == 0u) {
+        site = cellOrigin + rOff;
+    } else if (channel == 2u) {
+        site = cellOrigin + int2(1 - rOff.x, 1 - rOff.y);
+    } else {
+        // G has two sites in each cell. gIdx = 0 → (1-rOff.x, rOff.y)
+        // (the same row as R), gIdx = 1 → (rOff.x, 1-rOff.y).
+        site = (gIdx == 0)
+            ? cellOrigin + int2(1 - rOff.x, rOff.y)
+            : cellOrigin + int2(rOff.x, 1 - rOff.y);
+    }
+    site.x = clamp(site.x, 0, srcW - 1);
+    site.y = clamp(site.y, 0, srcH - 1);
+    return site;
+}
+
+/// 16-bit Bayer source → half-res mono-replicated rgba32Float channel plane.
+kernel void unpack_bayer16_channel_to_rgba(
+    texture2d<uint,  access::read>  src [[texture(0)]],
+    texture2d<float, access::write> dst [[texture(1)]],
+    constant BayerChannelParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+
+    int srcW = int(src.get_width());
+    int srcH = int(src.get_height());
+    int dstW = int(dst.get_width());
+    int dstH = int(dst.get_height());
+
+    // Meridian flip applies to the raw cell coordinate. Each half-res
+    // output cell maps to a 2×2 source cell, so flipping (cellX, cellY)
+    // → (dstW-1-cellX, dstH-1-cellY) preserves Bayer phase.
+    int2 cell = int2(gid);
+    if (p.flip != 0u) {
+        cell = int2(dstW - 1 - cell.x, dstH - 1 - cell.y);
+    }
+
+    float v;
+    if (p.channel == 1u) {
+        int2 g0 = bayer_channel_site_u(cell, p.pattern, 1u, dstW, dstH, srcW, srcH, 0);
+        int2 g1 = bayer_channel_site_u(cell, p.pattern, 1u, dstW, dstH, srcW, srcH, 1);
+        float v0 = float(src.read(uint2(g0)).r) * p.scale;
+        float v1 = float(src.read(uint2(g1)).r) * p.scale;
+        v = 0.5 * (v0 + v1);
+    } else {
+        int2 site = bayer_channel_site_u(cell, p.pattern, p.channel, dstW, dstH, srcW, srcH, 0);
+        v = float(src.read(uint2(site)).r) * p.scale;
+    }
+
+    dst.write(float4(v, v, v, 1.0), gid);
+}
+
+/// 8-bit Bayer source → half-res mono-replicated rgba32Float channel plane.
+kernel void unpack_bayer8_channel_to_rgba(
+    texture2d<float, access::read>  src [[texture(0)]],
+    texture2d<float, access::write> dst [[texture(1)]],
+    constant BayerChannelParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+
+    int srcW = int(src.get_width());
+    int srcH = int(src.get_height());
+    int dstW = int(dst.get_width());
+    int dstH = int(dst.get_height());
+
+    int2 cell = int2(gid);
+    if (p.flip != 0u) {
+        cell = int2(dstW - 1 - cell.x, dstH - 1 - cell.y);
+    }
+
+    float v;
+    if (p.channel == 1u) {
+        int2 g0 = bayer_channel_site_u(cell, p.pattern, 1u, dstW, dstH, srcW, srcH, 0);
+        int2 g1 = bayer_channel_site_u(cell, p.pattern, 1u, dstW, dstH, srcW, srcH, 1);
+        float v0 = src.read(uint2(g0)).r;
+        float v1 = src.read(uint2(g1)).r;
+        v = 0.5 * (v0 + v1);
+    } else {
+        int2 site = bayer_channel_site_u(cell, p.pattern, p.channel, dstW, dstH, srcW, srcH, 0);
+        v = src.read(uint2(site)).r;
+    }
+
+    dst.write(float4(v, v, v, 1.0), gid);
+}
+
+/// Combine three half-res mono-replicated stacks (R, G, B) into one
+/// full-res rgba32Float output via bilinear upsample. Reads `.r` from
+/// each input plane (the channel value was replicated into all four
+/// components by the channel-extract kernel and preserved through
+/// quality-weighted accumulation).
+///
+/// Sampling: the half-res plane represents the 2×2 raw cells. To map
+/// full-res output pixel (x, y) back to half-res space we use
+/// `(x - 0.5) / 2.0` so that the centre of each 2×2 raw cell lands
+/// exactly between half-res samples — this preserves the geometric
+/// alignment of the Bayer mosaic when the result is later blended
+/// with whole-frame deconv / sharpen kernels at full resolution.
+kernel void lucky_combine_channel_planes(
+    texture2d<float, access::read>  redPlane   [[texture(0)]],
+    texture2d<float, access::read>  greenPlane [[texture(1)]],
+    texture2d<float, access::read>  bluePlane  [[texture(2)]],
+    texture2d<float, access::write> dst        [[texture(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+
+    int halfW = int(redPlane.get_width());
+    int halfH = int(redPlane.get_height());
+
+    // Centre-aligned half-res lookup (sub-pixel coords in half-res space).
+    float fx = (float(gid.x) - 0.5) * 0.5;
+    float fy = (float(gid.y) - 0.5) * 0.5;
+
+    int x0 = clamp(int(floor(fx)), 0, halfW - 1);
+    int y0 = clamp(int(floor(fy)), 0, halfH - 1);
+    int x1 = clamp(x0 + 1,         0, halfW - 1);
+    int y1 = clamp(y0 + 1,         0, halfH - 1);
+    float wx = clamp(fx - float(x0), 0.0, 1.0);
+    float wy = clamp(fy - float(y0), 0.0, 1.0);
+
+    float r00 = redPlane  .read(uint2(x0, y0)).r;
+    float r10 = redPlane  .read(uint2(x1, y0)).r;
+    float r01 = redPlane  .read(uint2(x0, y1)).r;
+    float r11 = redPlane  .read(uint2(x1, y1)).r;
+    float g00 = greenPlane.read(uint2(x0, y0)).r;
+    float g10 = greenPlane.read(uint2(x1, y0)).r;
+    float g01 = greenPlane.read(uint2(x0, y1)).r;
+    float g11 = greenPlane.read(uint2(x1, y1)).r;
+    float b00 = bluePlane .read(uint2(x0, y0)).r;
+    float b10 = bluePlane .read(uint2(x1, y0)).r;
+    float b01 = bluePlane .read(uint2(x0, y1)).r;
+    float b11 = bluePlane .read(uint2(x1, y1)).r;
+
+    float r = mix(mix(r00, r10, wx), mix(r01, r11, wx), wy);
+    float g = mix(mix(g00, g10, wx), mix(g01, g11, wx), wy);
+    float b = mix(mix(b00, b10, wx), mix(b01, b11, wx), wy);
+
+    dst.write(float4(r, g, b, 1.0), gid);
+}
+
 // MARK: - Quality grading
 //
 // Per-frame quality scoring via Diagonal Laplacian (LAPD) variance,

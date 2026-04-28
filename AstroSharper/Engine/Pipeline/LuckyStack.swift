@@ -190,11 +190,31 @@ enum LuckyStack {
                 return
             }
 
-            let runner = LuckyRunner(reader: reader, pipeline: pipeline, options: options)
+            // Path B per-channel stacking (commit 8e2a023 wired the flag,
+            // LuckyStackPerChannel.swift implements the runner). Engaged
+            // only on Bayer captures: mono SERs already extract a single
+            // measured plane and don't have the per-channel atmospheric
+            // dispersion problem the path is designed to fix.
+            let usePerChannel = options.perChannelStacking
+                && reader.header.colorID.isBayer
+
             do {
-                let stacked = try await runner.run(progress: { p in
-                    Task { @MainActor in onProgress(p) }
-                })
+                let stacked: MTLTexture
+                if usePerChannel {
+                    stacked = try await LuckyStackPerChannel.run(
+                        reader: reader,
+                        pipeline: pipeline,
+                        options: options,
+                        progress: { p in
+                            Task { @MainActor in onProgress(p) }
+                        }
+                    )
+                } else {
+                    let runner = LuckyRunner(reader: reader, pipeline: pipeline, options: options)
+                    stacked = try await runner.run(progress: { p in
+                        Task { @MainActor in onProgress(p) }
+                    })
+                }
                 await onProgress(.writing)
 
                 // Optional bake-in: route the stacked texture through the

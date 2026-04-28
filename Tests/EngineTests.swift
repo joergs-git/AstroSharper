@@ -3096,3 +3096,125 @@ struct PresetAutoDetectTests {
         #expect(result == .sun)
     }
 }
+
+// MARK: - Bayer per-channel site spec
+//
+// Spec test for BayerChannelSite — the Swift mirror of the Metal
+// `bayer_channel_site_u` function in Shaders.metal that drives Path B
+// per-channel stacking. Validates: pattern decoding (R offset within
+// cell), channel mapping (R/G/B), and G's two-site selection (Gr/Gb).
+//
+// Convention check: cell (0,0) anchors the 2×2 raw cell at raw
+// coordinates (0,0)..(1,1). Cell (3,2) anchors at (6,4)..(7,5).
+// Site coordinates are returned in raw-frame space, NOT half-res.
+
+@Suite("Bayer channel site — pattern × channel mapping")
+struct BayerChannelSiteTests {
+
+    // RGGB pattern: R at (0,0), Gr at (1,0), Gb at (0,1), B at (1,1).
+
+    @Test("RGGB extracts R from top-left of cell")
+    func rggbR() {
+        let s = BayerChannelSite.site(cell: (0, 0), pattern: 0, channel: 0)
+        #expect(s == (0, 0))
+        let s2 = BayerChannelSite.site(cell: (3, 2), pattern: 0, channel: 0)
+        #expect(s2 == (6, 4))
+    }
+
+    @Test("RGGB extracts B from bottom-right of cell")
+    func rggbB() {
+        let s = BayerChannelSite.site(cell: (0, 0), pattern: 0, channel: 2)
+        #expect(s == (1, 1))
+        let s2 = BayerChannelSite.site(cell: (3, 2), pattern: 0, channel: 2)
+        #expect(s2 == (7, 5))
+    }
+
+    @Test("RGGB extracts both G sites — Gr (gIdx 0) and Gb (gIdx 1)")
+    func rggbG() {
+        let gr = BayerChannelSite.site(cell: (0, 0), pattern: 0, channel: 1, gIdx: 0)
+        let gb = BayerChannelSite.site(cell: (0, 0), pattern: 0, channel: 1, gIdx: 1)
+        #expect(gr == (1, 0))
+        #expect(gb == (0, 1))
+    }
+
+    // GRBG pattern: R at (1,0), Gr at (0,0), Gb at (1,1), B at (0,1).
+
+    @Test("GRBG extracts R from (1,0) within cell")
+    func grbgR() {
+        let s = BayerChannelSite.site(cell: (0, 0), pattern: 1, channel: 0)
+        #expect(s == (1, 0))
+    }
+
+    @Test("GRBG extracts B from (0,1) within cell")
+    func grbgB() {
+        let s = BayerChannelSite.site(cell: (0, 0), pattern: 1, channel: 2)
+        #expect(s == (0, 1))
+    }
+
+    // GBRG pattern: R at (0,1), Gr at (1,1), Gb at (0,0), B at (1,0).
+
+    @Test("GBRG extracts R from (0,1) within cell")
+    func gbrgR() {
+        let s = BayerChannelSite.site(cell: (0, 0), pattern: 2, channel: 0)
+        #expect(s == (0, 1))
+    }
+
+    @Test("GBRG extracts B from (1,0) within cell")
+    func gbrgB() {
+        let s = BayerChannelSite.site(cell: (0, 0), pattern: 2, channel: 2)
+        #expect(s == (1, 0))
+    }
+
+    // BGGR pattern: R at (1,1), Gr at (0,1), Gb at (1,0), B at (0,0).
+
+    @Test("BGGR extracts R from (1,1) within cell")
+    func bggrR() {
+        let s = BayerChannelSite.site(cell: (0, 0), pattern: 3, channel: 0)
+        #expect(s == (1, 1))
+    }
+
+    @Test("BGGR extracts B from (0,0) within cell")
+    func bggrB() {
+        let s = BayerChannelSite.site(cell: (0, 0), pattern: 3, channel: 2)
+        #expect(s == (0, 0))
+    }
+
+    @Test("R and B are diagonally opposite within every 2×2 cell, all patterns")
+    func diagonalOpposition() {
+        for pattern in 0..<4 {
+            let r = BayerChannelSite.site(cell: (5, 7), pattern: pattern, channel: 0)
+            let b = BayerChannelSite.site(cell: (5, 7), pattern: pattern, channel: 2)
+            // R and B sit at opposite corners of the 2×2 cell.
+            #expect((r.x ^ b.x) & 1 == 1)
+            #expect((r.y ^ b.y) & 1 == 1)
+        }
+    }
+
+    @Test("G's two sites flank the R site (one shares row, one shares column)")
+    func gFlanksR() {
+        for pattern in 0..<4 {
+            let r  = BayerChannelSite.site(cell: (4, 4), pattern: pattern, channel: 0)
+            let gr = BayerChannelSite.site(cell: (4, 4), pattern: pattern, channel: 1, gIdx: 0)
+            let gb = BayerChannelSite.site(cell: (4, 4), pattern: pattern, channel: 1, gIdx: 1)
+            // Gr shares R's row (same Y), differs in X.
+            #expect(gr.y == r.y)
+            #expect(gr.x != r.x)
+            // Gb shares R's column (same X), differs in Y.
+            #expect(gb.x == r.x)
+            #expect(gb.y != r.y)
+        }
+    }
+
+    @Test("Cell (cx, cy) sites all live inside [2cx..2cx+1] × [2cy..2cy+1]")
+    func sitesStayInsideTheirCell() {
+        for pattern in 0..<4 {
+            for channel in 0...2 {
+                for gIdx in 0...1 {
+                    let s = BayerChannelSite.site(cell: (3, 5), pattern: pattern, channel: channel, gIdx: gIdx)
+                    #expect(s.x == 6 || s.x == 7)
+                    #expect(s.y == 10 || s.y == 11)
+                }
+            }
+        }
+    }
+}
