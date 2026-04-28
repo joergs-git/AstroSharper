@@ -32,7 +32,13 @@ enum Wavelet {
         let w = input.width, h = input.height
         let fmt = input.pixelFormat
 
-        let scales = max(1, min(amounts.count, 6))
+        // Engine cap raised from 6 → 8 so users can chase faint band /
+        // surface detail at the 64–128 px scale (Registax 6 ships 6
+        // bands; AS!4 supports 7). Each extra band is one more
+        // MPSImageGaussianBlur pass + one weighted-add — cheap on
+        // Apple Silicon. Pyramid time is dominated by the larger
+        // sigmas at the bottom regardless.
+        let scales = max(1, min(amounts.count, 8))
         let coarse0 = pipeline.borrow(width: w, height: h, format: fmt)
         borrowed.append(coarse0)
         if let blit = commandBuffer.makeBlitCommandEncoder() {

@@ -55,10 +55,38 @@ struct SharpeningSection: View {
                             get: { app.sharpen.waveletScales[idx] },
                             set: { app.sharpen.waveletScales[idx] = $0 }
                         ),
-                        range: 0...6, format: "%.2f×"
+                        range: 0...10, format: "%.2f×"
                     )
                 }
-                Text("Registax-style multi-scale sharpening. Try smaller scales for fine solar granulation, larger for overall contrast.")
+                // Add / remove scales — engine supports up to 8.
+                HStack {
+                    Spacer()
+                    Button {
+                        if app.sharpen.waveletScales.count > 1 {
+                            app.sharpen.waveletScales.removeLast()
+                        }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(app.sharpen.waveletScales.count <= 1)
+                    .help("Remove the largest-scale band.")
+                    Text("\(app.sharpen.waveletScales.count) bands")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .frame(minWidth: 56)
+                    Button {
+                        if app.sharpen.waveletScales.count < 8 {
+                            app.sharpen.waveletScales.append(0.2)
+                        }
+                    } label: {
+                        Image(systemName: "plus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(app.sharpen.waveletScales.count >= 8)
+                    .help("Add another band (covers 2× the previous scale's pixel size).")
+                }
+                Text("Registax-style multi-scale sharpening. Each band covers 2× the pixel size of the previous one (1, 2, 4, 8, 16, 32, 64, 128 px). Smaller scales = fine cloud / surface detail; larger scales = overall contrast / band structure.")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -37,10 +37,13 @@ struct SharpenSettings: Equatable, Codable {
     var wienerSigma: Double = 1.4
     var wienerSNR: Double = 50
 
-    // Wavelet sharpening (à-trous / starlet) — 4 dyadic scales, independently
+    // Wavelet sharpening (à-trous / starlet) — 6 dyadic scales, independently
     // boosted. Standard tool for solar/planetary sharpening (Registax-style).
+    // Scales cover 1, 2, 4, 8, 16, 32 px detail; engine supports up to 8
+    // scales (extend the array to 7/8 elements to also get the 64/128 px
+    // bands for very large lunar mosaics or full-disc Sun captures).
     var waveletEnabled: Bool = false
-    var waveletScales: [Double] = [1.8, 1.4, 1.0, 0.6]  // amounts for scales 1..4
+    var waveletScales: [Double] = [1.8, 1.4, 1.0, 0.6, 0.4, 0.3]  // amounts for scales 1..6
 
     // -------------------------------------------------------------------
     // Block C — blind / tiled deconvolution plumbing
@@ -128,7 +131,7 @@ struct SharpenSettings: Equatable, Codable {
         self.wienerSigma     = try c.decodeIfPresent(Double.self,  forKey: .wienerSigma)     ?? 1.4
         self.wienerSNR       = try c.decodeIfPresent(Double.self,  forKey: .wienerSNR)       ?? 50
         self.waveletEnabled  = try c.decodeIfPresent(Bool.self,    forKey: .waveletEnabled)  ?? false
-        self.waveletScales   = try c.decodeIfPresent([Double].self, forKey: .waveletScales)  ?? [1.8, 1.4, 1.0, 0.6]
+        self.waveletScales   = try c.decodeIfPresent([Double].self, forKey: .waveletScales)  ?? [1.8, 1.4, 1.0, 0.6, 0.4, 0.3]
         // New Block C fields.
         self.denoiseBeforePercent = try c.decodeIfPresent(Double.self, forKey: .denoiseBeforePercent) ?? 75
         self.denoiseAfterPercent  = try c.decodeIfPresent(Double.self, forKey: .denoiseAfterPercent)  ?? 75
@@ -156,7 +159,7 @@ struct SharpenSettings: Equatable, Codable {
         wienerSigma: Double = 1.4,
         wienerSNR: Double = 50,
         waveletEnabled: Bool = false,
-        waveletScales: [Double] = [1.8, 1.4, 1.0, 0.6],
+        waveletScales: [Double] = [1.8, 1.4, 1.0, 0.6, 0.4, 0.3],
         denoiseBeforePercent: Double = 75,
         denoiseAfterPercent: Double = 75,
         processLuminanceOnly: Bool = true,

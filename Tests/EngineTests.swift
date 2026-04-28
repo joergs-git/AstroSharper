@@ -163,7 +163,9 @@ struct PipelineSettingsDefaultsTests {
         #expect(s.wienerSigma == 1.4)
         #expect(s.wienerSNR == 50)
         #expect(s.waveletEnabled == false)
-        #expect(s.waveletScales == [1.8, 1.4, 1.0, 0.6])
+        // Default extended from 4 → 6 scales so faint planetary band detail
+        // at the 16/32 px range is reachable without manually adding bands.
+        #expect(s.waveletScales == [1.8, 1.4, 1.0, 0.6, 0.4, 0.3])
     }
 
     @Test("StabilizeSettings defaults are stable")
