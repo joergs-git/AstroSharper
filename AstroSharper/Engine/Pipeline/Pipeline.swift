@@ -187,6 +187,7 @@ final class Pipeline {
                 input: current, output: result,
                 amounts: sharpen.waveletScales.map { Float($0) },
                 baseSigma: 1.0,
+                noiseThreshold: Float(sharpen.waveletNoiseThreshold),
                 pipeline: self, commandBuffer: cmdBuf,
                 borrowed: &borrowed
             )

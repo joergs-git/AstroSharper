@@ -394,9 +394,27 @@ kernel void subtract_textures(
 
 struct WaveletAddParams {
     float amount;
+    float threshold;   // soft-shrink layer values whose magnitude is < threshold
 };
 
-// accum = accum + layer * amount.
+// accum = accum + soft_shrink(layer, threshold) * amount.
+//
+// Soft-thresholding (Donoho 1995) at the per-band layer is the textbook
+// noise-reduction-without-losing-sharpness trick that Registax / AS!4
+// inherited from the multiresolution-analysis literature: noise is
+// roughly Gaussian and concentrates in the smallest-magnitude wavelet
+// coefficients, while real detail produces large coefficients. Shrinking
+// every coefficient by `threshold` toward zero zeroes out noise but
+// preserves edges (which exceed the threshold and survive shrinkage
+// proportionally). Applied per-band so the user can knock down noise
+// at the noisy fine scales (1–2 px) while still boosting real detail
+// at the larger scales.
+//
+//   shrunk = sign(x) * max(|x| - threshold, 0)
+//
+// threshold = 0 reproduces the previous additive-only behaviour exactly,
+// so old preset JSON without the new field keeps producing identical
+// output. Alpha is passed through unchanged.
 kernel void weighted_add(
     texture2d<float, access::read>        layer [[texture(0)]],
     texture2d<float, access::read_write>  accum [[texture(1)]],
@@ -405,8 +423,10 @@ kernel void weighted_add(
 ) {
     if (gid.x >= accum.get_width() || gid.y >= accum.get_height()) return;
     float4 l = layer.read(gid);
+    float3 absL = abs(l.rgb);
+    float3 shrunk = max(absL - params.threshold, 0.0) * sign(l.rgb);
     float4 a = accum.read(gid);
-    accum.write(a + l * params.amount, gid);
+    accum.write(a + float4(shrunk * params.amount, l.a * params.amount), gid);
 }
 
 // MARK: - 180° rotation (meridian flip)

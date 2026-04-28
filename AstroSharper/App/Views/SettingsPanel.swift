@@ -68,7 +68,7 @@ struct SharpeningSection: View {
                                 app.sharpen.waveletScales[idx] = $0
                             }
                         ),
-                        range: 0...10, format: "%.2f×"
+                        range: 0...20, format: "%.2f×"
                     )
                 }
                 // Add / remove scales — engine supports up to 8 — plus a
@@ -107,7 +107,13 @@ struct SharpeningSection: View {
                     .disabled(app.sharpen.waveletScales.count >= 8)
                     .help("Add another band (covers 2× the previous scale's pixel size).")
                 }
-                Text("Registax-style multi-scale sharpening. Each band covers 2× the pixel size of the previous one (1, 2, 4, 8, 16, 32, 64, 128 px). Smaller scales = fine cloud / surface detail; larger scales = overall contrast / band structure.")
+                LabeledSlider(
+                    label: "Noise threshold",
+                    value: $app.sharpen.waveletNoiseThreshold,
+                    range: 0...0.05, format: "%.4f"
+                )
+                .help("Donoho-style soft-shrinkage applied per band BEFORE the boost. Zeroes out small noise coefficients, leaves edge coefficients alone — denoise without losing sharpness because thresholding happens inside the same à-trous decomposition that's about to amplify the layers. 0.005–0.015 is the sweet spot on planetary OSC; >0.02 starts visibly smoothing fine cloud detail. 0 = off.")
+                Text("Registax-style multi-scale sharpening. Each band covers 2× the pixel size of the previous one (1, 2, 4, 8, 16, 32, 64, 128 px). Smaller scales = fine cloud / surface detail; larger scales = overall contrast / band structure. The noise threshold above shrinks small (= noise) coefficients to zero before the boost, scaled per band so the noisier fine scales get more denoising than the cleaner large scales.")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

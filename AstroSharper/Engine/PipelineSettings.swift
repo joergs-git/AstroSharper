@@ -45,6 +45,16 @@ struct SharpenSettings: Equatable, Codable {
     var waveletEnabled: Bool = false
     var waveletScales: [Double] = [1.8, 1.4, 1.0, 0.6, 0.4, 0.3]  // amounts for scales 1..6
 
+    /// Per-coefficient soft-threshold applied inside the wavelet sharpen.
+    /// Range 0..0.05 is typical on normalised [0,1] images. Donoho-style
+    /// soft-shrinkage of every layer coefficient — noise (small magnitudes)
+    /// goes to zero, edges (large magnitudes) survive proportionally. Best
+    /// way to denoise without losing sharpness because thresholding happens
+    /// PER BAND inside the same à-trous decomposition that's about to boost
+    /// the layers; bilateral NR is a separate post-pass and risks softening
+    /// the very detail we just amplified. Default 0 = off.
+    var waveletNoiseThreshold: Double = 0.0
+
     // -------------------------------------------------------------------
     // Block C — blind / tiled deconvolution plumbing
     // -------------------------------------------------------------------
@@ -132,6 +142,7 @@ struct SharpenSettings: Equatable, Codable {
         self.wienerSNR       = try c.decodeIfPresent(Double.self,  forKey: .wienerSNR)       ?? 50
         self.waveletEnabled  = try c.decodeIfPresent(Bool.self,    forKey: .waveletEnabled)  ?? false
         self.waveletScales   = try c.decodeIfPresent([Double].self, forKey: .waveletScales)  ?? [1.8, 1.4, 1.0, 0.6, 0.4, 0.3]
+        self.waveletNoiseThreshold = try c.decodeIfPresent(Double.self, forKey: .waveletNoiseThreshold) ?? 0.0
         // New Block C fields.
         self.denoiseBeforePercent = try c.decodeIfPresent(Double.self, forKey: .denoiseBeforePercent) ?? 75
         self.denoiseAfterPercent  = try c.decodeIfPresent(Double.self, forKey: .denoiseAfterPercent)  ?? 75
@@ -160,6 +171,7 @@ struct SharpenSettings: Equatable, Codable {
         wienerSNR: Double = 50,
         waveletEnabled: Bool = false,
         waveletScales: [Double] = [1.8, 1.4, 1.0, 0.6, 0.4, 0.3],
+        waveletNoiseThreshold: Double = 0.0,
         denoiseBeforePercent: Double = 75,
         denoiseAfterPercent: Double = 75,
         processLuminanceOnly: Bool = true,
@@ -182,6 +194,7 @@ struct SharpenSettings: Equatable, Codable {
         self.wienerSNR = wienerSNR
         self.waveletEnabled = waveletEnabled
         self.waveletScales = waveletScales
+        self.waveletNoiseThreshold = waveletNoiseThreshold
         self.denoiseBeforePercent = denoiseBeforePercent
         self.denoiseAfterPercent = denoiseAfterPercent
         self.processLuminanceOnly = processLuminanceOnly
