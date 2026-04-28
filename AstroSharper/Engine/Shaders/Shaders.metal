@@ -562,7 +562,68 @@ inline float bayer_read_f(texture2d<float, access::read> src, int2 p) {
     return src.read(uint2(p)).r;
 }
 
-inline float3 bilinear_demosaic_u16(
+// Malvar-He-Cutler 2004 (MSR-TR-2004-92) high-quality linear demosaic.
+// 5x5 stencil with hand-tuned coefficients that exploit cross-channel
+// correlation — the missing-channel reconstruction uses BOTH same-channel
+// neighbours AND nearby other-channel values, so edges aren't blurred
+// across the 2-pixel Bayer mosaic the way bilinear blurs them. On
+// planetary OSC stacks this preserves ~2x the high-frequency detail of
+// bilinear, which is the difference between 'cloud band shape' and
+// 'visible cloud micro-structure'.
+//
+// Four kernels, each summing to 8 (we divide by 8 at the end):
+//
+//   gAtNonG  — Green at R/B site (axial weights)
+//   horizG   — R at Gr (or B at Gb) — horizontal-strong
+//   vertG    — R at Gb (or B at Gr) — vertical-strong (= horizG.transposed)
+//   diag     — R at B (or B at R)   — diagonal-strong
+//
+// Each helper takes the 13 read values it needs as arguments. Caller
+// reads them in the format-specific path. Negative weights can push
+// the output outside [0, 1] so we clamp after the divide.
+//
+// 13 sample positions used (relative to center c):
+//   p[0]  = c                       (center)
+//   p[1]  = c + ( 0,-2)
+//   p[2]  = c + ( 0,-1)
+//   p[3]  = c + ( 0, 1)
+//   p[4]  = c + ( 0, 2)
+//   p[5]  = c + (-2, 0)
+//   p[6]  = c + (-1, 0)
+//   p[7]  = c + ( 1, 0)
+//   p[8]  = c + ( 2, 0)
+//   p[9]  = c + (-1,-1)
+//   p[10] = c + ( 1,-1)
+//   p[11] = c + (-1, 1)
+//   p[12] = c + ( 1, 1)
+
+inline float malvar_g_at_nonG(thread float* p) {
+    return ( -1.0 * p[1] +  2.0 * p[2] +  4.0 * p[0] +  2.0 * p[3] + -1.0 * p[4]
+             -1.0 * p[5] +  2.0 * p[6] +  2.0 * p[7] + -1.0 * p[8]) / 8.0;
+}
+inline float malvar_horizG(thread float* p) {
+    return (  0.5 * p[1]
+             -1.0 * p[9] + -1.0 * p[10]
+             -1.0 * p[5] +  4.0 * p[6] +  5.0 * p[0] +  4.0 * p[7] + -1.0 * p[8]
+             -1.0 * p[11] + -1.0 * p[12]
+             +0.5 * p[4]) / 8.0;
+}
+inline float malvar_vertG(thread float* p) {
+    return ( -1.0 * p[1]
+             -1.0 * p[9] +  4.0 * p[2] + -1.0 * p[10]
+             +0.5 * p[5] +  5.0 * p[0] +  0.5 * p[8]
+             -1.0 * p[11] +  4.0 * p[3] + -1.0 * p[12]
+             -1.0 * p[4]) / 8.0;
+}
+inline float malvar_diag(thread float* p) {
+    return ( -1.5 * p[1]
+             +2.0 * p[9] +  2.0 * p[10]
+             -1.5 * p[5] +  6.0 * p[0] + -1.5 * p[8]
+             +2.0 * p[11] +  2.0 * p[12]
+             -1.5 * p[4]) / 8.0;
+}
+
+inline float3 malvar_demosaic_u16(
     texture2d<uint, access::read> src,
     int2 c,
     uint pattern,
@@ -573,42 +634,88 @@ inline float3 bilinear_demosaic_u16(
     uint pxY = uint(c.y) & 1u;
     bool isRed   = (pxX == rOff.x) && (pxY == rOff.y);
     bool isBlue  = (pxX != rOff.x) && (pxY != rOff.y);
-    bool greenRedRow = !isRed && !isBlue && (pxY == rOff.y);
+    bool isGreenInRedRow  = !isRed && !isBlue && (pxY == rOff.y);  // Gr
+
+    float p[13];
+    p[ 0] = bayer_read_u16(src, c,                  scale);
+    p[ 1] = bayer_read_u16(src, c + int2( 0, -2),   scale);
+    p[ 2] = bayer_read_u16(src, c + int2( 0, -1),   scale);
+    p[ 3] = bayer_read_u16(src, c + int2( 0,  1),   scale);
+    p[ 4] = bayer_read_u16(src, c + int2( 0,  2),   scale);
+    p[ 5] = bayer_read_u16(src, c + int2(-2,  0),   scale);
+    p[ 6] = bayer_read_u16(src, c + int2(-1,  0),   scale);
+    p[ 7] = bayer_read_u16(src, c + int2( 1,  0),   scale);
+    p[ 8] = bayer_read_u16(src, c + int2( 2,  0),   scale);
+    p[ 9] = bayer_read_u16(src, c + int2(-1, -1),   scale);
+    p[10] = bayer_read_u16(src, c + int2( 1, -1),   scale);
+    p[11] = bayer_read_u16(src, c + int2(-1,  1),   scale);
+    p[12] = bayer_read_u16(src, c + int2( 1,  1),   scale);
 
     float r, g, b;
     if (isRed) {
-        r = bayer_read_u16(src, c, scale);
-        g = 0.25 * (bayer_read_u16(src, c + int2(-1, 0), scale)
-                  + bayer_read_u16(src, c + int2( 1, 0), scale)
-                  + bayer_read_u16(src, c + int2( 0,-1), scale)
-                  + bayer_read_u16(src, c + int2( 0, 1), scale));
-        b = 0.25 * (bayer_read_u16(src, c + int2(-1,-1), scale)
-                  + bayer_read_u16(src, c + int2( 1,-1), scale)
-                  + bayer_read_u16(src, c + int2(-1, 1), scale)
-                  + bayer_read_u16(src, c + int2( 1, 1), scale));
+        r = p[0];
+        g = clamp(malvar_g_at_nonG(p), 0.0, 1.0);
+        b = clamp(malvar_diag(p),       0.0, 1.0);
     } else if (isBlue) {
-        b = bayer_read_u16(src, c, scale);
-        g = 0.25 * (bayer_read_u16(src, c + int2(-1, 0), scale)
-                  + bayer_read_u16(src, c + int2( 1, 0), scale)
-                  + bayer_read_u16(src, c + int2( 0,-1), scale)
-                  + bayer_read_u16(src, c + int2( 0, 1), scale));
-        r = 0.25 * (bayer_read_u16(src, c + int2(-1,-1), scale)
-                  + bayer_read_u16(src, c + int2( 1,-1), scale)
-                  + bayer_read_u16(src, c + int2(-1, 1), scale)
-                  + bayer_read_u16(src, c + int2( 1, 1), scale));
+        b = p[0];
+        g = clamp(malvar_g_at_nonG(p), 0.0, 1.0);
+        r = clamp(malvar_diag(p),       0.0, 1.0);
+    } else if (isGreenInRedRow) {
+        g = p[0];
+        r = clamp(malvar_horizG(p),    0.0, 1.0);
+        b = clamp(malvar_vertG(p),     0.0, 1.0);
     } else {
-        g = bayer_read_u16(src, c, scale);
-        if (greenRedRow) {
-            r = 0.5 * (bayer_read_u16(src, c + int2(-1, 0), scale)
-                     + bayer_read_u16(src, c + int2( 1, 0), scale));
-            b = 0.5 * (bayer_read_u16(src, c + int2( 0,-1), scale)
-                     + bayer_read_u16(src, c + int2( 0, 1), scale));
-        } else {
-            r = 0.5 * (bayer_read_u16(src, c + int2( 0,-1), scale)
-                     + bayer_read_u16(src, c + int2( 0, 1), scale));
-            b = 0.5 * (bayer_read_u16(src, c + int2(-1, 0), scale)
-                     + bayer_read_u16(src, c + int2( 1, 0), scale));
-        }
+        g = p[0];
+        b = clamp(malvar_horizG(p),    0.0, 1.0);
+        r = clamp(malvar_vertG(p),     0.0, 1.0);
+    }
+    return float3(r, g, b);
+}
+
+inline float3 malvar_demosaic_f(
+    texture2d<float, access::read> src,
+    int2 c,
+    uint pattern
+) {
+    uint2 rOff = uint2(pattern & 1u, (pattern >> 1) & 1u);
+    uint pxX = uint(c.x) & 1u;
+    uint pxY = uint(c.y) & 1u;
+    bool isRed   = (pxX == rOff.x) && (pxY == rOff.y);
+    bool isBlue  = (pxX != rOff.x) && (pxY != rOff.y);
+    bool isGreenInRedRow  = !isRed && !isBlue && (pxY == rOff.y);
+
+    float p[13];
+    p[ 0] = bayer_read_f(src, c);
+    p[ 1] = bayer_read_f(src, c + int2( 0, -2));
+    p[ 2] = bayer_read_f(src, c + int2( 0, -1));
+    p[ 3] = bayer_read_f(src, c + int2( 0,  1));
+    p[ 4] = bayer_read_f(src, c + int2( 0,  2));
+    p[ 5] = bayer_read_f(src, c + int2(-2,  0));
+    p[ 6] = bayer_read_f(src, c + int2(-1,  0));
+    p[ 7] = bayer_read_f(src, c + int2( 1,  0));
+    p[ 8] = bayer_read_f(src, c + int2( 2,  0));
+    p[ 9] = bayer_read_f(src, c + int2(-1, -1));
+    p[10] = bayer_read_f(src, c + int2( 1, -1));
+    p[11] = bayer_read_f(src, c + int2(-1,  1));
+    p[12] = bayer_read_f(src, c + int2( 1,  1));
+
+    float r, g, b;
+    if (isRed) {
+        r = p[0];
+        g = clamp(malvar_g_at_nonG(p), 0.0, 1.0);
+        b = clamp(malvar_diag(p),       0.0, 1.0);
+    } else if (isBlue) {
+        b = p[0];
+        g = clamp(malvar_g_at_nonG(p), 0.0, 1.0);
+        r = clamp(malvar_diag(p),       0.0, 1.0);
+    } else if (isGreenInRedRow) {
+        g = p[0];
+        r = clamp(malvar_horizG(p),    0.0, 1.0);
+        b = clamp(malvar_vertG(p),     0.0, 1.0);
+    } else {
+        g = p[0];
+        b = clamp(malvar_horizG(p),    0.0, 1.0);
+        r = clamp(malvar_vertG(p),     0.0, 1.0);
     }
     return float3(r, g, b);
 }
@@ -673,7 +780,7 @@ kernel void unpack_bayer16_to_rgba(
     uint2 srcGid = (p.flip != 0u)
         ? uint2(src.get_width() - 1 - gid.x, src.get_height() - 1 - gid.y)
         : gid;
-    float3 rgb = bilinear_demosaic_u16(src, int2(srcGid), p.pattern, p.scale);
+    float3 rgb = malvar_demosaic_u16(src, int2(srcGid), p.pattern, p.scale);
     dst.write(float4(rgb, 1.0), gid);
 }
 
@@ -687,7 +794,7 @@ kernel void unpack_bayer8_to_rgba(
     uint2 srcGid = (p.flip != 0u)
         ? uint2(src.get_width() - 1 - gid.x, src.get_height() - 1 - gid.y)
         : gid;
-    float3 rgb = bilinear_demosaic_f(src, int2(srcGid), p.pattern);
+    float3 rgb = malvar_demosaic_f(src, int2(srcGid), p.pattern);
     dst.write(float4(rgb, 1.0), gid);
 }
 
