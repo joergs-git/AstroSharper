@@ -1438,8 +1438,17 @@ final class AppModel: ObservableObject {
                     guard let self, let idx = self.catalog.index(of: id) else { return }
                     self.catalog.files[idx].thumbnail = img
                 }
-                // Static-image sharpness — cheap, computed once. SER / AVI
-                // files use the on-demand video-quality scan instead.
+                // Static-image sharpness — populated from cache only. The
+                // earlier auto-compute path ran SharpnessProbe on every new
+                // static image at section-switch time, which scaled with
+                // the OUTPUTS folder size: 20 freshly-stacked TIFFs ≈
+                // 20 GPU passes + 20 main-thread writes ≈ 1–3 s before the
+                // table felt responsive again. Match the pattern already
+                // established for SER quality scans: cache hits populate
+                // automatically, cache misses leave the column blank until
+                // the user explicitly opts in via the
+                // "Calculate Video Quality" button (or a future static-
+                // image equivalent).
                 guard !isFrameSeq else { return }
                 if let cached = await QualityCache.shared.lookup(url: url),
                    let s = cached.sharpness {
@@ -1447,24 +1456,6 @@ final class AppModel: ObservableObject {
                         guard let self, let idx = self.catalog.index(of: id) else { return }
                         self.catalog.files[idx].sharpness = s
                     }
-                    return
-                }
-                // Shared probe — instantiating one per file in a 500-file
-                // import burned more time on queue/cache setup than the
-                // actual GPU pass. Load via ImageIO's thumbnail path capped
-                // at 512² so a 6 K TIFF doesn't trigger a full decode just
-                // to score sharpness — variance-of-Laplacian is largely
-                // scale-invariant on natural content.
-                guard let tex = try? ImageTexture.loadDownsampled(
-                    url: url,
-                    maxDimension: 512,
-                    device: MetalDevice.shared.device
-                ) else { return }
-                let s = SharpnessProbe.shared.compute(texture: tex)
-                await MainActor.run {
-                    guard let self, let idx = self.catalog.index(of: id) else { return }
-                    self.catalog.files[idx].sharpness = s
-                    QualityCache.shared.store(url: url, sharpness: s)
                 }
             }
         }
