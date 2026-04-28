@@ -36,9 +36,38 @@ enum Wiener {
         let H = input.height
         precondition(output.width == W && output.height == H, "Wiener: I/O size mismatch")
 
-        // Step 1: read input bytes (rgba16Float) via a shared staging texture.
+        // Step 1: read input bytes via a shared staging texture matching
+        // the input's actual pixel format. The earlier hard-coded
+        // rgba16Float staging produced visible byte-stride artifacts (a
+        // checkerboard / tile pattern) once the lucky-stack accumulator
+        // was upgraded to rgba32Float — Metal's blit copy does NOT
+        // format-convert between mismatched textures, so reading rgba32
+        // bytes as rgba16 misaligned every pixel.
+        let inputFormat = input.pixelFormat
+        let bytesPerChannel: Int
+        let isFloat32: Bool
+        switch inputFormat {
+        case .rgba32Float:
+            bytesPerChannel = 4
+            isFloat32 = true
+        case .rgba16Float:
+            bytesPerChannel = 2
+            isFloat32 = false
+        default:
+            // Unsupported format — bail out via blit-copy of the input
+            // so the caller still gets a valid texture, just unaffected.
+            let queue = MetalDevice.shared.commandQueue
+            if let cmd = queue.makeCommandBuffer(), let blit = cmd.makeBlitCommandEncoder() {
+                blit.copy(from: input, to: output)
+                blit.endEncoding()
+                cmd.commit()
+                cmd.waitUntilCompleted()
+            }
+            return
+        }
+
         let stageDesc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba16Float, width: W, height: H, mipmapped: false
+            pixelFormat: inputFormat, width: W, height: H, mipmapped: false
         )
         stageDesc.storageMode = .shared
         stageDesc.usage = [.shaderRead, .shaderWrite]
@@ -52,29 +81,50 @@ enum Wiener {
             cmd.waitUntilCompleted()
         }
 
-        let bytesPerRow = W * 8                         // 4 channels × 2 bytes
-        var raw = [UInt16](repeating: 0, count: W * H * 4)
-        raw.withUnsafeMutableBufferPointer { buf in
-            staging.getBytes(
-                buf.baseAddress!,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: W, height: H, depth: 1)
-                ),
-                mipmapLevel: 0
-            )
-        }
-
-        // Step 2: extract three Float32 channel planes.
+        let bytesPerRow = W * bytesPerChannel * 4
         let plane = W * H
         var rPlane = [Float](repeating: 0, count: plane)
         var gPlane = [Float](repeating: 0, count: plane)
         var bPlane = [Float](repeating: 0, count: plane)
-        for i in 0..<plane {
-            rPlane[i] = Float(Float16(bitPattern: raw[i * 4 + 0]))
-            gPlane[i] = Float(Float16(bitPattern: raw[i * 4 + 1]))
-            bPlane[i] = Float(Float16(bitPattern: raw[i * 4 + 2]))
+
+        if isFloat32 {
+            // rgba32Float: read directly into Float buffers.
+            var raw = [Float](repeating: 0, count: W * H * 4)
+            raw.withUnsafeMutableBufferPointer { buf in
+                staging.getBytes(
+                    buf.baseAddress!,
+                    bytesPerRow: bytesPerRow,
+                    from: MTLRegion(
+                        origin: MTLOrigin(x: 0, y: 0, z: 0),
+                        size: MTLSize(width: W, height: H, depth: 1)
+                    ),
+                    mipmapLevel: 0
+                )
+            }
+            for i in 0..<plane {
+                rPlane[i] = raw[i * 4 + 0]
+                gPlane[i] = raw[i * 4 + 1]
+                bPlane[i] = raw[i * 4 + 2]
+            }
+        } else {
+            // rgba16Float: read as UInt16 bitpatterns then convert.
+            var raw = [UInt16](repeating: 0, count: W * H * 4)
+            raw.withUnsafeMutableBufferPointer { buf in
+                staging.getBytes(
+                    buf.baseAddress!,
+                    bytesPerRow: bytesPerRow,
+                    from: MTLRegion(
+                        origin: MTLOrigin(x: 0, y: 0, z: 0),
+                        size: MTLSize(width: W, height: H, depth: 1)
+                    ),
+                    mipmapLevel: 0
+                )
+            }
+            for i in 0..<plane {
+                rPlane[i] = Float(Float16(bitPattern: raw[i * 4 + 0]))
+                gPlane[i] = Float(Float16(bitPattern: raw[i * 4 + 1]))
+                bPlane[i] = Float(Float16(bitPattern: raw[i * 4 + 2]))
+            }
         }
 
         // Step 3: pad to next power of two (padding = 0). Mirror padding would
@@ -105,26 +155,48 @@ enum Wiener {
         gPlane = wienerProcess(channel: gPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
         bPlane = wienerProcess(channel: bPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
 
-        // Step 6: pack back into Float16 RGBA, clamped to [0, 1].
-        let one16 = Float16(1.0).bitPattern
-        for i in 0..<plane {
-            raw[i * 4 + 0] = Float16(max(0, min(1, rPlane[i]))).bitPattern
-            raw[i * 4 + 1] = Float16(max(0, min(1, gPlane[i]))).bitPattern
-            raw[i * 4 + 2] = Float16(max(0, min(1, bPlane[i]))).bitPattern
-            raw[i * 4 + 3] = one16
-        }
-
-        // Step 7: write back into staging then blit into the caller's output.
-        raw.withUnsafeBufferPointer { buf in
-            staging.replace(
-                region: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: W, height: H, depth: 1)
-                ),
-                mipmapLevel: 0,
-                withBytes: buf.baseAddress!,
-                bytesPerRow: bytesPerRow
-            )
+        // Step 6: pack back into RGBA at the input's native precision,
+        // clamped to [0, 1]. Branch on isFloat32 so the byte layout matches
+        // the staging texture's format — same fix as the readback above.
+        if isFloat32 {
+            var rawOut = [Float](repeating: 0, count: plane * 4)
+            for i in 0..<plane {
+                rawOut[i * 4 + 0] = max(0, min(1, rPlane[i]))
+                rawOut[i * 4 + 1] = max(0, min(1, gPlane[i]))
+                rawOut[i * 4 + 2] = max(0, min(1, bPlane[i]))
+                rawOut[i * 4 + 3] = 1.0
+            }
+            rawOut.withUnsafeBufferPointer { buf in
+                staging.replace(
+                    region: MTLRegion(
+                        origin: MTLOrigin(x: 0, y: 0, z: 0),
+                        size: MTLSize(width: W, height: H, depth: 1)
+                    ),
+                    mipmapLevel: 0,
+                    withBytes: buf.baseAddress!,
+                    bytesPerRow: bytesPerRow
+                )
+            }
+        } else {
+            var rawOut = [UInt16](repeating: 0, count: plane * 4)
+            let one16 = Float16(1.0).bitPattern
+            for i in 0..<plane {
+                rawOut[i * 4 + 0] = Float16(max(0, min(1, rPlane[i]))).bitPattern
+                rawOut[i * 4 + 1] = Float16(max(0, min(1, gPlane[i]))).bitPattern
+                rawOut[i * 4 + 2] = Float16(max(0, min(1, bPlane[i]))).bitPattern
+                rawOut[i * 4 + 3] = one16
+            }
+            rawOut.withUnsafeBufferPointer { buf in
+                staging.replace(
+                    region: MTLRegion(
+                        origin: MTLOrigin(x: 0, y: 0, z: 0),
+                        size: MTLSize(width: W, height: H, depth: 1)
+                    ),
+                    mipmapLevel: 0,
+                    withBytes: buf.baseAddress!,
+                    bytesPerRow: bytesPerRow
+                )
+            }
         }
         if let cmd = queue.makeCommandBuffer(), let blit = cmd.makeBlitCommandEncoder() {
             blit.copy(from: staging, to: output)
