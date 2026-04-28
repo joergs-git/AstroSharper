@@ -1,26 +1,52 @@
 #!/usr/bin/env bash
 #
-# Stacking parameter sweep for empirical comparison against an external
-# reference (e.g. BiggSky / Registax raw frame). Produces RAW (no
-# post-stack sharpen) TIFFs in `.regression/sweep/` so the only thing
-# varying between outputs is the stacking algorithm itself — colour
-# casts and sharpening artifacts are off the table.
+# RADICAL stacking sweep — tries combinations that span the full
+# parameter space, with extra emphasis on drizzle (which empirically
+# was the only knob that visibly helped in earlier rounds).
 #
-# WIDE-RANGE matrix (the previous narrow-step matrix produced
-# essentially identical outputs because keep% 10..50 doesn't change
-# enough on a typical planetary SER). This version stretches every
-# axis to its extremes so output differences become visually obvious:
+# Output: 20 raw TIFFs (no post-stack sharpen) in `.regression/sweep/`.
+# Drizzle 2× outputs are 4× larger, drizzle 3× are 9× larger — that
+# size difference alone tells you which file is which without opening
+# them.
 #
-#   1. keep%     1, 5, 10, 25, 50, 99     (lucky imaging vs averaging)
-#   2. mode      lightspeed, scientific
-#   3. sigma     off, 1.0 (aggressive ≈ median), 1.5, 2.5, 4.0 (≈ no clip)
-#   4. drizzle   1x, 2x, 3x
-#   5. two-stage off, AP grid 4 / 8 / 16
+# Matrix:
 #
-# Pure cartesian would be 6×2×5×3×4 = 720; the matrix below picks 20
-# combinations that span the parameter space with minimal redundancy.
-# Multi-AP is left OFF — empirical data showed it's net-negative on
-# smooth planetary OSC and adds nothing to the comparison.
+#   Block A — Drizzle pixfrac sweep (the knob that helped most):
+#     1. drizzle 2x pixfrac 0.3  k=25
+#     2. drizzle 2x pixfrac 0.5  k=25
+#     3. drizzle 2x pixfrac 0.7  k=25  (current default)
+#     4. drizzle 2x pixfrac 1.0  k=25
+#     5. drizzle 3x pixfrac 0.5  k=25
+#     6. drizzle 3x pixfrac 0.7  k=25
+#
+#   Block B — Lucky drizzle (low keep% + drizzle):
+#     7. drizzle 2x pixfrac 0.5  k=5
+#     8. drizzle 2x pixfrac 0.7  k=10
+#     9. drizzle 3x pixfrac 0.5  k=5
+#
+#   Block C — Drizzle + scientific cleaner-reference build:
+#    10. drizzle 2x scientific  k=25
+#    11. drizzle 2x scientific  k=10
+#
+#   Block D — Drizzle + sigma-clip outlier rejection:
+#    12. drizzle 2x sigma 1.5   k=25
+#    13. drizzle 2x sigma 2.5   k=10
+#
+#   Block E — Extreme keep-% (lucky imaging vs averaging):
+#    14. lightspeed k=2          (close to single-best-frame)
+#    15. lightspeed k=99         (almost full averaging — control)
+#    16. scientific k=2
+#
+#   Block F — Aggressive sigma-clip:
+#    17. sigma 0.8 k=25          (very aggressive, ≈ median rejection)
+#    18. sigma 1.0 k=10
+#
+#   Block G — Kitchen sinks (combined heavy lifters):
+#    19. drizzle 2x scientific sigma 1.5 k=10  (lucky scientific drizzle clipped)
+#    20. drizzle 3x scientific             k=5  (lucky scientific 3x drizzle)
+#
+# Multi-AP and two-stage are not in the matrix — empirical data
+# proved they're net-negative on smooth planetary OSC.
 #
 # Usage:
 #   scripts/sweep.sh <input.ser>     # run sweep on the given SER
@@ -60,48 +86,41 @@ run() {
   "$CLI" stack "$SER" "$outfile" "$@" --quiet
 }
 
-# Axis 1: keep% spread (lightspeed mode, the proven baseline). Tests
-# whether 'lucky imaging' (k=1) genuinely beats the averaged stack.
-run "lightspeed_k01"           --keep 1
-run "lightspeed_k05"           --keep 5
-run "lightspeed_k10"           --keep 10
-run "lightspeed_k25"           --keep 25
-run "lightspeed_k50"           --keep 50
+# Block A — drizzle pixfrac sweep
+run "drizzle2_pf03_k25"        --keep 25 --drizzle 2 --pixfrac 0.3
+run "drizzle2_pf05_k25"        --keep 25 --drizzle 2 --pixfrac 0.5
+run "drizzle2_pf07_k25"        --keep 25 --drizzle 2 --pixfrac 0.7
+run "drizzle2_pf10_k25"        --keep 25 --drizzle 2 --pixfrac 1.0
+run "drizzle3_pf05_k25"        --keep 25 --drizzle 3 --pixfrac 0.5
+run "drizzle3_pf07_k25"        --keep 25 --drizzle 3 --pixfrac 0.7
+
+# Block B — lucky drizzle (low keep%)
+run "drizzle2_pf05_k05"        --keep 5  --drizzle 2 --pixfrac 0.5
+run "drizzle2_pf07_k10"        --keep 10 --drizzle 2 --pixfrac 0.7
+run "drizzle3_pf05_k05"        --keep 5  --drizzle 3 --pixfrac 0.5
+
+# Block C — drizzle + scientific
+run "drizzle2_scientific_k25"  --keep 25 --drizzle 2 --mode scientific
+run "drizzle2_scientific_k10"  --keep 10 --drizzle 2 --mode scientific
+
+# Block D — drizzle + sigma
+run "drizzle2_sigma15_k25"     --keep 25 --drizzle 2 --sigma 1.5
+run "drizzle2_sigma25_k10"     --keep 10 --drizzle 2 --sigma 2.5
+
+# Block E — extreme keep-%
+run "lightspeed_k02"           --keep 2
 run "lightspeed_k99"           --keep 99
+run "scientific_k02"           --keep 2  --mode scientific
 
-# Axis 2: scientific mode at the same keep% extremes. Tests whether
-# the cleaner-reference build is doing real work vs lightspeed.
-run "scientific_k01"           --keep 1   --mode scientific
-run "scientific_k05"           --keep 5   --mode scientific
-run "scientific_k25"           --keep 25  --mode scientific
-run "scientific_k99"           --keep 99  --mode scientific
+# Block F — aggressive sigma
+run "lightspeed_sigma08_k25"   --keep 25 --sigma 0.8
+run "lightspeed_sigma10_k10"   --keep 10 --sigma 1.0
 
-# Axis 3: sigma-clip extremes. sigma 1.0 ≈ median, sigma 4.0 ≈ no
-# clipping. If aggressive sigma is sharper, frame-level outlier
-# rejection is doing useful work.
-run "lightspeed_k25_sigma10"   --keep 25  --sigma 1.0
-run "lightspeed_k25_sigma15"   --keep 25  --sigma 1.5
-run "lightspeed_k25_sigma25"   --keep 25  --sigma 2.5
-run "lightspeed_k25_sigma40"   --keep 25  --sigma 4.0
-
-# Axis 4: drizzle reconstruction. 2x output is 2x larger; 3x is 3x
-# larger. Tests whether reverse-mapping recovers detail averaging
-# loses on this SER.
-run "lightspeed_k25_drizzle2"  --keep 25  --drizzle 2
-run "lightspeed_k25_drizzle3"  --keep 25  --drizzle 3
-run "lightspeed_k05_drizzle2"  --keep 5   --drizzle 2
-
-# Axis 5: two-stage per-AP keep at different grid sizes. AP grid 4
-# is coarse (16 cells), 16 is fine (256 cells).
-run "lightspeed_k25_twostage4"  --keep 25  --two-stage --two-stage-grid 4
-run "lightspeed_k25_twostage16" --keep 25  --two-stage --two-stage-grid 16
-
-# Combos: lucky-imaging (low k) + sigma-clip = strict 'best frames
-# only, then reject pixel outliers within them'.
-run "lightspeed_k05_sigma15"   --keep 5   --sigma 1.5
+# Block G — kitchen sinks
+run "kitchen_drizzle2_sci_sigma15_k10"  --keep 10 --drizzle 2 --mode scientific --sigma 1.5
+run "kitchen_drizzle3_sci_k05"          --keep 5  --drizzle 3 --mode scientific
 
 echo
 echo "Done. ${n} outputs in $OUT/"
-echo "Compare them in Preview against your external reference (BiggSky /"
-echo "Registax raw frame). Wide-range axes mean every output should now"
-echo "look visibly distinct from its neighbours."
+echo "File sizes are a quick orientation: 2.2MB ≈ 1x output, 8.9MB ≈"
+echo "drizzle 2x (4x larger), 20MB ≈ drizzle 3x (9x larger)."

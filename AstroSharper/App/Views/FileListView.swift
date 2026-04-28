@@ -130,7 +130,24 @@ struct FileListView: View {
             .width(40)
 
             TableColumn("Name", value: \.name) { (file: FileEntry) in
-                Text(file.name).font(.system(size: 12))
+                HStack(spacing: 4) {
+                    // Blink-play / current-preview indicator. Distinct from
+                    // row selection so the user can have N files selected
+                    // for blinking AND see WHICH of the N is currently
+                    // displayed in the preview. Empty space reserved when
+                    // not the preview row so other rows don't reflow.
+                    if app.previewFileID == file.id {
+                        Image(systemName: "eye.fill")
+                            .foregroundColor(.accentColor)
+                            .font(.system(size: 10))
+                            .help("Currently shown in the preview.")
+                    } else {
+                        Image(systemName: "eye.fill")
+                            .foregroundColor(.clear)
+                            .font(.system(size: 10))
+                    }
+                    Text(file.name).font(.system(size: 12))
+                }
             }
 
             // Sortable extension column — clicking groups SER together and
