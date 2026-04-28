@@ -34,6 +34,13 @@ struct FileEntry: Identifiable, Hashable {
     /// later renames don't churn the column UI.
     var detectedTarget: PresetTarget? = nil
 
+    /// Pixel dimensions read at import time. SER / AVI from header, static
+    /// images via CGImageSource (no full decode). nil only when the import
+    /// reader couldn't open the file. Surfaced in the file-list column +
+    /// preview HUD so the user can spot mixed-resolution captures at a glance.
+    var pixelWidth: Int? = nil
+    var pixelHeight: Int? = nil
+
     /// Lower-cased file extension, exposed for table-column sorting so a
     /// mixed bag of .ser / .tif / .png groups by type when the user clicks
     /// the column header.
@@ -57,6 +64,12 @@ struct FileEntry: Identifiable, Hashable {
     /// looking for the sharpest static frames.
     var sharpnessSortKey: Float {
         sharpness ?? -.infinity
+    }
+
+    /// Sortable proxy for the dimensions column — total pixel count so a
+    /// 4K SER outranks a 640×480 capture regardless of aspect.
+    var pixelAreaSortKey: Int {
+        (pixelWidth ?? 0) * (pixelHeight ?? 0)
     }
 
     enum Status: Equatable, Hashable {
@@ -117,14 +130,49 @@ struct FileCatalog {
             url.deletingLastPathComponent().lastPathComponent
         ])
 
+        // Pixel dimensions — quick header-only read so the column
+        // populates without forcing a full image decode at import. SER
+        // header is 178 bytes, AVI header is similar; CGImageSource
+        // returns dims without rasterising.
+        let dims = readDimensions(url: url)
+
         return FileEntry(
             id: UUID(),
             url: url,
             name: url.lastPathComponent,
             sizeBytes: size,
             creationDate: date,
-            detectedTarget: detected
+            detectedTarget: detected,
+            pixelWidth: dims?.width,
+            pixelHeight: dims?.height
         )
+    }
+
+    /// Read pixel dimensions from a file as cheaply as possible — just
+    /// the header for frame-sequence containers, just the metadata for
+    /// static images via CGImageSource. Returns nil on unrecognised
+    /// types or read failures so the catalog column shows blank.
+    private static func readDimensions(url: URL) -> (width: Int, height: Int)? {
+        let ext = url.pathExtension.lowercased()
+        if ext == serExtension {
+            if let header = try? SerReader(url: url).header {
+                return (header.imageWidth, header.imageHeight)
+            }
+            return nil
+        }
+        if ext == aviExtension {
+            if let reader = try? AviReader(url: url) {
+                return (reader.imageWidth, reader.imageHeight)
+            }
+            return nil
+        }
+        // Static image — CGImageSource gives dims without decoding pixels.
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Int,
+              let h = props[kCGImagePropertyPixelHeight] as? Int
+        else { return nil }
+        return (w, h)
     }
 
     func index(of id: FileEntry.ID) -> Int? {

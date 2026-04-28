@@ -135,12 +135,23 @@ struct FileListView: View {
 
             // Sortable extension column — clicking groups SER together and
             // raster images together when the user opened a mixed folder.
-            TableColumn("Type", value: \.typeKey) { (file: FileEntry) in
-                Text(file.typeKey.uppercased())
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary)
+            // Type + pixel dimensions combined into one column. Two
+            // columns would push the table over SwiftUI's TupleView
+            // limit (~10), so we render type / dims stacked here.
+            TableColumn("Format", value: \.typeKey) { (file: FileEntry) in
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(file.typeKey.uppercased())
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    if let w = file.pixelWidth, let h = file.pixelHeight {
+                        Text("\(w)×\(h)")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.7))
+                    }
+                }
+                .help("File type + pixel dimensions (read from header at import).")
             }
-            .width(48)
+            .width(80)
 
             // Static-image sharpness (variance of Laplacian — higher = sharper).
             // SER / AVI rows show "—" since they use a distribution scan

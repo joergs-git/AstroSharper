@@ -286,14 +286,23 @@ kernel void noise_reduce_bilateral(
 
 // MARK: - Brightness + Contrast
 //
-// Two-parameter lightness adjustment that runs as a discrete pipeline
-// step right after the tone curve (so it operates on whatever curve
-// the user dialled in) and before saturation.
+// Luma-only lightness adjustment that runs as a discrete pipeline step
+// right after the tone curve (so it operates on whatever curve the
+// user dialled in) and before saturation.
 //
-//   out = clamp((in - 0.5) * contrast + 0.5 + brightness, 0, 1)
+// Per-channel contrast (the obvious `(c - 0.5) * k + 0.5` form) amplifies
+// every pre-existing R/G/B micro-misregistration in the stacked image
+// into a visible coloured fringe — sub-pixel atmospheric dispersion,
+// rounding noise, anything that puts the three channels slightly out of
+// register. Operating on luminance only and preserving the per-pixel
+// chrominance ratio keeps colour neutral across contrast changes.
+//
+//   luma'  = clamp((luma - 0.5) * contrast + 0.5 + brightness, 0, 1)
+//   ratio  = luma' / luma                       (1.0 if luma ≈ 0)
+//   rgb_out = clamp(rgb * ratio, 0, 1)
 //
 // Identity = (brightness 0, contrast 1). The pipeline skips this step
-// at identity to avoid the per-pixel cost on the common case.
+// at identity so the no-op case costs nothing.
 
 struct BrightnessContrastParams {
     float brightness;
@@ -308,8 +317,10 @@ kernel void apply_brightness_contrast(
 ) {
     if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
     float4 c = input.read(gid);
-    float3 v = (c.rgb - 0.5) * p.contrast + 0.5 + float3(p.brightness);
-    v = clamp(v, 0.0, 1.0);
+    float luma = dot(c.rgb, float3(0.2126, 0.7152, 0.0722));
+    float adj  = clamp((luma - 0.5) * p.contrast + 0.5 + p.brightness, 0.0, 1.0);
+    float ratio = (luma > 1e-4) ? (adj / luma) : 1.0;
+    float3 v = clamp(c.rgb * ratio, 0.0, 1.0);
     output.write(float4(v, c.a), gid);
 }
 
