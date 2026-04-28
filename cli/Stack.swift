@@ -11,6 +11,7 @@
 // that lands the subcommand checks the input extension and rejects
 // AVI with a clear error.
 import Foundation
+import Metal
 
 enum Stack {
 
@@ -40,6 +41,8 @@ enum Stack {
         var lrIterations: Int = 30
         var keepCountAbsolute: Int? = nil
         var usePerChannelStacking = false
+        var useAutoPSF = false
+        var autoPSFSNR: Double = 50
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -200,6 +203,23 @@ enum Stack {
                 // as soon as the runner branch is ready.
                 usePerChannelStacking = true
                 i += 1
+            case "--auto-psf":
+                // Block C.1 v0: estimate Gaussian PSF sigma from the
+                // stacked image's limb LSF, then apply Wiener
+                // deconvolution with the estimated sigma. Mutually
+                // exclusive with --wiener-sigma / --lr-sigma since
+                // those override what we'd auto-estimate.
+                useAutoPSF = true
+                i += 1
+            case "--auto-psf-snr":
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v > 0
+                else {
+                    cliStderr("stack: --auto-psf-snr requires a positive number — typical 30..200 (lower = more regularisation)")
+                    return 64
+                }
+                autoPSFSNR = v
+                i += 2
             case "--keep-count":
                 // Absolute frame count override (e.g. --keep-count 1 to
                 // stack the single best-quality frame, no averaging).
@@ -242,7 +262,15 @@ enum Stack {
 
         guard let input = inputPath, let output = outputPath else {
             cliStderr("stack: missing input or output path")
-            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--sharpen [--sharpen-amount X]] [--metrics file.json] [--quiet]")
+            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--sharpen [--sharpen-amount X]] [--auto-psf [--auto-psf-snr N]] [--metrics file.json] [--quiet]")
+            return 64
+        }
+
+        // --auto-psf is mutually exclusive with manual --wiener-sigma /
+        // --lr-sigma — if the user wants auto, they get auto; if they
+        // want a specific sigma they pass it directly.
+        if useAutoPSF, wienerSigma != nil || lrSigma != nil {
+            cliStderr("stack: --auto-psf is mutually exclusive with --wiener-sigma / --lr-sigma (auto overrides; pick one)")
             return 64
         }
 
@@ -350,6 +378,58 @@ enum Stack {
                         Self.printProgress(progress)
                     }
                 }
+                // --auto-psf post-pass: load the bare stack, estimate
+                // sigma from the limb LSF, apply Wiener deconv with the
+                // estimated sigma. Runs OUTSIDE the bake-in so its
+                // contract is "post-process the stacked file" — same
+                // shape the GUI 'apply ALL stuff' flow will eventually
+                // call into.
+                if useAutoPSF {
+                    let device = MetalDevice.shared.device
+                    do {
+                        let baseTex = try ImageTexture.load(url: resultURL, device: device)
+                        if let psf = AutoPSF.estimate(texture: baseTex, device: device) {
+                            if !quiet {
+                                cliStderr(String(format:
+                                    "stack: auto-PSF sigma=%.2f px (confidence %.2f, disc r=%.0f at %.0f,%.0f)",
+                                    psf.sigma, psf.confidence, psf.discRadius,
+                                    psf.discCenter.x, psf.discCenter.y))
+                            }
+                            // Apply Wiener with the estimated sigma. Out-of-
+                            // place into a fresh texture, then re-write to
+                            // the same output URL. Confidence below 2.0
+                            // means the fit didn't lock onto a clean limb
+                            // — log a warning but still attempt deconv at
+                            // the (clamped) estimated value rather than
+                            // silently skip.
+                            if psf.confidence < 2.0, !quiet {
+                                cliStderr("stack: auto-PSF confidence is low (<2.0) — disc edge wasn't clean; result may be over- or under-sharpened")
+                            }
+                            let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+                                pixelFormat: baseTex.pixelFormat,
+                                width: baseTex.width, height: baseTex.height,
+                                mipmapped: false
+                            )
+                            outDesc.storageMode = .private
+                            outDesc.usage = [.shaderRead, .shaderWrite]
+                            if let deconvTex = device.makeTexture(descriptor: outDesc) {
+                                Wiener.deconvolve(
+                                    input: baseTex,
+                                    output: deconvTex,
+                                    sigma: psf.sigma,
+                                    snr: Float(autoPSFSNR),
+                                    device: device
+                                )
+                                try ImageTexture.write(texture: deconvTex, to: resultURL)
+                            }
+                        } else if !quiet {
+                            cliStderr("stack: auto-PSF estimation failed (no clear disc found) — skipping deconv")
+                        }
+                    } catch {
+                        cliStderr("stack: auto-PSF post-pass failed: \(error.localizedDescription)")
+                    }
+                }
+
                 let elapsed = Date().timeIntervalSince(started)
                 let outputBytes = (
                     (try? FileManager.default.attributesOfItem(atPath: resultURL.path))?[.size] as? Int
