@@ -52,14 +52,35 @@ struct SharpeningSection: View {
                     LabeledSlider(
                         label: "Scale \(idx + 1) (\(Int(pow(2.0, Double(idx)))) px)",
                         value: Binding(
-                            get: { app.sharpen.waveletScales[idx] },
-                            set: { app.sharpen.waveletScales[idx] = $0 }
+                            // Bounds-checked — when the user shrinks the
+                            // array via the minus button, in-flight ForEach
+                            // closures captured the now-out-of-range idx
+                            // and would crash on the next read. Guard
+                            // returns 0 for stale bindings; the row gets
+                            // discarded on the next layout pass.
+                            get: {
+                                idx < app.sharpen.waveletScales.count
+                                    ? app.sharpen.waveletScales[idx]
+                                    : 0
+                            },
+                            set: {
+                                guard idx < app.sharpen.waveletScales.count else { return }
+                                app.sharpen.waveletScales[idx] = $0
+                            }
                         ),
                         range: 0...10, format: "%.2f×"
                     )
                 }
-                // Add / remove scales — engine supports up to 8.
+                // Add / remove scales — engine supports up to 8 — plus a
+                // reset that drops back to the 6-band Registax-style
+                // default ([1.8, 1.4, 1.0, 0.6, 0.4, 0.3]).
                 HStack {
+                    Button("Reset to default") {
+                        app.sharpen.waveletScales = [1.8, 1.4, 1.0, 0.6, 0.4, 0.3]
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .help("Restore the 6-band default amounts and band count.")
                     Spacer()
                     Button {
                         if app.sharpen.waveletScales.count > 1 {
