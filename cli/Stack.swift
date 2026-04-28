@@ -39,6 +39,7 @@ enum Stack {
         var lrSigma: Double? = nil
         var lrIterations: Int = 30
         var keepCountAbsolute: Int? = nil
+        var usePerChannelStacking = false
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -191,6 +192,14 @@ enum Stack {
                 }
                 lrSigma = v
                 i += 2
+            case "--per-channel":
+                // Path B: per-channel (R / G / B) stacking for OSC Bayer
+                // sources. Implementation lands across the next sessions;
+                // the flag wires through to LuckyStackOptions today so
+                // we can A/B against the existing RGB-after-demosaic path
+                // as soon as the runner branch is ready.
+                usePerChannelStacking = true
+                i += 1
             case "--keep-count":
                 // Absolute frame count override (e.g. --keep-count 1 to
                 // stack the single best-quality frame, no averaging).
@@ -287,6 +296,7 @@ enum Stack {
             // frame (no averaging) and isolate 'lucky imaging' from
             // 'stacking averages'.
             if let kc = keepCountAbsolute { options.keepCount = kc }
+            options.perChannelStacking = usePerChannelStacking
             options.sigmaThreshold = sigmaThreshold
             options.drizzleScale = drizzleScale
             options.drizzlePixfrac = drizzlePixfrac

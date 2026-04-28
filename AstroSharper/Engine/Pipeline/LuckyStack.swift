@@ -128,6 +128,28 @@ struct LuckyStackOptions {
     /// smaller value to be picky per-AP independently of the global
     /// keep slider.
     var twoStageKeepFraction: Double? = nil
+
+    /// Per-channel stacking (Path B). When true, OSC Bayer sources are
+    /// split into R / G / B mono streams BEFORE alignment, each
+    /// channel is aligned and stacked independently against its own
+    /// reference, then the three results are recombined into the
+    /// final RGB. The documented BiggSky differentiator:
+    ///   - catches per-frame atmospheric chromatic dispersion
+    ///     (each channel shifts differently),
+    ///   - skips the bilinear/Malvar interpolation step entirely so
+    ///     the stack accumulator sees TRUE measured pixels per
+    ///     channel rather than reconstructed neighbour averages,
+    ///   - aligns each channel using same-channel features so
+    ///     sub-pixel precision survives across the keep set.
+    ///
+    /// Empirically: averaging always smears detail unless every frame
+    /// is sub-pixel-perfectly aligned. RGB-after-demosaic hides the
+    /// per-channel sub-pixel offsets so our shared-shift accumulator
+    /// can't compensate. Per-channel stacking re-exposes those
+    /// offsets and aligns them out.
+    ///
+    /// Mono SER captures ignore this flag.
+    var perChannelStacking: Bool = false
 }
 
 enum LuckyStackProgress {
