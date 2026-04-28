@@ -207,6 +207,22 @@ enum Stack {
                 // as soon as the runner branch is ready.
                 usePerChannelStacking = true
                 i += 1
+            case "--smart-auto":
+                // Convenience preset — sets sensible Block C defaults:
+                // per-channel ON (no-op for mono SER, real win on
+                // OSC Bayer); auto-PSF ON (auto-bails on textured
+                // subjects so lunar still gets bare-quality output);
+                // tiled deconv ON (skips noise amplification on
+                // background); dual-stage denoise 50/30 (balanced).
+                // Individual flags after `--smart-auto` still
+                // override (so `--smart-auto --denoise-pre 75` is
+                // smart-auto with stronger pre-denoise).
+                usePerChannelStacking = true
+                useAutoPSF = true
+                useTiledDeconv = true
+                denoisePrePercent = 50
+                denoisePostPercent = 30
+                i += 1
             case "--auto-psf":
                 // Block C.1 v0: estimate Gaussian PSF sigma from the
                 // stacked image's limb LSF, then apply Wiener

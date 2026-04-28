@@ -133,6 +133,25 @@ struct LuckyStackSection: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                // Smart auto preset — one-click sensible defaults for
+                // Block C. Per-channel + auto-PSF + tiled deconv +
+                // 50/30 denoise. Auto-PSF bails on lunar / textured
+                // subjects, so this is safe to leave on by default.
+                Button {
+                    app.luckyStack.perChannelStacking = true
+                    app.luckyStack.autoPSF = true
+                    app.luckyStack.autoPSFSNR = 50
+                    app.luckyStack.tiledDeconv = true
+                    app.luckyStack.tiledDeconvAPGrid = 8
+                    app.luckyStack.denoisePrePercent = 50
+                    app.luckyStack.denoisePostPercent = 30
+                } label: {
+                    Label("Smart auto", systemImage: "wand.and.stars")
+                        .font(.caption)
+                }
+                .controlSize(.small)
+                .help("One-click preset: per-channel + auto-PSF + tiled deconv + balanced denoise (50/30). Auto-PSF auto-bails on lunar / textured subjects (no over-deconv risk), so the same preset works for planetary AND lunar without manual tweaking.")
+
                 if app.luckyStack.mode == .scientific {
                     HStack(spacing: 4) {
                         Toggle("Multi-AP", isOn: Binding(
