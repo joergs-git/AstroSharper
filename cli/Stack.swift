@@ -29,8 +29,15 @@ enum Stack {
         var mode: LuckyStackMode = .lightspeed
         var useMultiAP = false
         var multiAPGrid = 8
-        var doSharpen = false
-        var sharpenAmount: Double = 1.0  // applied only when --sharpen is set
+        // `--sharpen` enables the unsharp + wavelet bundle. Deconv flags
+        // are independent: --wiener-sigma / --lr-sigma can fire on their
+        // own without unsharp / wavelet getting enabled.
+        var doUnsharpWavelet = false
+        var sharpenAmount: Double = 1.0
+        var wienerSigma: Double? = nil
+        var wienerSNR: Double = 50
+        var lrSigma: Double? = nil
+        var lrIterations: Int = 30
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -144,7 +151,7 @@ enum Stack {
                 // which by design looks soft — the GUI applies the same
                 // pipeline live before display, so the saved file then
                 // doesn't match what the user sees on screen.
-                doSharpen = true
+                doUnsharpWavelet = true
                 i += 1
             case "--sharpen-amount":
                 guard i + 1 < args.count, let v = Double(args[i + 1]),
@@ -154,7 +161,43 @@ enum Stack {
                     return 64
                 }
                 sharpenAmount = v
-                doSharpen = true
+                doUnsharpWavelet = true
+                i += 2
+            case "--wiener-sigma":
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v > 0, v <= 10
+                else {
+                    cliStderr("stack: --wiener-sigma requires a positive number in (0, 10] — typical 1.0..2.0 px")
+                    return 64
+                }
+                wienerSigma = v
+                i += 2
+            case "--wiener-snr":
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v > 0
+                else {
+                    cliStderr("stack: --wiener-snr requires a positive number — typical 30..200 (lower = more regularisation)")
+                    return 64
+                }
+                wienerSNR = v
+                i += 2
+            case "--lr-sigma":
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v > 0, v <= 10
+                else {
+                    cliStderr("stack: --lr-sigma requires a positive number in (0, 10] — typical 1.0..2.0 px")
+                    return 64
+                }
+                lrSigma = v
+                i += 2
+            case "--lr-iter":
+                guard i + 1 < args.count, let v = Int(args[i + 1]),
+                      v >= 1, v <= 200
+                else {
+                    cliStderr("stack: --lr-iter requires an integer in [1, 200] — typical 20..50")
+                    return 64
+                }
+                lrIterations = v
                 i += 2
             case "--quiet", "-q":
                 quiet = true
@@ -234,18 +277,32 @@ enum Stack {
             options.mode = mode
             options.useMultiAP = useMultiAP
             options.multiAPGrid = multiAPGrid
-            if doSharpen {
-                // Engine defaults: unsharp on, wavelet OFF. Flip wavelet on
-                // and override `amount` so a single --sharpen flag delivers
-                // the BiggSky / Registax-style "sharpened final" look.
+            // Bake-in fires when ANY post-stack sharpening flag was passed:
+            // --sharpen (unsharp + wavelet bundle), --wiener-sigma (Wiener
+            // deconv on its own), or --lr-sigma (Lucy-Richardson on its
+            // own). Each flag enables only its specific stage so users can
+            // empirically test 'pure' deconvolution against the reference
+            // without unsharp halos getting in the way.
+            let needsBakeIn = doUnsharpWavelet || wienerSigma != nil || lrSigma != nil
+            if needsBakeIn {
                 var sharpen = SharpenSettings()
                 sharpen.enabled = true
-                sharpen.unsharpEnabled = true
+                sharpen.unsharpEnabled = doUnsharpWavelet
                 sharpen.amount = sharpenAmount
-                sharpen.waveletEnabled = true
+                sharpen.waveletEnabled = doUnsharpWavelet
+                if let s = wienerSigma {
+                    sharpen.wienerEnabled = true
+                    sharpen.wienerSigma = s
+                    sharpen.wienerSNR = wienerSNR
+                }
+                if let s = lrSigma {
+                    sharpen.lrEnabled = true
+                    sharpen.lrSigma = s
+                    sharpen.lrIterations = lrIterations
+                }
                 options.bakeIn = LuckyStackBakeIn(
                     sharpen: sharpen,
-                    toneCurve: ToneCurveSettings(),  // disabled by default — keep the float TIFF linear
+                    toneCurve: ToneCurveSettings(),
                     toneCurveLUT: nil
                 )
             }
