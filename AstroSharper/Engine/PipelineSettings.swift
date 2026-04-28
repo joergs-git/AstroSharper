@@ -311,6 +311,19 @@ struct ToneCurveSettings: Equatable, Codable {
     /// gate also rejects any offset > 5 px as obviously wrong.
     var chromaticAlignment: Bool = false
 
+    /// Auto-stretch (histogram normalisation). Finds the per-luma
+    /// black-point (~1st percentile) and white-point (~99.5th
+    /// percentile) on a downsampled readback, then scales the texture
+    /// so the bright tail maps to ~0.95 and the dark floor maps to 0.
+    /// Closes the visible-quality gap to BiggSky / Registax raw PNG
+    /// references that all auto-stretch on export — without this the
+    /// stacked output uses only the camera's native dim range
+    /// (typically 30–60% of [0,1]) and looks washed-out / low-contrast
+    /// even though the underlying detail is the same. Default OFF
+    /// because the user explicitly asked for an unmodified view by
+    /// default; flip on to match the reference's tonal range.
+    var autoStretch: Bool = false
+
     // MARK: - Codable
     /// Backwards-compatible decoder so older preset JSON keeps loading. The
     /// synthesised encoder is fine — new files always carry the field.
@@ -325,6 +338,7 @@ struct ToneCurveSettings: Equatable, Codable {
         self.saturation         = try c.decodeIfPresent(Double.self, forKey: .saturation)         ?? 1.0
         self.autoWB             = try c.decodeIfPresent(Bool.self,   forKey: .autoWB)             ?? false
         self.chromaticAlignment = try c.decodeIfPresent(Bool.self,   forKey: .chromaticAlignment) ?? false
+        self.autoStretch        = try c.decodeIfPresent(Bool.self,   forKey: .autoStretch)        ?? false
         self.brightness         = try c.decodeIfPresent(Double.self, forKey: .brightness)         ?? 0.0
         self.contrast           = try c.decodeIfPresent(Double.self, forKey: .contrast)           ?? 1.0
     }
@@ -339,6 +353,7 @@ struct ToneCurveSettings: Equatable, Codable {
         saturation: Double = 1.0,
         autoWB: Bool = false,
         chromaticAlignment: Bool = false,
+        autoStretch: Bool = false,
         brightness: Double = 0.0,
         contrast: Double = 1.0
     ) {
@@ -347,6 +362,7 @@ struct ToneCurveSettings: Equatable, Codable {
         self.saturation = saturation
         self.autoWB = autoWB
         self.chromaticAlignment = chromaticAlignment
+        self.autoStretch = autoStretch
         self.brightness = brightness
         self.contrast = contrast
     }

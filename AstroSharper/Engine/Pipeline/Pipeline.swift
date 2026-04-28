@@ -22,6 +22,7 @@ final class Pipeline {
     private lazy var nrPSO      = makeComputePSO(function: "noise_reduce_bilateral")
     private lazy var wbPSO      = makeComputePSO(function: "apply_white_balance")
     private lazy var acdcPSO    = makeComputePSO(function: "shift_rb_channels")
+    private lazy var stretchPSO = makeComputePSO(function: "apply_auto_stretch")
     private lazy var bcPSO      = makeComputePSO(function: "apply_brightness_contrast")
     private lazy var shiftPSO   = makeComputePSO(function: "sub_pixel_shift")
     private lazy var stackPSO   = makeComputePSO(function: "stack_accumulate")
@@ -101,6 +102,7 @@ final class Pipeline {
         let satIsIdentity = abs(toneCurve.saturation - 1.0) < 1e-4
         let nothingActive = !toneCurve.autoWB
             && !toneCurve.chromaticAlignment
+            && !toneCurve.autoStretch
             && !sharpen.enabled
             && (!toneCurve.enabled || (toneCurveLUT == nil && bcIsIdentity && satIsIdentity))
         // Allocate a persistent output — not from pool, caller owns.
@@ -179,6 +181,33 @@ final class Pipeline {
                 }
                 current = result
             }
+        }
+
+        // Step 0.7: Auto-stretch — closes the visible-quality gap to
+        // BiggSky / Registax raw exports that all auto-stretch on save.
+        // Without this the stacked output uses only the camera's native
+        // dim range (typically 30–60% of [0,1]) and looks washed out
+        // even though the underlying detail is the same. Runs AFTER WB
+        // so per-channel statistics are normalised first, BEFORE
+        // sharpen so detail enhancement operates on a properly-
+        // contrasted canvas.
+        if toneCurve.autoStretch, let pts = computeAutoStretch(input: current) {
+            let result = borrow(width: w, height: h, format: input.pixelFormat)
+            borrowed.append(result)
+            if let enc = cmdBuf.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(stretchPSO)
+                enc.setTexture(current, index: 0)
+                enc.setTexture(result, index: 1)
+                var p = AutoStretchParamsCPU(
+                    blackPoint: pts.black,
+                    scale: 0.95 / (pts.white - pts.black)
+                )
+                enc.setBytes(&p, length: MemoryLayout<AutoStretchParamsCPU>.stride, index: 0)
+                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: stretchPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            current = result
         }
 
         // Step 1: L-R deconvolution
@@ -342,6 +371,73 @@ final class Pipeline {
 
     // MARK: - Helpers
 
+    /// Compute the (blackPoint, whitePoint) percentile pair for the auto-
+    /// stretch step. Reuses the same downsample-+-readback strategy as the
+    /// gray-world WB helper but reads luminance instead of channel means.
+    /// Sample percentiles are 0.5% (black floor — keeps the dim sky tail
+    /// from anchoring the stretch above the planet's dark side) and 99.5%
+    /// (white tail — keeps a couple of bright noise spikes from forcing
+    /// the planet's actual peak below 0.95).
+    private func computeAutoStretch(input: MTLTexture) -> (black: Float, white: Float)? {
+        let w = input.width, h = input.height
+        guard w > 0, h > 0 else { return nil }
+        let targetMax = 256
+        let scale = max(1, max(w, h) / targetMax)
+        let dwsW = max(1, w / scale)
+        let dwsH = max(1, h / scale)
+
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba32Float, width: dwsW, height: dwsH, mipmapped: false
+        )
+        desc.storageMode = .shared
+        desc.usage = [.shaderRead, .shaderWrite]
+        guard let staging = device.makeTexture(descriptor: desc),
+              let cmd = commandQueue.makeCommandBuffer() else { return nil }
+
+        let scaler = MPSImageBilinearScale(device: device)
+        var transform = MPSScaleTransform(
+            scaleX: Double(dwsW) / Double(w),
+            scaleY: Double(dwsH) / Double(h),
+            translateX: 0, translateY: 0
+        )
+        withUnsafePointer(to: &transform) { ptr in
+            scaler.scaleTransform = ptr
+            scaler.encode(commandBuffer: cmd, sourceTexture: input, destinationTexture: staging)
+        }
+        cmd.commit()
+        cmd.waitUntilCompleted()
+
+        let pixelCount = dwsW * dwsH
+        var rgba = [Float](repeating: 0, count: pixelCount * 4)
+        rgba.withUnsafeMutableBufferPointer { buf in
+            staging.getBytes(
+                buf.baseAddress!,
+                bytesPerRow: dwsW * MemoryLayout<Float>.size * 4,
+                from: MTLRegionMake2D(0, 0, dwsW, dwsH),
+                mipmapLevel: 0
+            )
+        }
+
+        // Per-pixel Rec.709 luma (matches the saturation kernel) so the
+        // stretch is computed once on luminance and applied to all RGB
+        // channels uniformly. Avoids the channel-imbalance artefacts a
+        // per-channel stretch would introduce.
+        var luma = [Float](repeating: 0, count: pixelCount)
+        for i in 0..<pixelCount {
+            luma[i] = 0.2126 * rgba[i * 4 + 0]
+                   + 0.7152 * rgba[i * 4 + 1]
+                   + 0.0722 * rgba[i * 4 + 2]
+        }
+        luma.sort()
+        let blackIdx = max(0, min(pixelCount - 1, Int(Double(pixelCount - 1) * 0.005)))
+        let whiteIdx = max(0, min(pixelCount - 1, Int(Double(pixelCount - 1) * 0.995)))
+        let black = luma[blackIdx]
+        let white = luma[whiteIdx]
+        // Degenerate input (uniform plane) → no useful stretch possible.
+        guard white > black + 1e-4 else { return nil }
+        return (black, white)
+    }
+
     /// Compute a gray-world white-balance correction for `input`. Downsamples
     /// to a small staging texture (256-ish along the longest side), reads
     /// back to CPU, and reuses the existing `WhiteBalance.computeGrayWorld`
@@ -465,6 +561,12 @@ struct ChannelShiftParamsCPU {
 struct BrightnessContrastParamsCPU {
     var brightness: Float
     var contrast: Float
+}
+
+/// Mirror of the Metal `AutoStretchParams` struct.
+struct AutoStretchParamsCPU {
+    var blackPoint: Float
+    var scale: Float
 }
 
 // Utility for dispatch sizing.

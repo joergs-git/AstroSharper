@@ -227,6 +227,38 @@ kernel void apply_white_balance(
     output.write(float4(v, c.a), gid);
 }
 
+// MARK: - Auto-stretch (histogram normalisation)
+//
+// Linear stretch that maps a pre-computed black-point and white-point
+// onto [0, 0.95]. Bright tail (anything ≥ whitePoint) clips to ~0.95
+// rather than 1.0 so post-stretch sharpening still has headroom; dark
+// floor (anything ≤ blackPoint) clips to 0. Operates per-channel so
+// the chromatic balance is preserved.
+//
+//   out = clamp((in - blackPoint) * scale, 0, 0.95)
+//   scale = 0.95 / (whitePoint - blackPoint)
+//
+// blackPoint / whitePoint come from the percentile pass on a 256x256
+// downsampled luminance readback (CPU side). Scale is pre-computed so
+// the kernel doesn't divide per-pixel.
+
+struct AutoStretchParams {
+    float blackPoint;
+    float scale;          // pre-computed = 0.95 / (whitePoint - blackPoint)
+};
+
+kernel void apply_auto_stretch(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    constant AutoStretchParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    float3 v = clamp((c.rgb - p.blackPoint) * p.scale, 0.0, 0.95);
+    output.write(float4(v, c.a), gid);
+}
+
 // MARK: - Bilateral noise reduction
 //
 // Edge-preserving smoother that runs as the LAST step of the sharpening

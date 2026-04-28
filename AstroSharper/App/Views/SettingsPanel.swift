@@ -346,6 +346,8 @@ struct ToneCurveSection: View {
                 .help("Computes a per-channel offset+scale on the input so the three channels share a neutral mean. Critical for OSC stacks — Bayer green is naturally amplified by 2× photosite count, so post-stack OSC images otherwise look greenish once saturation > 1. Mono / pre-balanced sources are unaffected.")
             Toggle("Atmospheric Chromatic Dispersion Correction", isOn: $app.toneCurve.chromaticAlignment)
                 .help("Phase-correlates R and B against G on the post-stack output and applies sub-pixel shifts so the three channels re-align (G stays anchored). Atmospheric refraction shifts blue more than red, so OSC planets at low altitude show coloured limb fringes; ACDC removes them. No-op on mono / pre-aligned sources because the offsets come out near zero.")
+            Toggle("Auto Stretch (histogram normalisation)", isOn: $app.toneCurve.autoStretch)
+                .help("Maps the dim camera-native pixel range to fill the display range. Finds the 0.5%-percentile dark floor and 99.5%-percentile bright tail, scales linearly so the bright tail lands at ~95%. This is the default behaviour of every external export tool (BiggSky, Registax) — without it the stacked output looks washed out and low-contrast even though the underlying detail is the same. Closes most of the visible gap to reference exports in one step.")
             Divider().padding(.vertical, 4)
             ToneCurveEditor(
                 points: $app.toneCurve.controlPoints,

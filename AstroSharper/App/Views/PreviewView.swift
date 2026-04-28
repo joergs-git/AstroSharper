@@ -579,6 +579,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 || tone.controlPoints.last != CGPoint(x: 1, y: 1))
         let nothingActive = !tone.autoWB
             && !tone.chromaticAlignment
+            && !tone.autoStretch
             && !sharpen.enabled
             && (!tone.enabled || (!toneCurveActive && bcIsIdentity && satIsIdentity))
         if nothingActive {
