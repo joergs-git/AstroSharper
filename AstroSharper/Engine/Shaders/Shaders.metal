@@ -1625,18 +1625,32 @@ kernel void quality_partials_per_ap(
     }
 }
 
-// Per-AP keep-mask accumulator with bilinear AP blending (A.2 + B.2).
+// Per-AP keep-mask accumulator with raised-cosine AP blending (A.2 + B.2).
 //
 // Each output pixel reads the keep flags from the FOUR nearest AP
-// cells, blends them with bilinear weights based on sub-cell
-// position, and contributes the bilinearly-weighted result. AP
-// centres land on integer coords of the (gridSize × gridSize) grid;
-// pixels at AP centres get full contribution from one cell only,
-// pixels at AP boundaries get a smooth blend across cells. This
-// kills the rectangular tile artifacts the hard-edge first version
-// produced (visible in two-stage output as blocky bands).
+// cells and blends them with a raised-cosine weight profile based on
+// sub-cell position. AP centres land on integer coords of the
+// (gridSize × gridSize) grid; pixels at AP centres get full
+// contribution from one cell only, pixels at AP boundaries get a
+// smooth blend across cells.
 //
-// effectiveKeep = Σᵢ keep[apᵢ, frame] × bilinearWeight[apᵢ]
+// B.2 feathering: per-axis weights use `0.5·(1+cos(π·d))` for d ∈ [0,1]
+// instead of the original bilinear `1-d` / `d`. The raised-cosine
+// profile has continuous derivatives both at the AP centre (d=0) and
+// at the neighbour's centre (d=1), eliminating the tent-shape kinks
+// that produced visible quilting on Jupiter zone boundaries with the
+// bilinear blend. Sum-to-1 invariant preserved (cos(π·d) + cos(π·(1−d))
+// = 0, so the four corner weights still tile cleanly).
+//
+// The implicit feather radius equals 0.5 × cellSpacing — wider than
+// BiggSky's documented 0.25 × AP_size default, but BiggSky-compatible
+// because their narrower feather is normalised against accumulated
+// weight which we already do via wtTex. Wider feather = more frame
+// overlap per pixel = better SNR averaging.
+//
+// CPU reference for the weight curve: `APFeather.cosineWeight`.
+//
+// effectiveKeep = Σᵢ keep[apᵢ, frame] × cosineWeight[apᵢ]
 //                ∈ [0, 1]
 //
 // The per-pixel weight texture accumulates `effectiveKeep × weight`
@@ -1681,11 +1695,20 @@ kernel void lucky_accumulate_per_ap_keep(
     int x1c = clamp(apX0 + 1, 0, gridMax);
     int y1c = clamp(apY0 + 1, 0, gridMax);
 
-    // Bilinear weights for the 4 surrounding APs (sum to 1).
-    float w00 = (1.0 - dx) * (1.0 - dy);
-    float w10 =        dx  * (1.0 - dy);
-    float w01 = (1.0 - dx) *        dy;
-    float w11 =        dx  *        dy;
+    // Raised-cosine weights for the 4 surrounding APs (sum to 1). Per-axis
+    // contribution: `0.5·(1+cos(π·d))` at the near corner, `0.5·(1-cos(π·d))`
+    // at the far corner. Identity `cos(π·(1-d)) = -cos(π·d)` keeps the
+    // partition-of-unity property the bilinear blend relied on.
+    float cx = cos(M_PI_F * dx);
+    float cy = cos(M_PI_F * dy);
+    float fx0 = 0.5 * (1.0 + cx);    // weight toward AP at apX0  (near in x)
+    float fx1 = 0.5 * (1.0 - cx);    // weight toward AP at apX0+1 (far in x)
+    float fy0 = 0.5 * (1.0 + cy);    // weight toward AP at apY0  (near in y)
+    float fy1 = 0.5 * (1.0 - cy);    // weight toward AP at apY0+1 (far in y)
+    float w00 = fx0 * fy0;
+    float w10 = fx1 * fy0;
+    float w01 = fx0 * fy1;
+    float w11 = fx1 * fy1;
 
     // Look up keep flags. Buffer layout: [apLinear × frameCount + frameIndex].
     uint frameC = p.frameCount;

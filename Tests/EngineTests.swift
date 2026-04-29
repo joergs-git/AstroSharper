@@ -910,6 +910,56 @@ struct APFeatherTests {
         #expect(APFeather.defaultFeatherRadius(forAPSize: 64) == 16)
         #expect(APFeather.defaultFeatherRadius(forAPSize: 32) == 8)
     }
+
+    /// Mirrors the math in `lucky_accumulate_per_ap_keep`'s 4-corner
+    /// raised-cosine blend (Shaders.metal). For any (dx, dy) ∈ [0,1]²
+    /// the four corner weights sum to 1 — the partition-of-unity
+    /// invariant the kernel relies on.
+    @Test("4-corner raised-cosine per-axis weights sum to 1 (kernel invariant)")
+    func fourCornerCosineSumsToOne() {
+        for dxStep in 0...10 {
+            for dyStep in 0...10 {
+                let dx = Float(dxStep) / 10
+                let dy = Float(dyStep) / 10
+                let cx = Foundation.cos(Float.pi * dx)
+                let cy = Foundation.cos(Float.pi * dy)
+                let fx0 = 0.5 * (1 + cx)
+                let fx1 = 0.5 * (1 - cx)
+                let fy0 = 0.5 * (1 + cy)
+                let fy1 = 0.5 * (1 - cy)
+                let sum = fx0 * fy0 + fx1 * fy0 + fx0 * fy1 + fx1 * fy1
+                #expect(abs(sum - 1) < 1e-5,
+                        "(dx=\(dx), dy=\(dy)) sum=\(sum) deviates from 1")
+            }
+        }
+    }
+
+    /// Endpoint check: at AP centre (dx=0, dy=0) all weight goes to
+    /// the (apX0, apY0) corner; the other 3 are zero. Mirrors the
+    /// bilinear case but verifies the new cosine implementation
+    /// reduces correctly at integer corner coords.
+    @Test("4-corner raised-cosine collapses to one corner at AP centres")
+    func cosineCollapsesAtCorners() {
+        for (dx, dy, expectIdx) in [
+            (Float(0), Float(0), 0),
+            (Float(1), Float(0), 1),
+            (Float(0), Float(1), 2),
+            (Float(1), Float(1), 3),
+        ] {
+            let cx = Foundation.cos(Float.pi * dx)
+            let cy = Foundation.cos(Float.pi * dy)
+            let fx0 = 0.5 * (1 + cx); let fx1 = 0.5 * (1 - cx)
+            let fy0 = 0.5 * (1 + cy); let fy1 = 0.5 * (1 - cy)
+            let weights = [fx0 * fy0, fx1 * fy0, fx0 * fy1, fx1 * fy1]
+            for (i, w) in weights.enumerated() {
+                if i == expectIdx {
+                    #expect(abs(w - 1) < 1e-5)
+                } else {
+                    #expect(abs(w) < 1e-5)
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Bilinear sub-pixel shift
