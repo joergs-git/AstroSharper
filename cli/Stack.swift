@@ -436,10 +436,19 @@ enum Stack {
             // own). Each flag enables only its specific stage so users can
             // empirically test 'pure' deconvolution against the reference
             // without unsharp halos getting in the way.
-            let needsBakeIn = doUnsharpWavelet || wienerSigma != nil || lrSigma != nil
+            // --smart-auto needs bake-in too — the auto-stretch tone-
+            // curve step lives inside Pipeline.process (which is what
+            // bake-in invokes). Without it the saved file uses only
+            // the camera's native dim range (typically 30–60% of [0,1])
+            // and looks washed-out compared to SharpCap-style auto-
+            // stretched displays. ToneCurveSettings now defaults
+            // autoStretch=true (see PipelineSettings.swift), so any
+            // bake-in fires it automatically.
+            let needsBakeIn = doUnsharpWavelet || wienerSigma != nil
+                              || lrSigma != nil || useAutoPSF
             if needsBakeIn {
                 var sharpen = SharpenSettings()
-                sharpen.enabled = true
+                sharpen.enabled = doUnsharpWavelet || wienerSigma != nil || lrSigma != nil
                 sharpen.unsharpEnabled = doUnsharpWavelet
                 sharpen.amount = sharpenAmount
                 sharpen.waveletEnabled = doUnsharpWavelet
@@ -455,7 +464,7 @@ enum Stack {
                 }
                 options.bakeIn = LuckyStackBakeIn(
                     sharpen: sharpen,
-                    toneCurve: ToneCurveSettings(),
+                    toneCurve: ToneCurveSettings(),  // defaults autoStretch=true
                     toneCurveLUT: nil
                 )
             }

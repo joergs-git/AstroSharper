@@ -314,15 +314,22 @@ struct ToneCurveSettings: Equatable, Codable {
     /// Auto-stretch (histogram normalisation). Finds the per-luma
     /// black-point (~1st percentile) and white-point (~99.5th
     /// percentile) on a downsampled readback, then scales the texture
-    /// so the bright tail maps to ~0.95 and the dark floor maps to 0.
+    /// so the bright tail maps to ~0.85 and the dark floor maps to 0.
     /// Closes the visible-quality gap to BiggSky / Registax raw PNG
     /// references that all auto-stretch on export — without this the
     /// stacked output uses only the camera's native dim range
     /// (typically 30–60% of [0,1]) and looks washed-out / low-contrast
-    /// even though the underlying detail is the same. Default OFF
-    /// because the user explicitly asked for an unmodified view by
-    /// default; flip on to match the reference's tonal range.
-    var autoStretch: Bool = false
+    /// even though the underlying detail is the same.
+    ///
+    /// Default ON since 2026-04-29 — user feedback was that the
+    /// preview + saved files always looked too bright / washed out;
+    /// flipping the default closed the perceived gap to SharpCap and
+    /// other auto-stretching viewers. The decoder default below
+    /// stays at false so older saved-preset JSON (without this field)
+    /// still loads with the historical unstretched behaviour;
+    /// only fresh ToneCurveSettings instances + new built-in presets
+    /// get the new default.
+    var autoStretch: Bool = true
 
     // MARK: - Codable
     /// Backwards-compatible decoder so older preset JSON keeps loading. The
@@ -353,7 +360,7 @@ struct ToneCurveSettings: Equatable, Codable {
         saturation: Double = 1.0,
         autoWB: Bool = false,
         chromaticAlignment: Bool = false,
-        autoStretch: Bool = false,
+        autoStretch: Bool = true,
         brightness: Double = 0.0,
         contrast: Double = 1.0
     ) {
