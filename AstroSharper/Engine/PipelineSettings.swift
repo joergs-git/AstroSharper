@@ -11,6 +11,17 @@
 import CoreGraphics
 import Foundation
 
+/// High-level pipeline stage groups, used by the live-preview path to
+/// surface "what's running right now" in the UI. Each case maps to one
+/// SettingsPanel section so the panel header can light up while its
+/// stage is being executed by `Pipeline.process`. Order in the enum
+/// matches the execution order in the pipeline.
+enum PreviewStage: String, Equatable {
+    case colourLevels   // auto-WB, ACDC
+    case sharpening     // L-R, wavelet, unsharp, Wiener, NR
+    case toneCurve      // tone LUT, brightness/contrast, saturation
+}
+
 struct SharpenSettings: Equatable, Codable {
     // Section default OFF — user opts in once they want sharpening. Earlier
     // default-on showed every freshly-opened file pre-sharpened with halo
@@ -311,32 +322,6 @@ struct ToneCurveSettings: Equatable, Codable {
     /// gate also rejects any offset > 5 px as obviously wrong.
     var chromaticAlignment: Bool = false
 
-    /// Auto-stretch (histogram normalisation). Finds the per-luma
-    /// black-point (~1st percentile) and white-point (~99.5th
-    /// percentile) on a downsampled readback, then scales the texture
-    /// so the bright tail maps to ~0.85 and the dark floor maps to 0.
-    /// Closes the visible-quality gap to BiggSky / Registax raw PNG
-    /// references that all auto-stretch on export — without this the
-    /// stacked output uses only the camera's native dim range
-    /// (typically 30–60% of [0,1]) and looks washed-out / low-contrast
-    /// even though the underlying detail is the same.
-    ///
-    /// Default OFF — flipping it on (commit `e0da97c` 2026-04-29)
-    /// was reverted the same day after user feedback: the percentile
-    /// fit + 0.85 scale + 0.8 gamma combination produces an
-    /// "unnatural super-high-contrast" look on lunar / planetary
-    /// captures (especially with the auto-PSF + bake-in chain),
-    /// which is worse than the original "too bright / washed out"
-    /// complaint that motivated the flip. Leaving auto-stretch as
-    /// an opt-in so users who want SharpCap-style display stretch
-    /// can enable it manually, but the default preserves the
-    /// bare-stack tonal range the user already approved on lunar
-    /// (16_moon_bare quality). Real fix for the original "too
-    /// bright" issue is probably a softer display-only stretch
-    /// (black-point clip without white-point pull) or a different
-    /// gamma — TBD with more user feedback.
-    var autoStretch: Bool = false
-
     // MARK: - Codable
     /// Backwards-compatible decoder so older preset JSON keeps loading. The
     /// synthesised encoder is fine — new files always carry the field.
@@ -351,7 +336,6 @@ struct ToneCurveSettings: Equatable, Codable {
         self.saturation         = try c.decodeIfPresent(Double.self, forKey: .saturation)         ?? 1.0
         self.autoWB             = try c.decodeIfPresent(Bool.self,   forKey: .autoWB)             ?? false
         self.chromaticAlignment = try c.decodeIfPresent(Bool.self,   forKey: .chromaticAlignment) ?? false
-        self.autoStretch        = try c.decodeIfPresent(Bool.self,   forKey: .autoStretch)        ?? false
         self.brightness         = try c.decodeIfPresent(Double.self, forKey: .brightness)         ?? 0.0
         self.contrast           = try c.decodeIfPresent(Double.self, forKey: .contrast)           ?? 1.0
     }
@@ -366,7 +350,6 @@ struct ToneCurveSettings: Equatable, Codable {
         saturation: Double = 1.0,
         autoWB: Bool = false,
         chromaticAlignment: Bool = false,
-        autoStretch: Bool = false,
         brightness: Double = 0.0,
         contrast: Double = 1.0
     ) {
@@ -375,7 +358,6 @@ struct ToneCurveSettings: Equatable, Codable {
         self.saturation = saturation
         self.autoWB = autoWB
         self.chromaticAlignment = chromaticAlignment
-        self.autoStretch = autoStretch
         self.brightness = brightness
         self.contrast = contrast
     }

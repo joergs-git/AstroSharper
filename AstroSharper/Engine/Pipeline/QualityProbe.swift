@@ -414,8 +414,20 @@ final class SerQualityScanner {
     /// it on synthetic distributions without booting Metal or building
     /// a SerReader.
     ///
+    /// Empirical clamp range [0.20, 0.75] is anchored on the BiggSky
+    /// reference dataset (2026-04-29):
+    ///   - Saturn good seeing, 28 manual APs: 75% keep
+    ///   - Jupiter f/14, 141 APs: 75% keep
+    ///   - Mars opposition, 28 APs: 67% keep
+    ///   - Jupiter (12" SCT), 31 auto APs: 65% keep
+    ///   - Jupiter UL16 F/20, 146 APs: 20% keep (high frame count, cherry pick)
+    /// The previous [0.05, 0.50] band saturated at 50% on every tight
+    /// distribution and bottomed at 5% on very wide ones — both ends
+    /// outside the empirically-verified BiggSky norm.
+    ///
     /// Guarantees:
-    ///   * Result fraction is in [0.05, 0.75] inclusive.
+    ///   * Result fraction is in [0.20, 0.75] inclusive (excluding the
+    ///     empty-sample fallback which uses 25%).
     ///   * Result count is at least `min(totalFrames, 50)`.
     ///   * When `totalFrames >= 100`, result count is at least 100
     ///     (typical SNR floor).
@@ -429,6 +441,8 @@ final class SerQualityScanner {
     ) -> (fraction: Double, count: Int, text: String) {
         let absoluteFloor = 50
         let typicalFloor  = min(totalFrames, 100)
+        let lowerBound = 0.20
+        let upperBound = 0.75
 
         // Empty / degenerate input → BiggSky 25% default + floor.
         guard !sortedScores.isEmpty, totalFrames > 0 else {
@@ -443,21 +457,21 @@ final class SerQualityScanner {
         let aboveKneeCount = sortedScores.count - kneeIdx
         let kneeFraction = Double(aboveKneeCount) / Double(sortedScores.count)
 
-        // Clamp to scientific lucky-imaging norms. Tight distributions
-        // (kneeFraction → 1.0) get capped at 50% rather than 75%; very
-        // wide distributions (kneeFraction → 0) get a 5% floor so we
-        // don't accidentally recommend "keep nothing".
-        var clampedFraction = max(0.05, min(0.50, kneeFraction))
-
-        // Jitter tightening.
+        // Jitter tightening — applied to the raw kneeFraction BEFORE
+        // the empirical clamp, so a high-jitter capture lands lower in
+        // the [0.20, 0.75] band rather than getting masked by the floor.
+        var rawFraction = kneeFraction
         var jitterNote = ""
         if let j = jitterRMS, j > 15 {
-            let before = clampedFraction
-            clampedFraction = max(0.05, clampedFraction * 0.7)
-            jitterNote = " High jitter (\(String(format: "%.1f", j)) px RMS) — tightened from \(Int((before * 100).rounded()))% to \(Int((clampedFraction * 100).rounded()))%."
+            let before = rawFraction
+            rawFraction = rawFraction * 0.7
+            jitterNote = " High jitter (\(String(format: "%.1f", j)) px RMS) — tightened from \(Int((before * 100).rounded()))% to \(Int((rawFraction * 100).rounded()))%."
         } else if let j = jitterRMS, j > 6 {
             jitterNote = " Moderate jitter (\(String(format: "%.1f", j)) px RMS)."
         }
+
+        // Clamp to the BiggSky empirical band.
+        let clampedFraction = max(lowerBound, min(upperBound, rawFraction))
 
         // Frame-count floor: lift the keep count up to whichever floor
         // applies, then re-derive the fraction so display is consistent.
@@ -471,8 +485,10 @@ final class SerQualityScanner {
         var text: String
         if keepCount > idealCount {
             text = "Keep top \(pct)% (\(keepCount) of \(totalFrames) frames). Knee at \(kneePct)% suggests fewer; lifted to the SNR floor."
-        } else if kneeFraction > 0.5 {
-            text = "Keep top \(pct)% (\(keepCount) of \(totalFrames) frames). Tight distribution — capped at 50% per BiggSky norms."
+        } else if kneeFraction >= upperBound {
+            text = "Keep top \(pct)% (\(keepCount) of \(totalFrames) frames). Tight distribution — capped at \(Int(upperBound * 100))% per BiggSky norms."
+        } else if kneeFraction < lowerBound {
+            text = "Keep top \(pct)% (\(keepCount) of \(totalFrames) frames). Wide distribution — lifted to \(Int(lowerBound * 100))% floor (BiggSky's lowest empirical keep rate)."
         } else {
             text = "Keep top \(pct)% (\(keepCount) of \(totalFrames) frames) — sharpness drops sharply below this point."
         }

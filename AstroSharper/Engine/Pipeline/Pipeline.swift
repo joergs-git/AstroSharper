@@ -13,21 +13,25 @@ final class Pipeline {
     let commandQueue: MTLCommandQueue
     private let library: MTLLibrary
 
-    // Compute pipelines (lazily built).
-    private lazy var unsharpPSO = makeComputePSO(function: "unsharp_mask")
-    private lazy var divPSO     = makeComputePSO(function: "lr_divide")
-    private lazy var mulPSO     = makeComputePSO(function: "lr_multiply")
-    private lazy var tonePSO    = makeComputePSO(function: "apply_tone_curve")
-    private lazy var satPSO     = makeComputePSO(function: "apply_saturation")
-    private lazy var nrPSO      = makeComputePSO(function: "noise_reduce_bilateral")
-    private lazy var wbPSO      = makeComputePSO(function: "apply_white_balance")
-    private lazy var acdcPSO    = makeComputePSO(function: "shift_rb_channels")
-    private lazy var stretchPSO = makeComputePSO(function: "apply_auto_stretch")
-    private lazy var bcPSO      = makeComputePSO(function: "apply_brightness_contrast")
-    private lazy var shiftPSO   = makeComputePSO(function: "sub_pixel_shift")
-    private lazy var stackPSO   = makeComputePSO(function: "stack_accumulate")
-    private lazy var subPSO     = makeComputePSO(function: "subtract_textures")
-    private lazy var waddPSO    = makeComputePSO(function: "weighted_add")
+    // Compute pipelines — eagerly built in init() so the ~80 ms one-time
+    // compilation cost of these 14 kernels doesn't land on the user's
+    // first slider drag. Building all PSOs upfront moves the hiccup into
+    // app launch (where a SwiftUI splash already covers it) and gives a
+    // smooth-from-tick-zero live preview.
+    private let unsharpPSO: MTLComputePipelineState
+    private let divPSO:     MTLComputePipelineState
+    private let mulPSO:     MTLComputePipelineState
+    private let tonePSO:    MTLComputePipelineState
+    private let satPSO:     MTLComputePipelineState
+    private let nrPSO:      MTLComputePipelineState
+    private let wbPSO:      MTLComputePipelineState
+    private let acdcPSO:    MTLComputePipelineState
+    private let stretchPSO: MTLComputePipelineState
+    private let bcPSO:      MTLComputePipelineState
+    private let shiftPSO:   MTLComputePipelineState
+    private let stackPSO:   MTLComputePipelineState
+    private let subPSO:     MTLComputePipelineState
+    private let waddPSO:    MTLComputePipelineState
 
     // Texture pool (per pipeline instance). Protected by `poolLock` since
     // process() may run on a background queue while other code paths also
@@ -38,12 +42,42 @@ final class Pipeline {
     struct TextureKey: Hashable { let w: Int; let h: Int; let format: Int }
 
     init() {
-        self.device = MetalDevice.shared.device
+        let dev = MetalDevice.shared.device
+        self.device = dev
         self.commandQueue = MetalDevice.shared.commandQueue
         guard let lib = MetalDevice.shared.library else {
             fatalError("AstroSharper: default Metal library missing — is Shaders.metal in the target?")
         }
         self.library = lib
+        // Eager PSO compilation. Building all 14 compute pipelines upfront
+        // is ~80 ms on Apple Silicon — fine at app launch, painful as a
+        // first-slider hiccup if left lazy. The kernels are tiny and
+        // shared across every pipeline call anyway, so up-front build is
+        // strictly cheaper than first-touch latency. (No cleanup work
+        // needed; PSOs are reference-counted.)
+        //
+        // The local `make` captures `dev` and `lib` only (not `self`) so
+        // it's safe to call before all stored properties are initialised.
+        @inline(__always) func make(_ name: String) -> MTLComputePipelineState {
+            guard let fn = lib.makeFunction(name: name) else {
+                fatalError("AstroSharper: Metal function '\(name)' not found")
+            }
+            return try! dev.makeComputePipelineState(function: fn)
+        }
+        self.unsharpPSO = make("unsharp_mask")
+        self.divPSO     = make("lr_divide")
+        self.mulPSO     = make("lr_multiply")
+        self.tonePSO    = make("apply_tone_curve")
+        self.satPSO     = make("apply_saturation")
+        self.nrPSO      = make("noise_reduce_bilateral")
+        self.wbPSO      = make("apply_white_balance")
+        self.acdcPSO    = make("shift_rb_channels")
+        self.stretchPSO = make("apply_auto_stretch")
+        self.bcPSO      = make("apply_brightness_contrast")
+        self.shiftPSO   = make("sub_pixel_shift")
+        self.stackPSO   = make("stack_accumulate")
+        self.subPSO     = make("subtract_textures")
+        self.waddPSO    = make("weighted_add")
     }
 
     private func makeComputePSO(function name: String) -> MTLComputePipelineState {
@@ -83,11 +117,29 @@ final class Pipeline {
 
     /// Process `input` with `settings`, return new texture with the result.
     /// Caller owns the returned texture (not from the pool).
+    ///
+    /// `preview` = true switches Wiener to a 50%-downsampled FFT (~4× faster)
+    /// so the live throttle path stays under the 33 ms budget. The
+    /// downsample-Wiener-upsample chain produces a slightly softer result
+    /// than the full-res path; PreviewCoordinator runs a second
+    /// `preview: false` pass after a 200 ms drag-end debounce to land
+    /// the final full-res Wiener result.
+    ///
+    /// `onStageChange` is invoked synchronously on the calling (background)
+    /// thread before each major pipeline stage transitions in: with
+    /// `.colourLevels` before WB / ACDC, `.sharpening` before LR / Wavelet /
+    /// Unsharp / Wiener / NR, `.toneCurve` before tone LUT / B/C /
+    /// Saturation, and `nil` after the final blit. The PreviewCoordinator
+    /// hops to `DispatchQueue.main.async` and writes the value to
+    /// `AppModel.activePreviewStage`, which the SettingsPanel section
+    /// headers watch.
     func process(
         input: MTLTexture,
         sharpen: SharpenSettings,
         toneCurve: ToneCurveSettings,
-        toneCurveLUT: MTLTexture? = nil
+        toneCurveLUT: MTLTexture? = nil,
+        preview: Bool = false,
+        onStageChange: ((PreviewStage?) -> Void)? = nil
     ) -> MTLTexture {
         let w = input.width
         let h = input.height
@@ -102,7 +154,6 @@ final class Pipeline {
         let satIsIdentity = abs(toneCurve.saturation - 1.0) < 1e-4
         let nothingActive = !toneCurve.autoWB
             && !toneCurve.chromaticAlignment
-            && !toneCurve.autoStretch
             && !sharpen.enabled
             && (!toneCurve.enabled || (toneCurveLUT == nil && bcIsIdentity && satIsIdentity))
         // Allocate a persistent output — not from pool, caller owns.
@@ -125,6 +176,13 @@ final class Pipeline {
         // is unsafe — the command buffer still references those textures.
         var current: MTLTexture = input
         var borrowed: [MTLTexture] = []
+
+        // Stage transition: colour & levels (auto-WB + ACDC). Only emitted
+        // when at least one of those toggles is on — emitting a callback
+        // with .colourLevels just to flip back to nil immediately would
+        // produce visible UI flicker.
+        let runColourLevels = toneCurve.autoWB || toneCurve.chromaticAlignment
+        if runColourLevels { onStageChange?(.colourLevels) }
 
         // Step 0: Auto white balance (gray-world). MUST run BEFORE any
         // sharpen step because sharpen amplifies channel imbalance into
@@ -183,33 +241,11 @@ final class Pipeline {
             }
         }
 
-        // Step 0.7: Auto-stretch — closes the visible-quality gap to
-        // BiggSky / Registax raw exports that all auto-stretch on save.
-        // Without this the stacked output uses only the camera's native
-        // dim range (typically 30–60% of [0,1]) and looks washed out
-        // even though the underlying detail is the same. Runs AFTER WB
-        // so per-channel statistics are normalised first, BEFORE
-        // sharpen so detail enhancement operates on a properly-
-        // contrasted canvas.
-        if toneCurve.autoStretch, let pts = computeAutoStretch(input: current) {
-            let result = borrow(width: w, height: h, format: input.pixelFormat)
-            borrowed.append(result)
-            if let enc = cmdBuf.makeComputeCommandEncoder() {
-                enc.setComputePipelineState(stretchPSO)
-                enc.setTexture(current, index: 0)
-                enc.setTexture(result, index: 1)
-                var p = AutoStretchParamsCPU(
-                    blackPoint: pts.black,
-                    scale: 0.85 / (pts.white - pts.black),
-                    gamma: 0.8  // gentle midtone lift; 1.0 = pure linear
-                )
-                enc.setBytes(&p, length: MemoryLayout<AutoStretchParamsCPU>.stride, index: 0)
-                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: stretchPSO)
-                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
-                enc.endEncoding()
-            }
-            current = result
-        }
+        // Stage transition: sharpening (LR / Wavelet / Unsharp / Wiener / NR).
+        // Gated on `sharpen.enabled` so the panel header doesn't flash when
+        // the section is off — even one of the sub-toggles being on with
+        // the master off shouldn't light up the section visually.
+        if sharpen.enabled { onStageChange?(.sharpening) }
 
         // Step 1: L-R deconvolution
         if sharpen.enabled && sharpen.lrEnabled {
@@ -258,18 +294,65 @@ final class Pipeline {
         // Wiener is a CPU-FFT stage; it manages its own command buffer + sync
         // internally. We need to flush all GPU work that wrote into `current`
         // before Wiener reads it, so commit + wait once here.
+        //
+        // `preview: true` switches to a 50%-downsampled FFT — ~4× faster
+        // (FFT cost scales with pixel count) at the cost of a softer result.
+        // The PreviewCoordinator runs a final `preview: false` pass after a
+        // 200 ms drag-end debounce so the user lands on a full-res image.
         let needsWiener = sharpen.enabled && sharpen.wienerEnabled
         if needsWiener {
             cmdBuf.commit()
             cmdBuf.waitUntilCompleted()
             let result = borrow(width: w, height: h, format: input.pixelFormat)
             borrowed.append(result)
-            Wiener.deconvolve(
-                input: current, output: result,
-                sigma: Float(sharpen.wienerSigma),
-                snr: Float(sharpen.wienerSNR),
-                device: device
-            )
+            if preview {
+                // Downsample → Wiener → upsample. Sigma scales with the
+                // downsample factor (a 1 px PSF on the full-res image is
+                // 0.5 px on a half-res copy). MPSImageBilinearScale runs
+                // GPU-side; the Wiener readback then sees a 1/4-area
+                // staging buffer, which is the actual ~4× speedup.
+                let dwsW = max(2, w / 2)
+                let dwsH = max(2, h / 2)
+                let smallDesc = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: input.pixelFormat, width: dwsW, height: dwsH, mipmapped: false
+                )
+                smallDesc.storageMode = .private
+                smallDesc.usage = [.shaderRead, .shaderWrite]
+                if let smallIn = device.makeTexture(descriptor: smallDesc),
+                   let smallOut = device.makeTexture(descriptor: smallDesc),
+                   let scaleCmd1 = commandQueue.makeCommandBuffer(),
+                   let scaleCmd2 = commandQueue.makeCommandBuffer() {
+                    let downscaler = MPSImageBilinearScale(device: device)
+                    downscaler.encode(commandBuffer: scaleCmd1, sourceTexture: current, destinationTexture: smallIn)
+                    scaleCmd1.commit()
+                    scaleCmd1.waitUntilCompleted()
+                    Wiener.deconvolve(
+                        input: smallIn, output: smallOut,
+                        sigma: Float(sharpen.wienerSigma) * 0.5,  // PSF shrinks with downsample
+                        snr: Float(sharpen.wienerSNR),
+                        device: device
+                    )
+                    let upscaler = MPSImageBilinearScale(device: device)
+                    upscaler.encode(commandBuffer: scaleCmd2, sourceTexture: smallOut, destinationTexture: result)
+                    scaleCmd2.commit()
+                    scaleCmd2.waitUntilCompleted()
+                } else {
+                    // Allocation failure — fall back to full-res Wiener.
+                    Wiener.deconvolve(
+                        input: current, output: result,
+                        sigma: Float(sharpen.wienerSigma),
+                        snr: Float(sharpen.wienerSNR),
+                        device: device
+                    )
+                }
+            } else {
+                Wiener.deconvolve(
+                    input: current, output: result,
+                    sigma: Float(sharpen.wienerSigma),
+                    snr: Float(sharpen.wienerSNR),
+                    device: device
+                )
+            }
             current = result
         }
 
@@ -277,6 +360,14 @@ final class Pipeline {
         // committed the previous one.
         let cmdBuf2 = needsWiener ? commandQueue.makeCommandBuffer() : cmdBuf
         guard let finalCmd = cmdBuf2 else { return copyTexture(input, into: output) }
+
+        // Stage transition: tone curve (LUT + B/C + Saturation). Gate on
+        // toneCurve.enabled and at least one non-identity sub-control so
+        // a default-on tone curve panel with everything at identity
+        // doesn't light up.
+        let runToneStage = toneCurve.enabled
+            && (toneCurveLUT != nil || !bcIsIdentity || abs(toneCurve.saturation - 1.0) > 1e-4)
+        if runToneStage { onStageChange?(.toneCurve) }
 
         // Noise reduction — bilateral filter, runs AFTER all sharpening
         // and BEFORE tone-curve / saturation. The sharpen chain inevitably
@@ -367,19 +458,25 @@ final class Pipeline {
         finalCmd.waitUntilCompleted()
 
         for tex in borrowed { recycle(tex) }
+        // Final stage transition: idle. Tells the SettingsPanel section
+        // headers to drop the highlight tint after the GPU work landed.
+        onStageChange?(nil)
         return output
     }
 
     // MARK: - Helpers
 
-    /// Compute the (blackPoint, whitePoint) percentile pair for the auto-
-    /// stretch step. Reuses the same downsample-+-readback strategy as the
-    /// gray-world WB helper but reads luminance instead of channel means.
-    /// Sample percentiles are 0.5% (black floor — keeps the dim sky tail
-    /// from anchoring the stretch above the planet's dark side) and 99.5%
-    /// (white tail — keeps a couple of bright noise spikes from forcing
-    /// the planet's actual peak below 0.95).
-    private func computeAutoStretch(input: MTLTexture) -> (black: Float, white: Float)? {
+    /// Compute (blackPoint, median, whitePoint) Rec.709-luma percentiles
+    /// on `input`. Downsamples to a 256-ish staging texture and sorts
+    /// luma CPU-side, so reading any number of percentile points is
+    /// essentially free after the sort. `lowPercentile` /
+    /// `highPercentile` are 0..1 (e.g. 0.01 and 0.99). Median is always
+    /// the 50th percentile. Returns nil on a degenerate uniform plane.
+    func computeLumaPercentiles(
+        input: MTLTexture,
+        lowPercentile: Double,
+        highPercentile: Double
+    ) -> (black: Float, median: Float, white: Float)? {
         let w = input.width, h = input.height
         guard w > 0, h > 0 else { return nil }
         let targetMax = 256
@@ -420,9 +517,8 @@ final class Pipeline {
         }
 
         // Per-pixel Rec.709 luma (matches the saturation kernel) so the
-        // stretch is computed once on luminance and applied to all RGB
-        // channels uniformly. Avoids the channel-imbalance artefacts a
-        // per-channel stretch would introduce.
+        // remap is computed once on luminance and applied to all RGB
+        // channels uniformly — avoids per-channel imbalance artefacts.
         var luma = [Float](repeating: 0, count: pixelCount)
         for i in 0..<pixelCount {
             luma[i] = 0.2126 * rgba[i * 4 + 0]
@@ -430,19 +526,77 @@ final class Pipeline {
                    + 0.0722 * rgba[i * 4 + 2]
         }
         luma.sort()
-        // Wider clip than the original 0.5%/99.5% — that aggressive cut
-        // washed out band detail by mapping the dim sky tail and a few
-        // bright noise spikes to extremes, leaving the planet body sitting
-        // in the middle of an over-stretched range. 2%/98% leaves more
-        // headroom on both ends so the planet's existing band contrast
-        // survives the stretch.
-        let blackIdx = max(0, min(pixelCount - 1, Int(Double(pixelCount - 1) * 0.02)))
-        let whiteIdx = max(0, min(pixelCount - 1, Int(Double(pixelCount - 1) * 0.98)))
-        let black = luma[blackIdx]
-        let white = luma[whiteIdx]
-        // Degenerate input (uniform plane) → no useful stretch possible.
+        let lo = max(0.0, min(1.0, lowPercentile))
+        let hi = max(0.0, min(1.0, highPercentile))
+        let blackIdx  = max(0, min(pixelCount - 1, Int(Double(pixelCount - 1) * lo)))
+        let medianIdx = max(0, min(pixelCount - 1, Int(Double(pixelCount - 1) * 0.5)))
+        let whiteIdx  = max(0, min(pixelCount - 1, Int(Double(pixelCount - 1) * hi)))
+        let black  = luma[blackIdx]
+        let median = luma[medianIdx]
+        let white  = luma[whiteIdx]
         guard white > black + 1e-4 else { return nil }
-        return (black, white)
+        return (black, median, white)
+    }
+
+    /// Stack-end auto-recovery: undoes the dynamic-range compression that
+    /// mean-stacking introduces (lifted dark sky + flattened bright peaks)
+    /// by linearly remapping the [1%, 99%] luma window into [0, 0.97].
+    /// No gamma, no contrast amplification — just refills the histogram
+    /// the stack squished into the middle of the range. Always-on at the
+    /// end of the LuckyStack post-pass; replaces the old user-facing
+    /// `autoStretch` toggle. Returns a new caller-owned texture (matching
+    /// `input`'s pixel format). On a degenerate input the helper falls
+    /// back to a copy so callers never need a nil check.
+    ///
+    /// The remap only fires when the input histogram is dark-dominated
+    /// (median < 0.30) — that's the planet-on-dark-sky case where mean-
+    /// stacking visibly compresses the planet body's range. Lunar /
+    /// solar / textured subjects fill the histogram natively (median ≥
+    /// 0.30 — bulk of pixels are mid-tone or higher); on those a remap
+    /// pushes existing wide range to extremes and produces an
+    /// "unnatural over-contrast" look (failure mode reproduced on lunar
+    /// 2026-04-29: stacked output had p1=0, p99=0.973 with crushed
+    /// shadows + blown rims). Skipping is the right call there — the
+    /// bare stack already looks natural.
+    func applyOutputRemap(input: MTLTexture) -> MTLTexture {
+        let w = input.width, h = input.height
+        let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: input.pixelFormat, width: w, height: h, mipmapped: false
+        )
+        outDesc.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        outDesc.storageMode = .private
+        let output = device.makeTexture(descriptor: outDesc)!
+
+        guard let pts = computeLumaPercentiles(input: input, lowPercentile: 0.01, highPercentile: 0.99) else {
+            return copyTexture(input, into: output)
+        }
+        // Histogram-shape gate: skip on lunar / solar / wide-range inputs.
+        guard pts.median < 0.30 else {
+            NSLog("LuckyStack: stack-end remap skipped (median=%.3f ≥ 0.30 — wide-range subject, no compression to recover)", pts.median)
+            return copyTexture(input, into: output)
+        }
+        NSLog("LuckyStack: stack-end remap firing (median=%.3f black=%.3f white=%.3f)", pts.median, pts.black, pts.white)
+        let whiteCap: Float = 0.97
+        guard let cmdBuf = commandQueue.makeCommandBuffer(),
+              let enc = cmdBuf.makeComputeCommandEncoder() else {
+            return copyTexture(input, into: output)
+        }
+        enc.setComputePipelineState(stretchPSO)
+        enc.setTexture(input, index: 0)
+        enc.setTexture(output, index: 1)
+        var p = AutoStretchParamsCPU(
+            blackPoint: pts.black,
+            scale: whiteCap / (pts.white - pts.black),
+            whiteCap: whiteCap,
+            gamma: 1.0
+        )
+        enc.setBytes(&p, length: MemoryLayout<AutoStretchParamsCPU>.stride, index: 0)
+        let (tgC, tgS) = dispatchThreadgroups(for: output, pso: stretchPSO)
+        enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+        enc.endEncoding()
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+        return output
     }
 
     /// Compute a gray-world white-balance correction for `input`. Downsamples
@@ -574,6 +728,7 @@ struct BrightnessContrastParamsCPU {
 struct AutoStretchParamsCPU {
     var blackPoint: Float
     var scale: Float
+    var whiteCap: Float
     var gamma: Float
 }
 

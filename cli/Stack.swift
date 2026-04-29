@@ -462,7 +462,7 @@ enum Stack {
                 }
                 options.bakeIn = LuckyStackBakeIn(
                     sharpen: sharpen,
-                    toneCurve: ToneCurveSettings(),  // defaults autoStretch=true
+                    toneCurve: ToneCurveSettings(),
                     toneCurveLUT: nil
                 )
             }
@@ -493,7 +493,11 @@ enum Stack {
                     "elapsedSeconds": elapsed
                 ])
                 if !quiet {
-                    print("stack: wrote \(resultURL.path) (keep=\(plan.percent)%) in \(String(format: "%.2f", elapsed)) s")
+                    // `plan.percent` is the configured request; under
+                    // --auto-keep the resolved keep% comes from the
+                    // quality scan (logged via NSLog "Auto-keep: ...").
+                    let modeNote = options.useAutoKeepPercent ? " (auto-keep)" : ""
+                    print("stack: wrote \(resultURL.path) (keep=\(plan.percent)%\(modeNote)) in \(String(format: "%.2f", elapsed)) s")
                 }
             } catch {
                 cliStderr("stack: keep=\(plan.percent)%: \(error.localizedDescription)")

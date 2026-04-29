@@ -244,8 +244,9 @@ kernel void apply_white_balance(
 
 struct AutoStretchParams {
     float blackPoint;
-    float scale;          // pre-computed = 0.85 / (whitePoint - blackPoint)
-    float gamma;          // midtone gamma — typically 0.7..0.9 to lift midtones
+    float scale;          // pre-computed = whiteCap / (whitePoint - blackPoint)
+    float whiteCap;       // upper clamp — 0.97 for stack-end recovery (small headroom, no clip)
+    float gamma;          // 1.0 = pure linear; <1 lifts midtones, >1 darkens midtones
 };
 
 kernel void apply_auto_stretch(
@@ -256,12 +257,15 @@ kernel void apply_auto_stretch(
 ) {
     if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
     float4 c = input.read(gid);
-    // Linear stretch into [0, 0.85] (leaves ≥15% headroom for downstream
-    // sharpen so unsharp halos don't immediately clip), then a gentle
-    // midtone-gamma boost so band features don't flatten near the white
-    // tail. gamma 0.8 ≈ +10% lift on midtones, ≈ +0% on extremes —
-    // preserves the tonal hierarchy the user is comparing against.
-    float3 stretched = clamp((c.rgb - p.blackPoint) * p.scale, 0.0, 0.85);
+    // Linear remap of the [blackPoint, whitePoint] luma window into
+    // [0, whiteCap], optional pow-gamma on top. Used as a post-stack
+    // auto-recovery: mean-stacking lifts the dark sky and flattens the
+    // bright peaks, so without this final remap the saved TIF looks
+    // washed-out (full histogram squished into the middle ~50% of the
+    // range). The percentile choice (1%/99%) plus whiteCap=0.97 +
+    // gamma=1.0 just undoes that compression — it does NOT amplify
+    // contrast beyond the natural exposure of the stack.
+    float3 stretched = clamp((c.rgb - p.blackPoint) * p.scale, 0.0, p.whiteCap);
     float3 v = pow(stretched, float3(p.gamma));
     output.write(float4(v, c.a), gid);
 }

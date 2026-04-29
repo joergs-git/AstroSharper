@@ -32,7 +32,12 @@ struct SharpeningSection: View {
     @EnvironmentObject private var app: AppModel
 
     var body: some View {
-        SectionContainer(title: "Sharpening", icon: "wand.and.stars", isOn: $app.sharpen.enabled) {
+        SectionContainer(
+            title: "Sharpening",
+            icon: "wand.and.stars",
+            isOn: $app.sharpen.enabled,
+            highlight: app.activePreviewStage == .sharpening
+        ) {
             // Slider ranges bumped 1.5–2× the previous limits so the
             // strong sharpening typical for jupiter / saturn fits inside
             // the slider without forcing the user to type values manually.
@@ -338,13 +343,18 @@ struct ToneCurveSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Auto WB / ACDC / Auto Stretch are conceptually 'colour and
-            // levels' — they sit BEFORE the user's tone curve in the
-            // pipeline and operate independently of the curve toggle.
-            // Pulled OUT of the Tone Curve SectionContainer so the
-            // section's `disabled(!isOn)` doesn't grey them out: the
-            // user shouldn't need to drag curve points just to enable
-            // an auto-stretch or fix the OSC green cast.
+            // Auto WB / ACDC are conceptually 'colour and levels' — they
+            // sit BEFORE the user's tone curve in the pipeline and operate
+            // independently of the curve toggle. Pulled OUT of the Tone
+            // Curve SectionContainer so the section's `disabled(!isOn)`
+            // doesn't grey them out: the user shouldn't need to drag curve
+            // points just to fix the OSC green cast.
+            //
+            // Auto Stretch was removed 2026-04-29: histogram recovery is
+            // now always-on at the end of the LuckyStack post-pass (1%/99%
+            // percentile linear remap into [0, 0.97], no gamma) — it's no
+            // longer a user-facing toggle since mean-stacking always
+            // compresses dynamic range and the recovery just undoes that.
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Image(systemName: "slider.horizontal.below.rectangle")
@@ -357,14 +367,28 @@ struct ToneCurveSection: View {
                     .help("Computes a per-channel offset+scale so the three channels share a neutral mean. Critical for OSC stacks — Bayer green is naturally amplified by 2× photosite count, so post-stack OSC images otherwise look greenish once saturation > 1. Mono / pre-balanced sources are unaffected.")
                 Toggle("Atmospheric Chromatic Dispersion Correction", isOn: $app.toneCurve.chromaticAlignment)
                     .help("Phase-correlates R and B against G on the post-stack output and applies sub-pixel shifts so the three channels re-align (G stays anchored). Atmospheric refraction shifts blue more than red, so OSC planets at low altitude show coloured limb fringes; ACDC removes them. No-op on mono / pre-aligned sources because the offsets come out near zero.")
-                Toggle("Auto Stretch (histogram normalisation)", isOn: $app.toneCurve.autoStretch)
-                    .help("Maps the dim camera-native pixel range to fill the display range. 2%-percentile dark floor and 98%-percentile bright tail, with a midtone-gamma boost so highlights don't blow out. Note: stretch only widens contrast, it doesn't recover sharpness — if your image still looks soft after enabling this, the gap is detail (which sharpening / wavelet / blind deconvolution address).")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.06)))
+            .background(
+                // Two-layer fill: the soft secondary tint stays on as the
+                // section's visual identity; the accent overlay fades in
+                // while the colourLevels stage is executing in the live
+                // preview. Same animation parameters as SectionContainer.
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.06))
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.accentColor.opacity(app.activePreviewStage == .colourLevels ? 0.18 : 0.0))
+                        .animation(.easeInOut(duration: 0.18), value: app.activePreviewStage)
+                }
+            )
 
-            SectionContainer(title: "Tone Curve", icon: "waveform.path.ecg", isOn: $app.toneCurve.enabled) {
+            SectionContainer(
+                title: "Tone Curve",
+                icon: "waveform.path.ecg",
+                isOn: $app.toneCurve.enabled,
+                highlight: app.activePreviewStage == .toneCurve
+            ) {
             ToneCurveEditor(
                 points: $app.toneCurve.controlPoints,
                 histogram: app.previewHistogram,
@@ -511,6 +535,12 @@ private struct SectionContainer<Content: View>: View {
     let title: String
     let icon: String
     @Binding var isOn: Bool
+    /// True while the live preview is currently executing this section's
+    /// pipeline stage. Drives a soft accent-coloured background so the
+    /// user can visually track which step is consuming time. Default
+    /// false for sections that don't participate in the live pipeline
+    /// (e.g. Stabilize / Align is file-level, not preview-level).
+    var highlight: Bool = false
     @ViewBuilder let content: () -> Content
     /// All sections start collapsed at launch for a clean panel; the user
     /// expands what they need. A toggle-on later auto-expands the section,
@@ -523,23 +553,26 @@ private struct SectionContainer<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                // Whole title row toggles collapse — feels more discoverable
-                // than only the small chevron being clickable.
+            HStack(spacing: 8) {
+                // Whole title row toggles collapse. The .contentShape on
+                // the inner HStack means clicks anywhere from the chevron
+                // through the title hit the button. Chevron sized up to
+                // 12pt bold + 16pt frame so it's a real target instead of
+                // a hairline (user feedback 2026-04-29).
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) {
                         userExpanded = !expanded
                     }
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 8) {
                         Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 12, weight: .bold))
                             .foregroundColor(.secondary)
-                            .frame(width: 12)
+                            .frame(width: 16)
                         Image(systemName: icon)
                             .foregroundColor(.accentColor)
                         Text(title)
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 13, weight: .bold))
                             .foregroundColor(.primary)
                     }
                     .contentShape(Rectangle())
@@ -564,6 +597,21 @@ private struct SectionContainer<Content: View>: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .background(
+            // Two-layer fill so the sections always read as visually
+            // distinct cards (regardless of whether the live pipeline is
+            // running this section), and the active-stage accent overlay
+            // animates on top when the pipeline is in this stage.
+            //   - base   : soft gray card so users can see where a
+            //              section begins/ends.
+            //   - accent : fades in while this stage is running.
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.07))
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.accentColor.opacity(highlight ? 0.18 : 0.0))
+                    .animation(.easeInOut(duration: 0.18), value: highlight)
+            }
+        )
         .onChange(of: isOn) { _, _ in
             // Reset user override so toggle on/off restores the default
             // expand/collapse behaviour (no surprise sticky state).

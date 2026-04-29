@@ -2734,9 +2734,11 @@ struct StrehlTests {
 @Suite("Lucky keep-% formula — frame-count floor + knee detection")
 struct LuckyKeepRecommendationTests {
 
-    @Test("tight distribution caps at 50%, never returns the legacy 75%")
+    @Test("tight distribution caps at 75% (BiggSky upper bound)")
     func tightDistributionCapped() {
-        // 64 nearly-identical scores → kneeFraction near 1.0 → clamp 50%.
+        // 64 nearly-identical scores → kneeFraction near 1.0 → clamp 75%.
+        // Empirical anchor: BiggSky Saturn / Jupiter f/14 references both
+        // ran at 75% keep — that's the upper bound, not 50%.
         let scores: [Float] = (0..<64).map { _ in 100.0 }.sorted()
         let p90: Float = 100.0
         let rec = SerQualityScanner.computeKeepRecommendation(
@@ -2745,18 +2747,20 @@ struct LuckyKeepRecommendationTests {
             p90: p90,
             jitterRMS: nil
         )
-        #expect(rec.fraction <= 0.50)
-        #expect(rec.fraction >= 0.05)
-        // 1000 frames × 0.50 = 500 frames kept on a tight distribution.
+        #expect(rec.fraction <= 0.75)
+        #expect(rec.fraction >= 0.20)
+        // 1000 frames × 0.75 = 750 frames kept on a tight distribution.
         #expect(rec.count >= 100)   // typical floor satisfied
-        #expect(rec.count <= 500)
+        #expect(rec.count <= 750)
     }
 
-    @Test("wide distribution (lucky tail) recommends a small fraction")
+    @Test("wide distribution (lucky tail) lifts to 20% BiggSky lower bound")
     func wideDistributionPicksLuckyTail() {
         // 64 scores: bottom 56 are dim (1.0), top 8 are sharp (10.0).
         // p90 ≈ 10.0; knee threshold = 5.0; only the top 8 are above.
-        // kneeFraction = 8/64 = 0.125 → clamped to >=0.05, in band.
+        // kneeFraction = 8/64 = 0.125 → BELOW the BiggSky 20% lower
+        // bound, so the formula lifts it to 20%. Anchor: BiggSky Jupiter
+        // UL16 F/20 used 20% on a high-frame-count cherry-pick capture.
         var values: [Float] = Array(repeating: 1.0, count: 56)
         values.append(contentsOf: Array(repeating: 10.0, count: 8))
         let scores = values.sorted()
@@ -2767,11 +2771,10 @@ struct LuckyKeepRecommendationTests {
             p90: p90,
             jitterRMS: nil
         )
-        #expect(rec.fraction >= 0.05)
-        #expect(rec.fraction <= 0.20)
-        // 5000 frames × 12.5% = 625 — well above the 100-frame floor.
-        #expect(rec.count > 100)
-        #expect(rec.count < 1000)
+        #expect(rec.fraction >= 0.20)
+        #expect(rec.fraction <= 0.30)   // hits floor, no jitter to push lower
+        #expect(rec.count >= 1000)      // 5000 × 0.20 = 1000
+        #expect(rec.count <= 1500)
     }
 
     @Test("frame-count floor lifts to 100 on small SERs")
@@ -2821,9 +2824,13 @@ struct LuckyKeepRecommendationTests {
 
     @Test("high jitter tightens the keep band")
     func highJitterTightens() {
-        // Same input as wide distribution test, but with high jitter.
-        var values: [Float] = Array(repeating: 1.0, count: 56)
-        values.append(contentsOf: Array(repeating: 10.0, count: 8))
+        // 64 scores: bottom 16 are dim (1.0), top 48 are sharp (10.0).
+        // p90 ≈ 10.0; knee threshold = 5.0; top 48 above. kneeFraction
+        // = 48/64 = 0.75 — hits the upper clamp. Jitter ×0.7 lands at
+        // 0.525, comfortably inside the band, so the tightening is
+        // observable (not masked by either clamp boundary).
+        var values: [Float] = Array(repeating: 1.0, count: 16)
+        values.append(contentsOf: Array(repeating: 10.0, count: 48))
         let scores = values.sorted()
 
         let calm = SerQualityScanner.computeKeepRecommendation(
@@ -2859,9 +2866,13 @@ struct LuckyKeepRecommendationTests {
         #expect(rec.count >= 100)
     }
 
-    @Test("fraction always in [0.05, 0.75] band")
+    @Test("fraction always in [0.20, 1.0] band (floor lift can exceed 0.75)")
     func fractionAlwaysInBand() {
         // Run a few permutations; assert no result violates the clamp.
+        // Empty input fallback returns 0.25, all clamped paths return at
+        // least 0.20. Frame-count floor lift can push fraction above
+        // 0.75 on small SERs (e.g. 100-frame SER where 100-frame floor
+        // = 100% kept).
         let inputs: [(scores: [Float], total: Int, p90: Float, jitter: Float?)] = [
             ([Float](repeating: 1.0, count: 64), 5000, 1.0, nil),
             ((0..<64).map { Float($0) }, 5000, 56.7, nil),
@@ -2875,8 +2886,8 @@ struct LuckyKeepRecommendationTests {
                 p90: inp.p90,
                 jitterRMS: inp.jitter
             )
-            #expect(rec.fraction >= 0.05)
-            #expect(rec.fraction <= 1.0)   // upper bound is implicit via floor lift
+            #expect(rec.fraction >= 0.20)
+            #expect(rec.fraction <= 1.0)   // floor lift on small SERs can hit 1.0
             #expect(rec.count > 0)
         }
     }

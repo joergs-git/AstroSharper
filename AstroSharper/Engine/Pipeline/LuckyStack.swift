@@ -605,6 +605,20 @@ enum LuckyStack {
                     }
                 }
 
+                // Stack-end auto-recovery (always-on). Mean-stacking lifts
+                // the dark sky and flattens the bright peaks, leaving the
+                // saved TIF visibly washed-out (full histogram squished
+                // into the middle ~50% of the range). The recovery pass
+                // linearly remaps the 1%/99% luma window into [0, 0.97]
+                // — no gamma, no contrast amp — just undoes the dynamic-
+                // range compression. Replaces the user-facing autoStretch
+                // toggle (removed 2026-04-29 after the percentile + 0.85
+                // scale + 0.8 gamma combination produced an
+                // "unnatural super-high-contrast" look on lunar / planetary
+                // captures). Runs on every output regardless of mode /
+                // bake-in / AutoPSF success.
+                final = pipeline.applyOutputRemap(input: final)
+
                 try ImageTexture.write(texture: final, to: outputURL)
                 await onProgress(.finished(outputURL))
             } catch {

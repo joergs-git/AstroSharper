@@ -161,6 +161,20 @@ final class AppModel: ObservableObject {
     /// file. The HUD swaps the button for a spinner when set.
     @Published var isCalculatingVideoQuality: Bool = false
 
+    /// True while the live-preview pipeline is processing the most recent
+    /// slider / setting change. Drives the top-right ProgressView overlay
+    /// on PreviewView so the user knows their change is being applied —
+    /// the preview was already async (background processingQueue), but
+    /// the user had no signal that work was happening.
+    @Published var processingInFlight: Bool = false
+
+    /// Which high-level pipeline stage is currently executing in the
+    /// live preview. nil = idle. Drives the colored highlight on the
+    /// SettingsPanel section headers so the user can see which step
+    /// of the pipeline is running. Pipeline.process emits transitions
+    /// via a callback that PreviewCoordinator forwards to this property.
+    @Published var activePreviewStage: PreviewStage? = nil
+
     /// When ON, a folder/file open auto-detects Sun/Moon/Jupiter/Saturn/Mars
     /// from filenames + folder names and applies the matching default preset.
     @Published var autoDetectPresetOnOpen: Bool = true
@@ -378,9 +392,13 @@ final class AppModel: ObservableObject {
         grantSecurityScope(url)
 
         catalog.load(from: url)
-        selectedFileIDs.removeAll()
+        // Auto-select the first file so the user doesn't have to click a row
+        // before running Apply / Lucky Stack. Matches AstroTriage's behaviour
+        // and removes a redundant click from the open-→-process path.
+        let firstID = catalog.files.first?.id
+        selectedFileIDs = firstID.map { Set([$0]) } ?? []
         markedFileIDs.removeAll()
-        previewFileID = catalog.files.first?.id
+        previewFileID = firstID
         jobStatus = .idle
         loadThumbnailsAsync()
         autoApplyDefaultPreset(candidates: catalogCandidateStrings(rootURL: url))
@@ -467,9 +485,13 @@ final class AppModel: ObservableObject {
         }
         let inferredRoot = anyFolder ?? urls.first?.deletingLastPathComponent()
         catalog.loadURLs(allURLs, root: inferredRoot)
-        selectedFileIDs.removeAll()
+        // Auto-select the first file so the user doesn't have to click a row
+        // before running Apply / Lucky Stack. Matches AstroTriage's behaviour
+        // and removes a redundant click from the open-→-process path.
+        let firstID = catalog.files.first?.id
+        selectedFileIDs = firstID.map { Set([$0]) } ?? []
         markedFileIDs.removeAll()
-        previewFileID = catalog.files.first?.id
+        previewFileID = firstID
         jobStatus = .idle
         loadThumbnailsAsync()
         autoApplyDefaultPreset(candidates: catalogCandidateStrings(rootURL: inferredRoot ?? urls.first))

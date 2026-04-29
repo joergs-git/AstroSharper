@@ -132,3 +132,30 @@ Patterns and gotchas captured from this project. Read at session start; append a
 ## [Forever] — Read before edit
 - **Rule:** Before any non-trivial edit, read all affected files, not just the entry point. SourceKit "cannot find type" warnings are usually false positives during a workspace cache rebuild — trust the actual `xcodebuild` output.
 - **Applies to:** Every multi-file change.
+
+## [2026-04-29] — Don't feed coalesced retries back through the same Combine subject
+- **Mistake:** When the live-preview pipeline took longer than the 33 ms throttle interval, an in-guard `reprocessSubject.send(())` retry from `PreviewCoordinator.reprocess` fed BOTH the throttle subscriber AND a newly-added 200 ms debounce subscriber. The debounce timer kept resetting on every retry-send, the throttle kept re-firing while `inFlight` was true, and each pipeline cycle kicked off another one — "Processing" spinner + section pulsing ran forever even when the user wasn't touching anything.
+- **Root cause:** Multiple subscribers on a single `PassthroughSubject` mean a single `.send(())` reaches all of them. Self-sends from inside a sink create feedback loops that compound when the work outside the sink takes longer than the throttle interval.
+- **Rule:** When a sink needs to "queue another pass after the current one finishes", don't `subject.send` back into the same subject. Use a coalesced state flag (e.g. `pendingPreview: Bool?`) on the coordinator and drain it directly when the current run lands. Direct re-call from the completion block doesn't poke any Combine subscribers awake.
+- **Applies to:** `PreviewView.PreviewCoordinator.reprocess`. Pattern generalizes to any Combine sink with a busy-retry path.
+
+## [2026-04-29] — Always-on auto-recovery needs a histogram-shape gate, not a percentile clamp
+- **Mistake:** Shipped a stack-end histogram remap that ran unconditionally (1%/99% percentile → [0, 0.97] linear). Lunar / solar / textured subjects fill the histogram natively; on those the remap pushed already-wide range to extremes. Output was crushed shadows + blown rims — same "unnatural over-contrast" failure mode the old user-facing autoStretch toggle had.
+- **Root cause:** Treated mean-stacking compression as universal. It's only universal for *dark-dominated* histograms (planet on dark sky); *mid-tone-dominated* histograms (lunar terrain, solar disc) start full-range so any stretch over-shoots.
+- **Rule:** For an always-on tonal recovery, gate on the input's median luminance (or a similar histogram-shape signal), not just on percentile spread. Threshold: median ≥ 0.30 → skip remap (data already fills range); median < 0.30 → apply (planet on sky, compression to undo).
+- **Applies to:** `Pipeline.applyOutputRemap`. Pattern generalizes to any "fix the obvious failure mode" auto-recovery — confirm the failure mode actually applies before touching the data.
+
+## [2026-04-29] — Eager-compile MTLComputePipelineState in init
+- **Rule:** Lazy `MTLComputePipelineState` building is ~5–8 ms per kernel on Apple Silicon. With 14 kernels in `Pipeline`, the first slider drag eats an 80–100 ms hiccup. Move all PSOs to immediate construction in `Pipeline.init` — the cost shifts onto app launch (covered by the SwiftUI splash) and the live preview is smooth from tick zero.
+- **How to apply:** When init needs to run a closure that touches `self.device`, capture the device into a local FIRST and have the helper closure reference the local. Otherwise Swift errors with "self used before all stored properties are initialized".
+- **Applies to:** `Engine/Pipeline/Pipeline.swift`. Same pattern in any future Metal pipeline class with multiple PSOs.
+
+## [2026-04-29] — Test before building manual UI
+- **Mistake (avoided):** Saw a BiggSky note about Saturn using 28 *manually placed* APs and almost spec'd a manual AP placement UI for v1.
+- **Rule:** Before committing to a manual-UI feature that mirrors a manual workflow in another tool, run a regression test with our automation against the manual reference. If automatic gets within 90% (or beats it), skip the UI; if not, build it. Saved the work after a 13-line python script showed our auto-grid 6×6 (36 APs) hits 1.13× the LAPD sharpness of BiggSky's 28 manual APs on the same Saturn SER (after histogram normalization).
+- **Applies to:** Any "users in tool X do this manually, should we expose a knob?" decision.
+
+## [2026-04-29] — CLI prints can drift from real behavior
+- **Mistake:** `cli/Stack.swift` printed `keep=\(plan.percent)%` after a stack run, which reported the *configured* keep% rather than the *resolved* one. Under `--auto-keep`, the actual stack used a 75% recommendation (correct, NSLog'd) but the print said 25% — looked like the auto-keep flag wasn't applied. It was; only the print was wrong.
+- **Rule:** When an option re-resolves a value at runtime (auto-keep, auto-PSF, auto-keep-count, …), the user-facing print should reflect what was actually used, not what was passed in. Annotate the mode (`(auto-keep)`) so the discrepancy is explained.
+- **Applies to:** Every CLI summary line. Same lesson applies to GUI status badges that surface a derived value.

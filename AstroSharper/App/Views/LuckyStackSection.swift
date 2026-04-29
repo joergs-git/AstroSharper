@@ -21,29 +21,39 @@ struct LuckyStackSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
+                // Click anywhere on chevron, icon, or "Lucky Stack" text
+                // toggles collapse — wrapping the whole row in a single
+                // Button so the user doesn't have to aim for the small
+                // chevron. Matches SectionContainer styling (12pt bold
+                // chevron, bold title) so all panel sections look /
+                // behave the same.
                 Button {
                     if !disabled {
                         withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
                     }
                 } label: {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.secondary)
+                    HStack(spacing: 8) {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.secondary)
+                            .frame(width: 16)
+                        Image(systemName: "sparkles.tv.fill")
+                            .foregroundColor(disabled ? .secondary : .accentColor)
+                        Text("Lucky Stack")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(disabled ? .secondary : .primary)
+                        if disabled {
+                            Text("· no .ser files")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(disabled)
 
-                Image(systemName: "sparkles.tv.fill")
-                    .foregroundColor(disabled ? .secondary : .accentColor)
-                Text("Lucky Stack")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(disabled ? .secondary : .primary)
-                if disabled {
-                    Text("· no .ser files")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                }
                 Spacer()
                 Text(targetCountLabel)
                     .font(.system(size: 10, design: .monospaced))
@@ -139,21 +149,43 @@ struct LuckyStackSection: View {
                 // automatically kills Gibbs ringing at the disc limb.
                 // No tiled deconv, no denoise, no per-channel —
                 // those soften without proportional benefit on the
-                // SNR=200 path.
-                Button {
-                    app.luckyStack.perChannelStacking = false
-                    app.luckyStack.autoPSF = true
-                    app.luckyStack.autoPSFSNR = 200
-                    app.luckyStack.tiledDeconv = false
-                    app.luckyStack.denoisePrePercent = 0
-                    app.luckyStack.denoisePostPercent = 0
-                    app.luckyStack.autoKeepPercent = true
-                } label: {
-                    Label("Smart auto", systemImage: "wand.and.stars")
-                        .font(.caption)
+                // SNR=200 path. Centered pill with a blue→purple
+                // gradient so the user notices it as a real action,
+                // not a tucked-away toggle.
+                HStack {
+                    Spacer()
+                    Button {
+                        app.luckyStack.perChannelStacking = false
+                        app.luckyStack.autoPSF = true
+                        app.luckyStack.autoPSFSNR = 200
+                        app.luckyStack.tiledDeconv = false
+                        app.luckyStack.denoisePrePercent = 0
+                        app.luckyStack.denoisePostPercent = 0
+                        app.luckyStack.autoKeepPercent = true
+                    } label: {
+                        Label("Smart auto", systemImage: "wand.and.stars")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 7)
+                            .background(
+                                LinearGradient(
+                                    colors: [
+                                        Color(red: 0.22, green: 0.51, blue: 0.95),  // blue
+                                        Color(red: 0.55, green: 0.34, blue: 0.92),  // violet
+                                    ],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .clipShape(Capsule())
+                            .shadow(color: Color.purple.opacity(0.25), radius: 4, x: 0, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                    .help("One-click preset: aggressive Wiener deconv with auto-estimated PSF (SNR=200). The radial fade keeps the deconv strong inside the disc and smoothly fades to bare near the limb — no Gibbs ringing on small high-contrast subjects (Mars). Auto-PSF auto-bails on lunar / textured subjects so the same preset works for every subject.")
+                    Spacer()
                 }
-                .controlSize(.small)
-                .help("One-click preset: aggressive Wiener deconv with auto-estimated PSF (SNR=200). The radial fade keeps the deconv strong inside the disc and smoothly fades to bare near the limb — no Gibbs ringing on small high-contrast subjects (Mars). Auto-PSF auto-bails on lunar / textured subjects so the same preset works for every subject.")
+                .padding(.vertical, 2)
 
                 if app.luckyStack.mode == .scientific {
                     HStack(spacing: 4) {
@@ -374,6 +406,14 @@ struct LuckyStackSection: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .background(
+            // Matches SectionContainer's card fill so the Lucky Stack
+            // section reads as the same visual unit as Sharpening /
+            // Stabilize / Tone Curve. No active-stage accent here —
+            // Lucky Stack is a batch-level run, not a live-preview
+            // pipeline stage, so the highlight overlay isn't relevant.
+            RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.07))
+        )
     }
 
     private var targetCountLabel: String {

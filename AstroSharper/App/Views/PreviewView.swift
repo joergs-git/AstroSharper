@@ -47,6 +47,31 @@ struct PreviewView: View {
                     .transition(.opacity)
                 }
             }
+            // Top-right activity indicator. The preview pipeline already
+            // ran async on a background queue, but the user had no
+            // visual signal that work was happening — slider drags felt
+            // sluggish even when the result was actually being computed.
+            // The spinner fades in via animation so a sub-50 ms pass
+            // doesn't even render it; on slower passes (Wiener at full-
+            // res, big LR loop) it sits there until the result lands.
+            .overlay(alignment: .topTrailing) {
+                if app.processingInFlight {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 16, height: 16)
+                        Text("Processing…")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white.opacity(0.9))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(12)
+                    .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.18), value: app.processingInFlight)
             // Mini-map overlay was disabled — pan/zoom recomputed it on
             // every drag tick, and the user found it slow without
             // commensurate value. The view + computation helpers stay in
@@ -168,6 +193,12 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     }
 
     // Re-process trigger (throttled for "instant" slider feedback).
+    // Two derived streams from this subject:
+    //   - throttle 33 ms (latest wins) → live preview path with `preview: true`
+    //     so Wiener uses the 50%-downsampled FFT and stays under the 30 Hz
+    //     budget during continuous drag.
+    //   - debounce 200 ms → drag-end path with `preview: false`, so the
+    //     final image is full-res Wiener once the user lets go.
     private let reprocessSubject = PassthroughSubject<Void, Never>()
 
     // Zoom / pan state — UI lives here, MTKView queries via draw().
@@ -242,7 +273,19 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             .store(in: &cancellables)
 
         trigger
-            .sink { [weak self] in self?.reprocess() }
+            .sink { [weak self] in self?.reprocess(preview: true) }
+            .store(in: &cancellables)
+
+        // Drag-end debounce: 200 ms after the user stops touching sliders,
+        // re-run with `preview: false` so the final image lands as full-res
+        // Wiener. The throttle path keeps the live preview cheap; this
+        // debounce path "polishes" the result once the drag ends. If the
+        // pipeline doesn't actually use Wiener, this is a redundant pass —
+        // negligible cost for non-Wiener pipelines, but it keeps the
+        // wiring uniform.
+        reprocessSubject
+            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
+            .sink { [weak self] in self?.reprocess(preview: false) }
             .store(in: &cancellables)
 
         // Zoom shortcuts (⌘+ ⌘- ⌘0 ⌘1 ⌘2). The View menu posts a
@@ -561,12 +604,33 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
 
     private var processingQueue = DispatchQueue(label: "astrosharper.preview.process", qos: .userInitiated)
     private var inFlight = false
+    /// Coalesced pending pass. Replaces the old "send back into
+    /// reprocessSubject" retry which fed both the throttle (33 ms) and
+    /// debounce (200 ms) subscribers — the debounce timer kept resetting
+    /// on every retry-send, and the throttle kept re-firing while
+    /// `inFlight` was true, so each pipeline run kicked off another
+    /// one. With a single queued bool, when the current run ends we just
+    /// drain at most one queued pass directly, no Combine round-trip.
+    /// preview:false (drag-end full-res) takes precedence over
+    /// preview:true (drag-tick) so a late throttle emit can't downgrade
+    /// the queued pass back to fast mode.
+    private var pendingPreview: Bool?
 
-    private func reprocess() {
-        guard let src = beforeTex, !inFlight else {
-            if inFlight { reprocessSubject.send(()) }  // queue another pass
+    private func reprocess(preview: Bool = true) {
+        guard let src = beforeTex else {
+            pendingPreview = nil
             return
         }
+
+        // Already running? Queue at most one pass and bail; the in-flight
+        // pipeline drains it on completion.
+        if inFlight {
+            if !(pendingPreview == false && preview == true) {
+                pendingPreview = preview
+            }
+            return
+        }
+
         let sharpen = app.sharpen
         let tone = app.toneCurve
 
@@ -584,17 +648,23 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 || tone.controlPoints.last != CGPoint(x: 1, y: 1))
         let nothingActive = !tone.autoWB
             && !tone.chromaticAlignment
-            && !tone.autoStretch
             && !sharpen.enabled
             && (!tone.enabled || (!toneCurveActive && bcIsIdentity && satIsIdentity))
         if nothingActive {
             afterTex = nil
             view?.needsDisplay = true
+            // Make sure the spinner/highlight aren't stuck-on if a previous
+            // pass left them set and the user just toggled everything off.
+            if app.processingInFlight { app.processingInFlight = false }
+            if app.activePreviewStage != nil { app.activePreviewStage = nil }
+            pendingPreview = nil
             return
         }
 
         let lut = ensureLUT(for: tone)
         inFlight = true
+        pendingPreview = nil
+        if !app.processingInFlight { app.processingInFlight = true }
 
         processingQueue.async { [weak self] in
             guard let self else { return }
@@ -602,12 +672,30 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 input: src,
                 sharpen: sharpen,
                 toneCurve: tone,
-                toneCurveLUT: lut
+                toneCurveLUT: lut,
+                preview: preview,
+                onStageChange: { [weak self] stage in
+                    // Pipeline runs on background queue; UI state must be
+                    // mutated on main. Coalescing identical writes is fine
+                    // here — SwiftUI ignores set-equal-value on @Published.
+                    DispatchQueue.main.async {
+                        self?.app.activePreviewStage = stage
+                    }
+                }
             )
             DispatchQueue.main.async {
                 self.afterTex = result
                 self.inFlight = false
+                self.app.processingInFlight = false
+                self.app.activePreviewStage = nil
                 self.view?.needsDisplay = true
+                // Drain a queued pass, if any. Direct re-call (no Combine
+                // round-trip) so we don't poke either of the subject
+                // subscribers back to life.
+                if let pending = self.pendingPreview {
+                    self.pendingPreview = nil
+                    self.reprocess(preview: pending)
+                }
             }
         }
     }
