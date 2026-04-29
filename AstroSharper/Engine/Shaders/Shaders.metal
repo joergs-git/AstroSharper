@@ -367,6 +367,48 @@ kernel void apply_brightness_contrast(
     output.write(float4(v, c.a), gid);
 }
 
+// MARK: - Highlights / Shadows
+//
+// Hue-preserving tone mask: scales each pixel's RGB by the new-luma /
+// old-luma ratio so chrominance stays put while the brightness response
+// reshapes around the mid-tone.
+//
+//   highlightWeight = smoothstep(0.5, 1.0, Y)   (rises from 0 at mid → 1 at white)
+//   shadowWeight    = 1 − smoothstep(0.0, 0.5, Y)   (rises from 0 at mid → 1 at black)
+//   ΔY = highlights · highlightWeight · 0.5      (negative compresses, positive lifts)
+//        + shadows   · shadowWeight   · 0.5
+//   Y_new = clamp(Y + ΔY, 0, 1)
+//   RGB_new = RGB · (Y_new / Y)                  (when Y > eps; else identity)
+//
+// At identity (highlights == 0 && shadows == 0) the kernel is a pure
+// pass-through. Caller must skip the dispatch in that case to keep the
+// no-op cost zero. Range-bound inputs to ±1.0 — beyond that the visible
+// effect saturates and shadow recovery from negative values produces a
+// visibly artificial roll-off.
+
+struct HighlightsShadowsParams {
+    float highlights;     // -1 .. +1 — negative compresses bright peaks, positive lifts
+    float shadows;        // -1 .. +1 — positive lifts dark areas, negative deepens
+};
+
+kernel void apply_highlights_shadows(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    constant HighlightsShadowsParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    float Y = dot(c.rgb, float3(0.2126, 0.7152, 0.0722));
+    float hw = smoothstep(0.5, 1.0, Y);
+    float sw = 1.0 - smoothstep(0.0, 0.5, Y);
+    float dY = p.highlights * hw * 0.5 + p.shadows * sw * 0.5;
+    float Yn = clamp(Y + dY, 0.0, 1.0);
+    float ratio = (Y > 1e-4) ? (Yn / Y) : 1.0;
+    float3 v = clamp(c.rgb * ratio, 0.0, 1.0);
+    output.write(float4(v, c.a), gid);
+}
+
 // MARK: - Saturation
 //
 // Mix each RGB sample with its Rec.709 luminance to control colour

@@ -438,6 +438,40 @@ struct ToneCurveSection: View {
                     .disabled(abs(app.toneCurve.contrast - 1.0) < 1e-4)
             }
             .help("Contrast multiplier around 0.5 mid-point. >1 expands, <1 compresses.")
+            // Highlights — negative compresses bright peaks (recovers
+            // Wiener-overshoot whites), positive lifts. Hue-preserving via
+            // the new-luma / old-luma ratio scaling in apply_highlights_shadows.
+            HStack {
+                Text("Highlights")
+                    .font(.system(size: 11))
+                    .frame(width: 80, alignment: .leading)
+                Slider(value: $app.toneCurve.highlights, in: -1.0...1.0, step: 0.02)
+                Text(String(format: "%+.2f", app.toneCurve.highlights))
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 40, alignment: .trailing)
+                    .foregroundColor(.secondary)
+                Button("Reset") { app.toneCurve.highlights = 0.0 }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .disabled(abs(app.toneCurve.highlights) < 1e-4)
+            }
+            .help("Pull bright peaks down (-) or lift them (+). Only affects pixels above mid-tone. Use −0.3 to −0.5 to tame Wiener-deconv overshoot on bright planet limbs / lunar maria.")
+            // Shadows — positive lifts dark areas, negative crushes.
+            HStack {
+                Text("Shadows")
+                    .font(.system(size: 11))
+                    .frame(width: 80, alignment: .leading)
+                Slider(value: $app.toneCurve.shadows, in: -1.0...1.0, step: 0.02)
+                Text(String(format: "%+.2f", app.toneCurve.shadows))
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 40, alignment: .trailing)
+                    .foregroundColor(.secondary)
+                Button("Reset") { app.toneCurve.shadows = 0.0 }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .disabled(abs(app.toneCurve.shadows) < 1e-4)
+            }
+            .help("Lift dark areas (+) or deepen them (-). Only affects pixels below mid-tone. Useful to recover detail crushed by mean-stacking, or to deepen the sky background.")
             // Saturation — applied around per-pixel Rec.709 luma. 1.0 is
             // identity. Stacking averages noisy frames toward grey, so a
             // small boost (1.2–1.5) typically restores planetary colour

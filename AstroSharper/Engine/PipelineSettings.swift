@@ -300,6 +300,22 @@ struct ToneCurveSettings: Equatable, Codable {
     /// pair without forcing the user to drag tone-curve points.
     var contrast: Double = 1.0
 
+    /// Highlight compression / lift. Range -1.0..+1.0, identity = 0.
+    /// Negative values darken the bright half of the image (recovers
+    /// blown-out highlights from Wiener deconv or aggressive sharpen);
+    /// positive values lift them. Hue is preserved by scaling RGB by
+    /// the new-luma / old-luma ratio rather than per-channel offset.
+    /// Effective only on pixels with luma > 0.5; sub-mid-tone pixels
+    /// pass through unchanged.
+    var highlights: Double = 0.0
+
+    /// Shadow lift / crush. Range -1.0..+1.0, identity = 0. Positive
+    /// lifts dark areas (recovers detail crushed by mean-stacking);
+    /// negative deepens them. Mirror of `highlights`: only affects
+    /// pixels with luma < 0.5, hue-preserving via the same ratio
+    /// scale.
+    var shadows: Double = 0.0
+
     /// Auto-white-balance (gray-world) applied at the START of the post-
     /// stack pipeline, BEFORE any sharpening. Independent of `enabled` —
     /// this fires whenever the toggle is on, regardless of whether the
@@ -338,6 +354,8 @@ struct ToneCurveSettings: Equatable, Codable {
         self.chromaticAlignment = try c.decodeIfPresent(Bool.self,   forKey: .chromaticAlignment) ?? false
         self.brightness         = try c.decodeIfPresent(Double.self, forKey: .brightness)         ?? 0.0
         self.contrast           = try c.decodeIfPresent(Double.self, forKey: .contrast)           ?? 1.0
+        self.highlights         = try c.decodeIfPresent(Double.self, forKey: .highlights)         ?? 0.0
+        self.shadows            = try c.decodeIfPresent(Double.self, forKey: .shadows)            ?? 0.0
     }
 
     init(
@@ -351,7 +369,9 @@ struct ToneCurveSettings: Equatable, Codable {
         autoWB: Bool = false,
         chromaticAlignment: Bool = false,
         brightness: Double = 0.0,
-        contrast: Double = 1.0
+        contrast: Double = 1.0,
+        highlights: Double = 0.0,
+        shadows: Double = 0.0
     ) {
         self.enabled = enabled
         self.controlPoints = controlPoints
@@ -360,5 +380,7 @@ struct ToneCurveSettings: Equatable, Codable {
         self.chromaticAlignment = chromaticAlignment
         self.brightness = brightness
         self.contrast = contrast
+        self.highlights = highlights
+        self.shadows = shadows
     }
 }
