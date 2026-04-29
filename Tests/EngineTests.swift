@@ -118,6 +118,78 @@ struct SerHeaderTests {
     }
 }
 
+// MARK: - OscDefaults (D.3)
+
+@Suite("OscDefaults — auto-WB on OSC sources")
+struct OscDefaultsTests {
+
+    @Test("Bayer SER is detected as OSC")
+    func bayerIsOSC() throws {
+        let url = try SyntheticSER.write(colorID: 8)  // RGGB
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(OscDefaults.isOSC(url: url) == true)
+    }
+
+    @Test("Mono SER is NOT detected as OSC")
+    func monoIsNotOSC() throws {
+        let url = try SyntheticSER.write(colorID: 0)  // mono
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(OscDefaults.isOSC(url: url) == false)
+    }
+
+    @Test("Missing / unreadable file returns false")
+    func missingFileFalse() {
+        let url = URL(fileURLWithPath: "/nonexistent/path.ser")
+        #expect(OscDefaults.isOSC(url: url) == false)
+    }
+
+    @Test("Unknown extension returns false")
+    func unknownExtensionFalse() {
+        let url = URL(fileURLWithPath: "/tmp/foo.tif")
+        #expect(OscDefaults.isOSC(url: url) == false)
+    }
+
+    @Test("AVI is treated as OSC")
+    func aviIsOSC() {
+        // We can't synthesize an AVI cheaply; .isOSC is path-extension-
+        // gated for AVI so a non-existent .avi still returns true.
+        let url = URL(fileURLWithPath: "/tmp/something.avi")
+        #expect(OscDefaults.isOSC(url: url) == true)
+    }
+
+    @Test("applyDefaults turns autoWB on for Bayer SER")
+    func applyTurnsAutoWBOn() throws {
+        let url = try SyntheticSER.write(colorID: 11)  // BGGR
+        defer { try? FileManager.default.removeItem(at: url) }
+        var tone = ToneCurveSettings()
+        #expect(tone.autoWB == false)
+        let changed = OscDefaults.applyDefaults(to: &tone, for: url)
+        #expect(changed == true)
+        #expect(tone.autoWB == true)
+    }
+
+    @Test("applyDefaults is no-op when autoWB is already on")
+    func applyIdempotent() throws {
+        let url = try SyntheticSER.write(colorID: 9)  // GRBG
+        defer { try? FileManager.default.removeItem(at: url) }
+        var tone = ToneCurveSettings()
+        tone.autoWB = true
+        let changed = OscDefaults.applyDefaults(to: &tone, for: url)
+        #expect(changed == false)
+        #expect(tone.autoWB == true)
+    }
+
+    @Test("applyDefaults is no-op for mono SER")
+    func applySkipsMono() throws {
+        let url = try SyntheticSER.write(colorID: 0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        var tone = ToneCurveSettings()
+        let changed = OscDefaults.applyDefaults(to: &tone, for: url)
+        #expect(changed == false)
+        #expect(tone.autoWB == false)
+    }
+}
+
 // MARK: - SER frame-byte access (>4 GB safety + offset arithmetic)
 
 @Suite("SER frame-byte offset arithmetic")

@@ -402,6 +402,7 @@ final class AppModel: ObservableObject {
         jobStatus = .idle
         loadThumbnailsAsync()
         autoApplyDefaultPreset(candidates: catalogCandidateStrings(rootURL: url))
+        autoApplyOscDefaults()
         autoSetupOutputFolder(in: url)
     }
 
@@ -437,6 +438,19 @@ final class AppModel: ObservableObject {
         c.append(contentsOf: catalog.files.prefix(20).map { $0.url.lastPathComponent })
         c.append(contentsOf: catalog.files.prefix(20).map { $0.url.deletingLastPathComponent().lastPathComponent })
         return c
+    }
+
+    /// Block D.3: turn on auto white balance when the just-loaded files
+    /// contain at least one OSC (Bayer SER / RGB SER / AVI) source. The
+    /// detection peeks at the first file's SER header — sub-millisecond
+    /// on Apple Silicon. Idempotent (no-op when autoWB is already on or
+    /// the source is mono) so re-opening a folder doesn't toggle the
+    /// flag back and forth.
+    private func autoApplyOscDefaults() {
+        guard let firstURL = catalog.files.first?.url else { return }
+        if OscDefaults.applyDefaults(to: &toneCurve, for: firstURL) {
+            NSLog("OscDefaults: enabled autoWB for OSC source %@", firstURL.lastPathComponent)
+        }
     }
 
     /// If auto-detect is on, find the matching target and apply that target's
@@ -495,6 +509,7 @@ final class AppModel: ObservableObject {
         jobStatus = .idle
         loadThumbnailsAsync()
         autoApplyDefaultPreset(candidates: catalogCandidateStrings(rootURL: inferredRoot ?? urls.first))
+        autoApplyOscDefaults()
         if let root = inferredRoot { autoSetupOutputFolder(in: root) }
     }
 
