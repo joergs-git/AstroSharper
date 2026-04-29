@@ -55,6 +55,41 @@ enum CaptureValidator {
     /// Tiled deconvolution requires a 200-px tile minimum (BiggSky).
     static let minTileSize: Int = 200
 
+    // MARK: - Metadata string parser
+    //
+    // SharpCap / FireCapture pack capture-time metadata into the three
+    // free-form SER header strings (`observer` / `instrument` /
+    // `telescope`) as concatenated `key=value` pairs with no delimiter:
+    //
+    //   instrument : "ASI=ZWO ASI224MCtemp=21.0"
+    //   observer   : "gamma=50"
+    //   telescope  : "fps=50.13gain=247exp=20.00"
+    //
+    // We pull numeric pairs only (`fps`, `exp`, `gain`, `gamma`, `temp`)
+    // — the camera model string is intentionally ignored.
+
+    /// Pull numeric `key=value` pairs out of the three SER header strings.
+    /// Returned dictionary keys are lowercased.
+    static func parseMetadata(observer: String, instrument: String, telescope: String) -> [String: Double] {
+        var out: [String: Double] = [:]
+        let combined = [observer, instrument, telescope].joined(separator: " ")
+        let pattern = #"([A-Za-z_]+)=(-?[0-9]+(?:\.[0-9]+)?)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return out }
+        let range = NSRange(combined.startIndex..., in: combined)
+        regex.enumerateMatches(in: combined, range: range) { match, _, _ in
+            guard let m = match,
+                  m.numberOfRanges == 3,
+                  let kRange = Range(m.range(at: 1), in: combined),
+                  let vRange = Range(m.range(at: 2), in: combined),
+                  let v = Double(combined[vRange]) else { return }
+            let key = combined[kRange].lowercased()
+            // First occurrence wins so unrelated camera-model digits
+            // (e.g. "ASI224") can't overwrite a real metadata value.
+            if out[key] == nil { out[key] = v }
+        }
+        return out
+    }
+
     // MARK: - Public API
 
     /// Run all rules against a SER header + optional user metadata.

@@ -40,6 +40,33 @@ struct PreviewStatsHUD: View {
                         .help("Variance of the Laplacian. Higher = more high-frequency detail (sharper). Compare values within the same target — absolute numbers depend on contrast and exposure.")
                 }
             }
+            // E.4 capture-validator warnings — non-modal yellow chips so
+            // the user catches a suboptimal capture (long exposure, 8-bit
+            // on lunar/solar, derotation needed, …) before they spend
+            // 10 minutes stacking it.
+            if !stats.captureWarnings.isEmpty {
+                Divider().background(Color.white.opacity(0.15)).padding(.vertical, 2)
+                ForEach(stats.captureWarnings, id: \.code) { w in
+                    HStack(alignment: .top, spacing: 4) {
+                        Image(systemName: w.severity == .warning
+                              ? "exclamationmark.triangle.fill"
+                              : "info.circle.fill")
+                            .foregroundColor(w.severity == .warning ? .yellow : .blue)
+                            .font(.system(size: 10))
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(w.message)
+                                .foregroundColor(w.severity == .warning ? .yellow : .white)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let s = w.suggestion {
+                                Text(s)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: 320, alignment: .leading)
+                }
+            }
             if let d = stats.distribution {
                 Divider().background(Color.white.opacity(0.15)).padding(.vertical, 2)
                 Text("Sampled \(d.sampleCount) frames")

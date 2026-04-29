@@ -34,6 +34,14 @@ struct PreviewStats: Equatable {
     // Distribution (SER only, populated by scanner).
     var distribution: SharpnessDistribution? = nil
 
+    /// Non-blocking findings from `CaptureValidator.validate`. Populated
+    /// when a SER (or AVI with header equivalents) is loaded; the HUD
+    /// surfaces them as inline yellow chips so the user catches a
+    /// suboptimal capture before they spend time stacking it. Not
+    /// participating in `==` is intentional — warning-array order may
+    /// shuffle harmlessly across loads.
+    var captureWarnings: [CaptureWarning] = []
+
     // MARK: Equatable
     static func == (a: PreviewStats, b: PreviewStats) -> Bool {
         a.fileName == b.fileName &&
@@ -46,7 +54,8 @@ struct PreviewStats: Equatable {
         a.totalFrames == b.totalFrames &&
         a.currentFrame == b.currentFrame &&
         a.currentSharpness == b.currentSharpness &&
-        a.distribution == b.distribution
+        a.distribution == b.distribution &&
+        a.captureWarnings == b.captureWarnings
     }
 }
 

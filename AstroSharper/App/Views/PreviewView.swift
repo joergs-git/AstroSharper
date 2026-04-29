@@ -438,6 +438,28 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 stats.bitDepth = h.pixelDepthPerPlane
                 stats.bayerLabel = Self.bayerLabel(for: h.colorID)
                 if let d = h.dateUTC { stats.captureDate = d }
+
+                // E.4 capture validator. Detect target from filename +
+                // folder name (same heuristic as the auto-preset path),
+                // then parse SharpCap / FireCapture's metadata pairs out
+                // of the header strings to feed the validator. Warnings
+                // appear in the HUD's yellow chip section.
+                let targetCandidates = [
+                    url.lastPathComponent,
+                    url.deletingLastPathComponent().lastPathComponent,
+                ]
+                let target = PresetAutoDetect.detect(in: targetCandidates)
+                let meta = CaptureValidator.parseMetadata(
+                    observer: h.observer,
+                    instrument: h.instrument,
+                    telescope: h.telescope
+                )
+                stats.captureWarnings = CaptureValidator.validate(
+                    header: h,
+                    target: target,
+                    exposureMs: meta["exp"] ?? meta["exposure"],
+                    frameRateFPS: meta["fps"]
+                )
             }
         } else if isAVI {
             aviReader = try? AviReader(url: url)
