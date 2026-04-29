@@ -102,6 +102,41 @@ struct PreviewView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: app.jobStatus)
+            // Preview-loading overlay. Shows while a freshly-clicked
+            // frame-sequence file is being read into a texture — critical
+            // for NAS-mounted SERs where the first-frame page-fault read
+            // can take 1-3 seconds. Without this the user sees a black
+            // canvas and assumes the app is broken. Indeterminate bar
+            // because we don't know the actual byte progress (Foundation
+            // mmap doesn't expose it).
+            .overlay {
+                if app.isLoadingPreview {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .scaleEffect(1.4)
+                            .controlSize(.large)
+                        Text("Loading preview…")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white)
+                        if let label = app.loadingPreviewLabel {
+                            Text(label)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.75))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                            .frame(width: 280)
+                            .tint(AppPalette.accent)
+                    }
+                    .padding(24)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                    .shadow(color: .black.opacity(0.4), radius: 18, y: 6)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                }
+            }
+            .animation(.easeInOut(duration: 0.22), value: app.isLoadingPreview)
             // Mini-map overlay was disabled — pan/zoom recomputed it on
             // every drag tick, and the user found it slow without
             // commensurate value. The view + computation helpers stay in
@@ -522,9 +557,25 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         // on, so the visible image desyncs from the highlighted filename and
         // can flip back and forth as old loads complete out-of-order.
         let dispatchedID = id
+        // Loading-overlay signal. Multi-GB SERs from a NAS share take a
+        // visible 1-3 s for the first-frame page-fault read; without a
+        // loading indicator the user sees a black canvas and can't tell
+        // if anything is happening. Show only for frame-sequence files
+        // since static images load in <50 ms and the indicator would
+        // flash distractingly.
+        let showLoading = isSER || isAVI
+        if showLoading {
+            let sizeLabel = ByteCountFormatter.string(
+                fromByteCount: entry.sizeBytes,
+                countStyle: .file
+            )
+            app.isLoadingPreview = true
+            app.loadingPreviewLabel = "\(entry.name)  ·  \(sizeLabel)"
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             var tex: MTLTexture?
+            let loadStart = Date()
             if isSER {
                 do {
                     tex = try SerFrameLoader.loadFrame(url: url, frameIndex: 0, device: MetalDevice.shared.device)
@@ -536,6 +587,24 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 tex = try? avi.loadFrame(at: 0, device: MetalDevice.shared.device)
             } else {
                 tex = try? ImageTexture.load(url: url, device: MetalDevice.shared.device)
+            }
+            let loadMs = Int(Date().timeIntervalSince(loadStart) * 1000)
+            // Diagnostic: log file load + first-frame brightness so the
+            // user can tell from Console.app whether a "black preview"
+            // is real (data is genuinely dim → tone curve fix) vs a
+            // load failure (tex is nil → app bug). Only fires for
+            // frame-sequence files since static images already show
+            // sane brightness via ImageTexture.load.
+            if showLoading, let t = tex {
+                let stats = Self.sampleBrightness(texture: t)
+                NSLog("PreviewView: loaded %@ in %d ms — %dx%d %@, sample mean=%.4f min=%.4f max=%.4f",
+                      url.lastPathComponent, loadMs,
+                      t.width, t.height,
+                      String(describing: t.pixelFormat),
+                      stats.mean, stats.min, stats.max)
+            } else if showLoading {
+                NSLog("PreviewView: %@ load returned nil (after %d ms)",
+                      url.lastPathComponent, loadMs)
             }
             // Apply the meridian-flip flag once, here. Everything downstream
             // sees the rotated frame.
@@ -551,7 +620,16 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             // SERs. The "Calculate Video Quality" button below the HUD is the
             // explicit opt-in that runs the per-frame probe + distribution.
             DispatchQueue.main.async {
-                guard self.app.previewFileID == dispatchedID else { return }
+                guard self.app.previewFileID == dispatchedID else {
+                    // Stale: we lost the race. Only clear loading state if
+                    // no other load has overwritten it (which would be the
+                    // current-file load — leave that alone).
+                    if showLoading, self.app.loadingPreviewLabel?.contains(url.lastPathComponent) == true {
+                        self.app.isLoadingPreview = false
+                        self.app.loadingPreviewLabel = nil
+                    }
+                    return
+                }
                 self.beforeTex = tex
                 self.afterTex = nil
                 // Zoom + pan deliberately PRESERVED across file switches — this
@@ -565,6 +643,10 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 }
                 self.app.previewStats.currentSharpness = nil
                 self.view?.needsDisplay = true
+                if showLoading {
+                    self.app.isLoadingPreview = false
+                    self.app.loadingPreviewLabel = nil
+                }
                 self.reprocess()
             }
         }
@@ -585,6 +667,96 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         if !isSER, let s = entry.sharpness {
             app.previewStats.currentSharpness = s
         }
+    }
+
+    /// Read back a 64×64 centre region of an rgba16Float / rgba32Float
+    /// texture and compute mean/min/max luminance for diagnostic logging.
+    /// Used to distinguish "load failed → texture is nil" from "load
+    /// succeeded but data is dim → user thinks it's broken". Cost is
+    /// a 16 KB blit + CPU iterate, negligible vs the file read itself.
+    private static func sampleBrightness(texture: MTLTexture) -> (mean: Float, min: Float, max: Float) {
+        let size = 64
+        let cx = max(0, texture.width / 2 - size / 2)
+        let cy = max(0, texture.height / 2 - size / 2)
+        let w = min(size, texture.width - cx)
+        let h = min(size, texture.height - cy)
+        guard w > 0, h > 0 else { return (0, 0, 0) }
+        // Two supported preview pixel formats land here: rgba16Float (typical
+        // first-frame upload) and rgba32Float (post-pipeline). Both decode
+        // RGB into [0, 1+] floats; just read R as a proxy for luminance on
+        // the diagnostic path.
+        let bpp: Int
+        let isFloat32: Bool
+        switch texture.pixelFormat {
+        case .rgba32Float: bpp = 16; isFloat32 = true
+        case .rgba16Float: bpp = 8;  isFloat32 = false
+        default:           return (0, 0, 0)
+        }
+        // Source texture is .private storage so getBytes won't work
+        // directly — blit the centre region into a .shared staging
+        // texture first, then read.
+        let device = MetalDevice.shared.device
+        let stageDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: texture.pixelFormat,
+            width: w, height: h,
+            mipmapped: false
+        )
+        stageDesc.storageMode = .shared
+        stageDesc.usage = [.shaderRead]
+        guard let staging = device.makeTexture(descriptor: stageDesc),
+              let cmd = MetalDevice.shared.commandQueue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else {
+            return (0, 0, 0)
+        }
+        blit.copy(
+            from: texture,
+            sourceSlice: 0, sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: cx, y: cy, z: 0),
+            sourceSize: MTLSize(width: w, height: h, depth: 1),
+            to: staging,
+            destinationSlice: 0, destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        )
+        blit.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        let bytesPerRow = w * bpp
+        var raw = [UInt8](repeating: 0, count: bytesPerRow * h)
+        raw.withUnsafeMutableBufferPointer { buf in
+            staging.getBytes(
+                buf.baseAddress!,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: w, height: h, depth: 1)
+                ),
+                mipmapLevel: 0
+            )
+        }
+        var sum: Double = 0
+        var minV: Float = .greatestFiniteMagnitude
+        var maxV: Float = -.greatestFiniteMagnitude
+        let pixels = w * h
+        raw.withUnsafeBytes { rawBuf in
+            if isFloat32 {
+                let f = rawBuf.bindMemory(to: Float.self)
+                for i in 0..<pixels {
+                    let v = f[i * 4]
+                    sum += Double(v)
+                    if v < minV { minV = v }
+                    if v > maxV { maxV = v }
+                }
+            } else {
+                let h16 = rawBuf.bindMemory(to: UInt16.self)
+                for i in 0..<pixels {
+                    let v = Float(Float16(bitPattern: h16[i * 4]))
+                    sum += Double(v)
+                    if v < minV { minV = v }
+                    if v > maxV { maxV = v }
+                }
+            }
+        }
+        return (Float(sum / Double(pixels)), minV, maxV)
     }
 
     /// Friendly Bayer-pattern label for the HUD. Mirrors `SerColorID` but

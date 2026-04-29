@@ -168,6 +168,18 @@ final class AppModel: ObservableObject {
     /// the user had no signal that work was happening.
     @Published var processingInFlight: Bool = false
 
+    /// True while a freshly-clicked file is being read into a preview
+    /// texture. Critical for NAS-mounted SERs where the first frame's
+    /// page-fault read can take 1-3 seconds — without this signal the
+    /// user sees a black canvas and assumes the app is broken.
+    @Published var isLoadingPreview: Bool = false
+
+    /// Filename + size shown in the loading overlay so the user knows
+    /// WHICH file is being read (vs guessing because they just clicked
+    /// fast through several rows). Cleared when isLoadingPreview goes
+    /// false.
+    @Published var loadingPreviewLabel: String? = nil
+
     /// Which high-level pipeline stage is currently executing in the
     /// live preview. nil = idle. Drives the colored highlight on the
     /// SettingsPanel section headers so the user can see which step
