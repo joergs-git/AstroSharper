@@ -8,6 +8,16 @@
 // RAM — the OS pages frame data on demand. Every frame access yields a raw
 // pointer into the mapped region; the upload kernel takes it from there.
 //
+// >4 GB SER safety (F.2 audit, 2026-04-29): all offset arithmetic uses
+// Swift `Int`, which is 64-bit on Apple Silicon (every supported Mac).
+// `Data(.alwaysMapped)` on Darwin wraps real `mmap`, which supports
+// multi-GB files on 64-bit. Empirically validated against
+// `TESTIMAGES/biggsky/mond-00_06_53_.ser` (12 GB lunar SER). Per-frame
+// offset = `178 + index * bytesPerFrame`, computed in Int64 even for
+// adversarial `index * bytesPerFrame` products. The boundary check in
+// `withFrameBytes` traps cleanly if a truncated / corrupt file is
+// memory-mapped but lacks the bytes the header claims.
+//
 // Reference: http://www.grischa-hahn.homepage.t-online.de/astro/ser/
 import Foundation
 
@@ -105,12 +115,20 @@ final class SerReader {
 
     /// Returns a raw byte pointer to frame `index` valid for the lifetime of
     /// the reader. The buffer length is `header.bytesPerFrame`.
+    ///
+    /// Boundary guard catches truncated / corrupt files where the mapped
+    /// data is shorter than the header claims (e.g. a SER copy interrupted
+    /// mid-transfer). Without this check we'd return a pointer into invalid
+    /// memory. >4 GB SERs are fine — see file-level `>4 GB SER safety` note.
     func withFrameBytes<R>(at index: Int, _ body: (UnsafePointer<UInt8>, Int) throws -> R) rethrows -> R {
         precondition(index >= 0 && index < header.frameCount, "frame index out of range")
-        let offset = frameDataOffset + index * header.bytesPerFrame
+        let bpf = header.bytesPerFrame
+        let offset = frameDataOffset + index * bpf
+        precondition(offset + bpf <= data.count,
+                     "SER file truncated at frame \(index): need \(offset + bpf) bytes, have \(data.count)")
         return try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> R in
             let base = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
-            return try body(base.advanced(by: offset), header.bytesPerFrame)
+            return try body(base.advanced(by: offset), bpf)
         }
     }
 

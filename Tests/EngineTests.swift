@@ -118,6 +118,54 @@ struct SerHeaderTests {
     }
 }
 
+// MARK: - SER frame-byte access (>4 GB safety + offset arithmetic)
+
+@Suite("SER frame-byte offset arithmetic")
+struct SerFrameBytesTests {
+
+    /// Verifies `withFrameBytes` returns the correct frame at every
+    /// index — exercising the `index * bytesPerFrame` offset math that
+    /// would silently corrupt access if a 32-bit offset assumption
+    /// crept in. Stamp byte at frame N is `0x10 + N`.
+    @Test("each frame's stamp byte is read at the correct offset")
+    func readsCorrectStampPerFrame() throws {
+        let frames = 12
+        let url = try SyntheticSER.write(
+            width: 320, height: 240, depth: 8,
+            frameCount: frames, colorID: 0,
+            stampFrameIndices: true
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SerReader(url: url)
+        for i in 0..<frames {
+            let stamp = reader.withFrameBytes(at: i) { ptr, _ in ptr[0] }
+            #expect(stamp == UInt8((0x10 + i) & 0xFF),
+                    "frame \(i) stamp mismatch: got 0x\(String(stamp, radix: 16))")
+        }
+    }
+
+    /// Confirms 16-bit Bayer offset math (bytes-per-frame doubled) is
+    /// stride-correct across all frames — the channel-extract path in
+    /// LuckyStackPerChannel relies on this.
+    @Test("16-bit Bayer frames stride correctly")
+    func bayer16FrameStride() throws {
+        let frames = 8
+        let url = try SyntheticSER.write(
+            width: 256, height: 256, depth: 16,
+            frameCount: frames, colorID: 8,  // bayerRGGB
+            stampFrameIndices: true
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SerReader(url: url)
+        for i in 0..<frames {
+            let stamp = reader.withFrameBytes(at: i) { ptr, _ in ptr[0] }
+            #expect(stamp == UInt8((0x10 + i) & 0xFF))
+        }
+    }
+}
+
 // MARK: - SourceReader conformance
 
 @Suite("SourceReader protocol conformance")

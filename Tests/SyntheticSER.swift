@@ -30,7 +30,8 @@ enum SyntheticSER {
         dateTimeUTC: Int64 = 0,
         observer: String = "",
         instrument: String = "",
-        telescope: String = ""
+        telescope: String = "",
+        stampFrameIndices: Bool = false
     ) throws -> URL {
         var data = Data()
         data.reserveCapacity(178 + width * height * frameCount * (depth > 8 ? 2 : 1))
@@ -66,6 +67,17 @@ enum SyntheticSER {
         }
         let bytesPerFrame = width * height * bytesPerPlane * planesPerPixel
         data.append(Data(repeating: fillByte, count: bytesPerFrame * frameCount))
+
+        // Mark byte 0 of each frame with `0x10 + frameIndex` (mod 256) so
+        // tests can verify multi-frame offset arithmetic in `withFrameBytes`.
+        // Only applied when `stampFrameIndices` is true (default false to
+        // keep existing tests' uniform-fill expectations intact).
+        if stampFrameIndices {
+            for frameIndex in 0..<frameCount {
+                let stampOffset = 178 + frameIndex * bytesPerFrame
+                data[stampOffset] = UInt8((0x10 + frameIndex) & 0xFF)
+            }
+        }
 
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("astrosharper-test-\(UUID().uuidString).ser")
