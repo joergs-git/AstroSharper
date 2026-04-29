@@ -338,6 +338,52 @@ final class AppModel: ObservableObject {
         !batchTargetIDs.isEmpty && jobStatus.isIdle
     }
 
+    /// Stabilize / Align operates on a *sequence of single-frame files*
+    /// (one TIFF per timestamp / per session). It is NOT meaningful on
+    /// .ser / .avi inputs — those are video containers where the
+    /// equivalent stabilization happens inside the Lucky Stack pipeline
+    /// per-frame. The button gate also requires ≥ 2 targets and a
+    /// reference frame marker — without an explicit reference, the
+    /// alignment uses the first frame which is rarely the sharpest.
+    /// Idle gate keeps clicks from queuing while a run is already in
+    /// flight.
+    var canStabilize: Bool {
+        guard jobStatus.isIdle else { return false }
+        let targets = batchTargetIDs
+        guard targets.count >= 2 else { return false }
+        // Reject if ANY target is a SER / AVI sequence container.
+        let videoExts: Set<String> = ["ser", "avi", "mov", "mp4", "m4v"]
+        for id in targets {
+            guard let f = catalog.files.first(where: { $0.id == id }) else { continue }
+            if videoExts.contains(f.url.pathExtension.lowercased()) { return false }
+        }
+        // Reference marker must be set AND must point at one of the
+        // current targets (otherwise the marker is on a row the user
+        // didn't actually include in this batch).
+        guard let ref = referenceFileID, targets.contains(ref) else { return false }
+        return true
+    }
+
+    /// Reason the Stabilize button is disabled — surfaced as a tooltip
+    /// in the GUI so the user knows what's missing instead of staring
+    /// at a greyed button. Returns nil when the button is enabled.
+    var stabilizeDisabledReason: String? {
+        if !jobStatus.isIdle { return "Job already running" }
+        let targets = batchTargetIDs
+        if targets.count < 2 { return "Mark or select ≥ 2 image files" }
+        let videoExts: Set<String> = ["ser", "avi", "mov", "mp4", "m4v"]
+        for id in targets {
+            guard let f = catalog.files.first(where: { $0.id == id }) else { continue }
+            if videoExts.contains(f.url.pathExtension.lowercased()) {
+                return "Stabilize doesn't apply to SER / AVI sequences"
+            }
+        }
+        if referenceFileID == nil || !targets.contains(referenceFileID!) {
+            return "Press R on a row to set a reference frame"
+        }
+        return nil
+    }
+
     var selectionCount: Int { selectedFileIDs.count }
     var markedCount: Int { markedFileIDs.count }
 

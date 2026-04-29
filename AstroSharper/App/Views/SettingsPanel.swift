@@ -250,14 +250,15 @@ struct StabilizeSection: View {
             Divider().padding(.vertical, 4)
 
             LuckyRunButton(
-                disabled: false,
+                disabled: !app.canStabilize,
                 title: "Run Stabilize",
                 subtitle: "🛰️  align frames in memory → Memory tab",
                 icon: "scope"
             ) {
                 app.runStabilizationInMemory()
             }
-            .help("Loads all marked / selected frames, computes shifts, applies them in memory. Switches to the Memory tab automatically. Save All from there to write them to OUTPUTS.")
+            .help(app.stabilizeDisabledReason
+                  ?? "Loads all marked / selected frames, computes shifts, applies them in memory. Switches to the Memory tab automatically. Save All from there to write them to OUTPUTS.")
 
             if app.playback.hasFrames {
                 Label("\(app.playback.frames.count) aligned frames in memory", systemImage: "checkmark.circle.fill")
@@ -265,9 +266,19 @@ struct StabilizeSection: View {
                     .foregroundColor(.green)
             }
 
-            Text("Needs ≥ 2 files marked or selected.")
-                .font(.caption2)
-                .foregroundColor(.secondary)
+            // Surface the precise reason the button is disabled so the
+            // user knows what to do (set a reference, pick > 1 file,
+            // switch off SER selection, …) rather than staring at a
+            // greyed-out control. Updates live as conditions change.
+            if let reason = app.stabilizeDisabledReason {
+                Label(reason, systemImage: "exclamationmark.circle")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            } else {
+                Text("Needs ≥ 2 files marked or selected.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
         }
     }
 

@@ -72,12 +72,48 @@ struct PreviewView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.18), value: app.processingInFlight)
+            // Centered job-progress overlay. Different from the top-right
+            // "Processing…" capsule (which is for sub-second live-preview
+            // re-runs) — this one fires on multi-file batch jobs (Lucky
+            // Stack, Apply, Stabilize). Big circular spinner + processed/
+            // total + linear bar so the user sees from any zoom level
+            // exactly how much is left. Fades in/out via animation.
+            .overlay {
+                if case let .running(processed, total) = app.jobStatus {
+                    VStack(spacing: 14) {
+                        ProgressView()
+                            .scaleEffect(1.6)
+                            .controlSize(.large)
+                        Text(jobOverlayLabel(processed: processed, total: total))
+                            .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.white)
+                        ProgressView(
+                            value: Double(processed),
+                            total: Double(max(total, 1))
+                        )
+                        .progressViewStyle(.linear)
+                        .frame(width: 280, height: 6)
+                        .tint(AppPalette.accent)
+                    }
+                    .padding(28)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                    .shadow(color: .black.opacity(0.4), radius: 18, y: 6)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                }
+            }
+            .animation(.easeInOut(duration: 0.22), value: app.jobStatus)
             // Mini-map overlay was disabled — pan/zoom recomputed it on
             // every drag tick, and the user found it slow without
             // commensurate value. The view + computation helpers stay in
             // the codebase (PreviewMiniMap.swift, publishViewport()) for
             // future revival.
             .environmentObject(app)
+    }
+
+    private func jobOverlayLabel(processed: Int, total: Int) -> String {
+        if total <= 0 { return "Working…" }
+        let pct = Int(Double(processed) / Double(total) * 100)
+        return "\(processed)/\(total)  ·  \(pct)%"
     }
 
     @ViewBuilder

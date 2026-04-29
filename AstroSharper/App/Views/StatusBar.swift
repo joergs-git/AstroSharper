@@ -34,12 +34,17 @@ struct StatusBar: View {
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             case .running(let processed, let total):
-                HStack(spacing: 6) {
+                // Wider + bolder progress bar so it actually reads at
+                // a glance during a stacking run. Tinted with the app
+                // accent so it pops against the underPageBackground.
+                HStack(spacing: 8) {
                     ProgressView(value: Double(processed), total: Double(total))
                         .progressViewStyle(.linear)
-                        .frame(width: 180)
+                        .frame(width: 260, height: 6)
+                        .tint(AppPalette.accent)
                     Text("\(processed)/\(total)")
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundColor(AppPalette.accent)
                 }
             case .done(let n, let dir):
                 HStack(spacing: 6) {
