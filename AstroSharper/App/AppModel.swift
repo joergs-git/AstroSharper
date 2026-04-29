@@ -679,6 +679,19 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Select + preview the just-registered output file so the user sees
+    /// it highlighted in the file list AND loaded in the preview pane.
+    /// Looks up the entry by URL because `registerOutput` appended via
+    /// the active-or-stashed path; either way the URL is unique. No-op if
+    /// the row isn't in the active catalog yet (deferred entries land
+    /// after switchToSection).
+    func highlightLatestOutput(url: URL) {
+        guard let id = catalog.files.first(where: { $0.url == url })?.id else { return }
+        selectedFileIDs = Set([id])
+        markedFileIDs.removeAll()
+        previewFileID = id
+    }
+
     private func appendOutputEntry(_ entry: FileEntry) {
         if displayedSection == .outputs {
             catalog.files.append(entry)
@@ -1243,11 +1256,13 @@ final class AppModel: ObservableObject {
                 self.luckyStack.queue[nextIdx].progress = 1.0
                 self.luckyStack.queue[nextIdx].outputURL = url
                 self.luckyStack.queue[nextIdx].statusText = "done"
-                // Surface the new output in the Outputs section. First output
-                // of a run flips to OUTPUTS automatically so the user sees
-                // their results without having to toggle.
-                let isFirst = (self.outputsRootURL == nil)
-                self.registerOutput(url: url, autoSwitch: isFirst)
+                // ALWAYS flip to Outputs after a stack lands so the user
+                // sees their result without manual navigation. registerOutput
+                // appends the file to the catalog (active or stashed); we
+                // then select+preview it so the row is highlighted and the
+                // texture is loaded into the preview pane.
+                self.registerOutput(url: url, autoSwitch: true)
+                self.highlightLatestOutput(url: url)
                 self.runNextLuckyStackItem(outputFolder: outputFolder, options: options)
             case .error(let msg):
                 self.luckyStack.queue[nextIdx].status = .error
@@ -1785,10 +1800,12 @@ struct LuckyStackUIState {
     var multiAP: LuckyMultiAPConfig = .off
     var variants: LuckyStackVariants = LuckyStackVariants()
     /// When ON, the stacked texture is run through the standard sharpen +
-    /// tone pipeline before being written to disk. Default ON because users
-    /// almost always expect the saved file to look like the live preview;
-    /// turn OFF to keep raw stacks for separate downstream processing.
-    var bakeInProcessing: Bool = true
+    /// tone pipeline before being written to disk. Default OFF: a freshly
+    /// stacked image should land "raw" so the user can decide which post-
+    /// processing to apply. Turning this ON folds the current Sharpen + Tone
+    /// settings into the saved TIF, which can be unintended on the first
+    /// stack of a session.
+    var bakeInProcessing: Bool = false
 
     /// Optional target tag used to fill the WinJUPOS `<obj>` field. Defaults
     /// to whatever is in the active preset's target if any.
