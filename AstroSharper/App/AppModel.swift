@@ -1089,6 +1089,7 @@ final class AppModel: ObservableObject {
         perItemOpts.denoisePostPercent = luckyStack.denoisePostPercent
         perItemOpts.useTiledDeconv = luckyStack.tiledDeconv
         perItemOpts.tiledDeconvAPGrid = luckyStack.tiledDeconvAPGrid
+        perItemOpts.useAutoKeepPercent = luckyStack.autoKeepPercent
 
         if luckyStack.bakeInProcessing {
             let lut: MTLTexture? = toneCurve.enabled
@@ -1717,6 +1718,14 @@ struct LuckyStackUIState {
     /// when `autoPSF == true`.
     var tiledDeconv: Bool = false
     var tiledDeconvAPGrid: Int = 8
+
+    /// Auto-keep-% (Block A.4). When ON, the runner uses the per-frame
+    /// quality distribution (free output of the runner's own grading
+    /// pass) to derive a keep fraction via
+    /// `SerQualityScanner.computeKeepRecommendation` instead of the
+    /// `keepPercent` slider value. Smart auto turns this on; the
+    /// user can always override by setting `keepPercent` manually.
+    var autoKeepPercent: Bool = false
 }
 
 enum LuckyStackNaming {

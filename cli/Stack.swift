@@ -43,6 +43,8 @@ enum Stack {
         var usePerChannelStacking = false
         var useAutoPSF = false
         var autoPSFSNR: Double = 50
+        var useAutoKeep = false
+        var keepWasExplicit = false
         var denoisePrePercent: Int = 0
         var denoisePostPercent: Int = 0
         var useTiledDeconv = false
@@ -64,6 +66,7 @@ enum Stack {
                     return 64
                 }
                 keepPercents = parsed
+                keepWasExplicit = true
                 i += 2
             case "--metrics":
                 guard i + 1 < args.count else {
@@ -240,6 +243,16 @@ enum Stack {
                 // dials Wiener back from the preset's 200).
                 useAutoPSF = true
                 autoPSFSNR = 200
+                // Auto-derive keep-% from the quality distribution UNLESS
+                // the user passed --keep explicitly. Keep-% then becomes
+                // self-tuning across SERs of different lengths / quality
+                // profiles without the user thinking about it.
+                if !keepWasExplicit { useAutoKeep = true }
+                i += 1
+            case "--auto-keep":
+                // Standalone flag — auto-derive keep-% even outside
+                // --smart-auto. Honored unless `--keep` was explicit.
+                useAutoKeep = true
                 i += 1
             case "--auto-psf":
                 // Block C.1 v0: estimate Gaussian PSF sigma from the
@@ -404,6 +417,7 @@ enum Stack {
             options.perChannelStacking = usePerChannelStacking
             options.useAutoPSF = useAutoPSF
             options.autoPSFSNR = autoPSFSNR
+            options.useAutoKeepPercent = useAutoKeep && !keepWasExplicit
             options.denoisePrePercent = denoisePrePercent
             options.denoisePostPercent = denoisePostPercent
             options.useTiledDeconv = useTiledDeconv

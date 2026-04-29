@@ -186,6 +186,18 @@ struct LuckyStackOptions {
     var denoisePrePercent: Int = 0
     var denoisePostPercent: Int = 0
 
+    /// Auto-derive `keepPercent` from the per-frame quality grading
+    /// instead of using whatever value the user passed (Block A.4).
+    /// When ON, the runner runs its full quality pass first, then
+    /// hands the sorted scores to `SerQualityScanner.computeKeepRecommendation`
+    /// to pick the keep fraction. The chosen percentage is logged via
+    /// NSLog so the GUI / CLI can surface it.
+    ///
+    /// Reuses the lucky-stack runner's own grading output — no
+    /// duplicate scan, no extra cost. Skipped if `keepCount` (the
+    /// absolute frame-count override) is set.
+    var useAutoKeepPercent: Bool = false
+
     /// Tiled deconvolution with green / yellow / red mask (Block C.3 v0).
     /// Classifies each cell of an `apGrid × apGrid` AP grid by content:
     ///   - GREEN (high LAPD + bright luma) — surface, full deconv
@@ -780,6 +792,28 @@ private final class LuckyRunner {
         try await gradeAllFrames(progress: progress)
         progress(.sorting)
         let scores = quality.computeVariances()  // [Float] of length frameCount
+
+        // Auto-keep (Block A.4): when set, derive the keep fraction
+        // from the quality distribution instead of using the user's
+        // configured value. Reuses the runner's grading output —
+        // no duplicate scan. Skipped if `keepCount` is set (the
+        // absolute frame-count override stays explicit).
+        var resolvedKeepPercent = options.keepPercent
+        if options.useAutoKeepPercent, options.keepCount == nil, !scores.isEmpty {
+            let sorted = scores.sorted()
+            let p90Idx = Int((Double(sorted.count - 1) * 0.9).rounded())
+            let p90 = sorted[max(0, min(sorted.count - 1, p90Idx))]
+            let rec = SerQualityScanner.computeKeepRecommendation(
+                sortedScores: sorted,
+                totalFrames: scores.count,
+                p90: p90,
+                jitterRMS: nil
+            )
+            resolvedKeepPercent = max(1, min(99, Int((rec.fraction * 100).rounded())))
+            NSLog("Auto-keep: %d%% (%d of %d frames) — %@",
+                  resolvedKeepPercent, rec.count, scores.count, rec.text)
+        }
+
         // `keepCount` (absolute frame count) overrides `keepPercent` so the
         // user can request fixed-N stacks (e.g. "best 100 frames") for
         // direct comparison across SERs of different lengths.
@@ -787,7 +821,7 @@ private final class LuckyRunner {
         if let count = options.keepCount, count > 0 {
             kept = topNIndices(scores: scores, count: count)
         } else {
-            kept = topNIndices(scores: scores, percent: options.keepPercent)
+            kept = topNIndices(scores: scores, percent: resolvedKeepPercent)
         }
 
         // Stage 2: pick reference.

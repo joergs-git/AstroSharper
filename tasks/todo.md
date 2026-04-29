@@ -75,7 +75,7 @@ A running record of where we are, what's done, and what's next. Update at the en
 - [ ] **F5 32-bit float TIFF output + render modes** — extend `Engine/Exporter.swift` for 32-bit float (deconv peaks routinely > 65535). Render modes (Clip / AutoRange / Manual Min Max) in display path; doesn't affect file content.
 
 ### Block A — Quality intelligence
-- [ ] **A.1 LAPD as primary metric** — replace VL in `QualityProbe.swift::SharpnessProbe` with Diagonal Laplacian (MDPI 2076-3417/13/4/2652). Same MPS infra, new kernel coefficients.
+- [x] **A.1 LAPD as primary metric** — `quality_partials` and `compute_lapd_field` shaders both use `laplacian_at` (Diagonal Laplacian, 8-neighbour, cardinal weight 1.0 + diagonal 0.5). Active across `LuckyStack` quality grading + `SharpnessProbe` HUD. Pure-Swift `LAPDProbeTests` suite verifies the math. Already shipped.
 - [ ] **A.2 Two-stage quality** — global LAPD + per-AP local contrast in `LuckyStack.swift`. Each AP picks its own top-N% subset (PSS approach).
 - [ ] **A.3 Strehl-ratio supplement** — for high-frame-count regime. 2D Moffat fit on brightest disc/feature.
 - [ ] **A.4 Lucky keep-% formula** — `SerQualityScanner.makeDistribution`. Anchor at BiggSky-default 25%, frame-count floor `max(50, ceil(0.25 × N))`, knee detection at percentile p where `score(p) ≤ 0.5 × p90`. Display % AND absolute frame count. Auto-applied as status line, no popup.
@@ -110,11 +110,11 @@ A running record of where we are, what's done, and what's next. Update at the en
 ### Block E — IO & interop
 - [ ] **E.1 AVI lucky-stack** via SourceReader (depends on F4).
 - [ ] **E.2 FITS input + output** — pure-Swift `Engine/IO/FitsReader.swift` + `FitsWriter.swift`. 2D images only.
-- [ ] **E.3 Auto target detection from filename** — regex on `jup_/jupiter`, `sat_/saturn`, `mars_/mars`, `sol_/solar/sun`, `lunar/luna_/moon`, `_ha/_oiii/_sii`. Sets active preset on import. Chip in file row, click to override.
+- [~] **E.3 Auto target detection from filename** — `Engine/Presets/Preset.swift::PresetAutoDetect.detect` matches keywords for sun (sun/solar/sonne/halpha/h-alpha/ha_/lunt), moon (moon/mond/lunar/luna), jupiter (jup/jupiter), saturn (sat/saturn), mars (mars). `AppModel.autoApplyDefaultPreset` fires on file import (`autoDetectPresetOnOpen = true` by default), pre-applies the matching built-in preset (sets keepPercent / mode / multiAP / etc.). Smart auto button correctly layers RFF on top of the auto-applied preset. **Open work for v1+**: file-row target chip (cosmetic, click to override), `_oiii`/`_sii` narrowband-filter tags (ambiguous — could be solar OR deep-sky), CLI-side auto-detect when no `--keep` etc. are passed.
 - [ ] **E.4 SER capture-side header validator** — new `Engine/IO/CaptureValidator.swift`. Non-modal warnings in HUD: exposure > 15 ms; frame rate < 30 fps; histogram peak > 90%; 8-bit on lunar/solar; capture window > 3 min on Jupiter/Saturn.
 
 ### Block F — Performance & infra
-- [ ] **F.1 Re-enable MPSGraph FFT path** at `Engine/Pipeline/GPUPhaseCorrelator.swift:194`.
+- [ ] **F.1 Re-enable MPSGraph FFT path** at `Engine/Pipeline/GPUPhaseCorrelator.swift`. Investigated 2026-04-29: sliced FFT output tensors keep the `complex<f32>` element-type flag, which breaks the magnitude-clamp `graph.maximum(mag, eps, ...)` because `eps` is real `f32` (`'mps.maximum' op requires the same element type for all operands`). Real fix needs either an explicit tensor-type cast after the slice or a rework of the cross-power spectrum to avoid sliceTensor on the FFT output. Not a 5-line fix; vDSP CPU path is fast enough on Apple Silicon (8+ cores via shared FFTSetup), so the 2–3× MPSGraph win isn't urgent. Defer until a real perf wall surfaces.
 - [ ] **F.2 Verify memory-mapping on >4 GB SERs** — patch any 32-bit-offset assumptions; tested against `TESTIMAGES/biggsky/*.ser` (3.3–4.0 GB each).
 - [ ] **F.3 Per-frame time budget instrumentation** — timing hooks in `BatchJob.swift`; emit via metrics JSON.
 

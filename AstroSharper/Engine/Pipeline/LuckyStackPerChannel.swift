@@ -286,11 +286,31 @@ private final class LuckyChannelStacker {
         progress(.sorting)
 
         let scores = gradeResult.scores
+
+        // Auto-keep (Block A.4): mirror the standard runner's logic so
+        // --smart-auto + --per-channel still picks a sensible keep
+        // fraction without the user having to set --keep manually.
+        var resolvedKeepPercent = options.keepPercent
+        if options.useAutoKeepPercent, options.keepCount == nil, !scores.isEmpty {
+            let sorted = scores.sorted()
+            let p90Idx = Int((Double(sorted.count - 1) * 0.9).rounded())
+            let p90 = sorted[max(0, min(sorted.count - 1, p90Idx))]
+            let rec = SerQualityScanner.computeKeepRecommendation(
+                sortedScores: sorted,
+                totalFrames: scores.count,
+                p90: p90,
+                jitterRMS: nil
+            )
+            resolvedKeepPercent = max(1, min(99, Int((rec.fraction * 100).rounded())))
+            NSLog("Auto-keep (per-channel): %d%% (%d of %d frames) — %@",
+                  resolvedKeepPercent, rec.count, scores.count, rec.text)
+        }
+
         let kept: [Int]
         if let count = options.keepCount, count > 0 {
             kept = topNIndices(scores: scores, count: count)
         } else {
-            kept = topNIndices(scores: scores, percent: options.keepPercent)
+            kept = topNIndices(scores: scores, percent: resolvedKeepPercent)
         }
         let referenceIndex = scores.argmax()
 

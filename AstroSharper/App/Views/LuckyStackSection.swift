@@ -147,6 +147,7 @@ struct LuckyStackSection: View {
                     app.luckyStack.tiledDeconv = false
                     app.luckyStack.denoisePrePercent = 0
                     app.luckyStack.denoisePostPercent = 0
+                    app.luckyStack.autoKeepPercent = true
                 } label: {
                     Label("Smart auto", systemImage: "wand.and.stars")
                         .font(.caption)
