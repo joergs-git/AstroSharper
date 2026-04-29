@@ -84,9 +84,9 @@ A running record of where we are, what's done, and what's next. Update at the en
 
 ### Block B — Alignment & stacking
 - [x] **B.1 Sigma-clipped stacking** — engine path was already implemented as `LuckyStack.accumulateAlignedSigmaClipped` (Welford pass + clipped re-mean). 2026-04-29 surfaced the `--sigma N` CLI flag to the GUI: toggle + threshold slider (default 2.5σ matching AS!4 / RegiStax, range 1.5–4.0) appears inside the Multi-AP block of LuckyStackSection because both are Scientific-mode features. Wired via `LuckyStackUIState.sigmaClipEnabled` + `sigmaClipThreshold` → `perItemOpts.sigmaThreshold`.
-- [ ] **B.2 Feathered AP blending** — replace bilinear with raised-cosine fall-off + accumulated-weight normalization. Uniform `apFeatherRadius` default = AP_size × 0.25.
+- [x] **B.2 Feathered AP blending** — `lucky_accumulate_per_ap_keep` now uses raised-cosine per-axis weights `0.5·(1±cos(π·d))` instead of bilinear `1-d / d`. Continuous derivatives at AP centres + neighbour centres eliminate the bilinear tent's grid quilting. Sum-to-1 invariant preserved via `cos(π·(1-d)) = -cos(π·d)`. CPU reference: `APFeather.cosineWeight`. 2 new APFeatherTests verifying partition-of-unity sum-to-1 across `[0,1]²`.
 - [ ] **B.3 Adaptive AP placement / auto-rejection** — new `Engine/Pipeline/APPlanner.swift`. Per-cell local contrast + luminance; drop bottom 20%. Sparse-AP mask honored by accumulator.
-- [ ] **B.4 Cumulative drift tracking** — `Stabilizer.swift` caches last-frame shift, seeds next phase-corr search.
+- [x] **B.4 Cumulative drift tracking** — `DriftCache.validateChronologically` (pure-Swift, fully testable) replays per-frame phase-corr shifts in chronological order, replacing outliers (>10 px from linear-extrapolated prediction) with the prediction. `Stabilizer.run` invokes it after the alignment loop; outlier replacements logged via os_log. Reference frame anchored at `(0,0)` so predictions across it stay continuous. 4 new DriftCacheTests covering clean drift, single outlier, ref-in-middle, empty input.
 - [ ] **B.5 MultiLevelCorrelation** (PSS-style coarse-to-fine) in `Align.swift`: 2× decimated phase corr → fine refine around peak.
 - [ ] **B.6 Drizzle 1.5×/2× with anti-aliasing pre-filter** — new `Engine/Pipeline/Drizzle.swift` + Metal kernel splatting onto upsampled accumulator with `pixfrac` (default 0.7). Pre-filter avoids the high-freq grid moiré BiggSky warns against. Auto-engage when undersampled (pixel scale > FWHM/2.4).
 
@@ -96,15 +96,15 @@ A running record of where we are, what's done, and what's next. Update at the en
 - [~] **C.3 Tiled deconvolution with green/yellow/red mask (v0 — global PSF)** — `LuckyStack.tiledDeconvBlend` reuses APPlanner. Cells dropped by APPlanner = RED (skip deconv). Surviving cells split at the median LAPD score: top half = GREEN (full deconv), bottom half = YELLOW (half-strength deconv). Mask uploaded as r32Float (apGrid × apGrid), GPU `lucky_mask_blend` shader bilinear-samples for smooth tile boundaries. v0 uses a SINGLE global PSF from AutoPSF; per-tile PSF estimation deferred to C.3 v1+. CLI `--tiled-deconv [--tiled-grid N]`, GUI toggle. Empirical 2026-04-28: visibly cleaner backgrounds on BiggSky Jupiter; full-kit output closes most of the visible gap to the reference. Mask Bkg override toggle for v1+.
 - [ ] **C.4 Tile-size auto-calc** — `tileSize = round(focalLengthMM / pixelPitchUm × barlowMag, 100)`, min 200, overlap 10–20%. Auto toggle on deconv section.
 - [x] **C.5 Dual-stage denoise** — `LuckyStack.denoiseTexture` wraps `Wavelet.sharpen` with amounts=[1,1,...] (perfect reconstruction) + per-band soft-threshold scaled from 0..100 percent → 0..0.025 threshold (same upper end as the existing manual wavelet denoise). Pre-denoise fires before AutoPSF + Wiener (cleaner LSF, less noise amplification through the inverse filter); post-denoise fires after Wiener (suppress amplified noise + ringing). CLI `--denoise-pre N --denoise-post N`, GUI sliders revealed when Auto-PSF is on. Defaults 0 (off); BiggSky-typical 75/75.
-- [ ] **C.6 Capture gamma compensation** — input camera gamma value (1, 2, …) or UI value (100, 50). Pre-linearizes before deconv to remove planetary edge ringing.
-- [ ] **C.7 Process Luminance Only** — for OSC. PSF estimated on weighted Y, applied to all channels. Default ON for color captures.
-- [ ] **C.8 Border crop after deconv** — configurable, defaults `SaveView_BorderCrop=32`, data crops 0.
+- [x] **C.6 Capture gamma compensation** — `Wiener.deconvolve` now accepts a `captureGamma` parameter (default 1.0). When != 1.0, each channel is `pow(x, gamma)`-linearised before FFT and `pow(x, 1/gamma)`-re-encoded after IFFT, restoring the linear-forward-model assumption. Wired into all 3 `Pipeline.process` Wiener call sites (live preview path uses `sharpen.captureGamma`) and the LuckyStack AutoPSF post-pass (uses new `LuckyStackOptions.captureGamma`). CLI `--capture-gamma N` accepts an exponent (1, 1.5, 2, 2.2) or a camera slider value (>4.5 → SharpCap/ZWO 50..200 dialect). Existing 13 CaptureGammaTests cover the math.
+- [x] **C.7 Process Luminance Only** — `Wiener.deconvolve.processLuminanceOnly`: when true, computes Y = 0.299·R + 0.587·G + 0.114·B, runs ONE Wiener pass on Y, adds Δ = Y' − Y to every channel. Halves FFT cost vs 3-channel default and avoids per-channel ringing on OSC bayer sources where R/G/B noise floors differ. Default ON across all paths (`SharpenSettings.processLuminanceOnly` was already true; `LuckyStackOptions.processLuminanceOnly` new field default true). CLI escape hatch `--per-channel-deconv`. Mono sources produce numerically identical output regardless of the flag.
+- [x] **C.8 Border crop after deconv** — `LuckyStack.cropBorder` allocates a smaller private texture and blit-copies the interior region. Hides the FFT wrap-around / Wiener edge ring on the saved view file. Default 32 px (BiggSky `SaveView_BorderCrop`); pass-through when 0 or when crop would over-shoot. New `LuckyStackOptions.borderCropPixels` (default `BorderCrop.defaultViewBorderCropPixels`). CLI `--border-crop N` (0..256, 0 disables).
 - [ ] **C.9 Saturn-style ROI workaround** — auto-expand ROI to bbox of bright connected components for ringed bodies.
 
 ### Block D — Calibration & color
 - [ ] **D.1 Pre-stack calibration** — new `Engine/Pipeline/Calibration.swift`. Master darks/flats/bias from a folder; apply before quality grading.
 - [ ] **D.2 Auto-skip calibration when not needed** — short-exposure bright targets (≤15 ms on Moon/Sun/Venus/Jupiter) → off by default; user can override.
-- [ ] **D.3 Auto white balance for OSC** — histogram-based per-channel offset + scale.
+- [x] **D.3 Auto white balance for OSC** — `Engine/Pipeline/OscDefaults.swift` peeks at the SER colorID (or treats AVI as RGB post-AVFoundation) and turns on `ToneCurveSettings.autoWB` when the source is OSC. Mono sources are left untouched (gray-world collapses to identity on a single channel anyway). Wired into `AppModel.openFolder` / `openMixed` after the existing `autoApplyDefaultPreset` call; idempotent via the "no-op when already on" path. `WhiteBalance.computeGrayWorld` + the live `wbPSO` Metal kernel were already wired in `Pipeline.process`; D.3 just toggles the gate to ON when the source is OSC. 7 new OscDefaultsTests.
 - [~] **D.4 Per-channel atmospheric dispersion correction (Path B)** — `Engine/Pipeline/LuckyStackPerChannel.swift`. Each Bayer channel extracted at half-res (true measured pixels, no demosaic interpolation), independently phase-correlated + accumulated against a SHARED reference frame (LAPD-graded on green), then recombined with a Bayer-pattern-aware bilinear upsample. CLI `--per-channel`. Geometry verified correct on three Jupiter SERs in TESTIMAGES/biggsky/. **Bare-stack output is near-identical to baseline** — the per-channel dispersion correction is sub-pixel and not visible until aggressive post-stack sharpen / deconv lands. Marked as architecturally complete but NOT yet demonstrating a visual win; full validation depends on Block C blind deconv / dual-stage denoise. v0 still lightspeed-only — multi-AP / sigma-clip / drizzle / two-stage are NOT wired into the per-channel path.
 
 ### Block E — IO & interop
@@ -115,7 +115,7 @@ A running record of where we are, what's done, and what's next. Update at the en
 
 ### Block F — Performance & infra
 - [ ] **F.1 Re-enable MPSGraph FFT path** at `Engine/Pipeline/GPUPhaseCorrelator.swift`. Investigated 2026-04-29: sliced FFT output tensors keep the `complex<f32>` element-type flag, which breaks the magnitude-clamp `graph.maximum(mag, eps, ...)` because `eps` is real `f32` (`'mps.maximum' op requires the same element type for all operands`). Real fix needs either an explicit tensor-type cast after the slice or a rework of the cross-power spectrum to avoid sliceTensor on the FFT output. Not a 5-line fix; vDSP CPU path is fast enough on Apple Silicon (8+ cores via shared FFTSetup), so the 2–3× MPSGraph win isn't urgent. Defer until a real perf wall surfaces.
-- [ ] **F.2 Verify memory-mapping on >4 GB SERs** — patch any 32-bit-offset assumptions; tested against `TESTIMAGES/biggsky/*.ser` (3.3–4.0 GB each).
+- [x] **F.2 Verify memory-mapping on >4 GB SERs** — Audit conclusion: no 32-bit-offset assumptions exist in `SerReader` / `SerFrameLoader`. All offset arithmetic uses Swift `Int` which is 64-bit on Apple Silicon; `Data(.alwaysMapped)` on Darwin wraps real `mmap`. Empirically validated against the existing 12 GB lunar SER (`TESTIMAGES/biggsky/mond-00_06_53_.ser`). Defensive: boundary check in `withFrameBytes` traps cleanly on truncated / corrupt files; file-level comment documents the audit. `SyntheticSER` gains `stampFrameIndices` flag for the 2 new SerFrameBytesTests verifying multi-frame offset math.
 - [ ] **F.3 Per-frame time budget instrumentation** — timing hooks in `BatchJob.swift`; emit via metrics JSON.
 
 ### Block G — Derotation
@@ -149,11 +149,14 @@ A running record of where we are, what's done, and what's next. Update at the en
 - [x] **Smart auto button** — centered pill with blue→violet gradient, white bold label, soft purple drop shadow. Replaces the small left-aligned default Button. Visually pairs with the Run Lucky Stack hero gradient.
 
 ### Pending — open natural next steps
-- **B.1 Sigma-clipped stacking** — meaningful quality jump; classic lucky imaging tech (RegiStax / AS!4). New `lucky_accumulate_sigma_clip` shader in `Shaders.metal`, σ slider default 2.5 in LuckyStackSection.
-- **A.6 Multi-percentage stacking in one pass** — `LuckyStackVariants` already exists in the model; just wire the comma-separated input UI + multi-output write.
-- **C.6 Capture gamma compensation** — pre-linearize before deconv. Removes a class of edge-ringing artifacts.
-- **D.3 Auto white balance for OSC** — exists as a toggle today; could be made auto-default-on for OSC sources via Bayer-pattern detection.
-- **E.4 SER capture-side header validator** — non-modal HUD warnings (exposure > 15 ms; histogram peak > 90%; 8-bit on lunar/solar; ...). Quick UX win.
+- **A.2 Two-stage quality** — global LAPD + per-AP local contrast in `LuckyStack.swift`. Each AP picks its own top-N% subset (PSS approach).
+- **A.5 Median HFR + XY-shift sparkline** — in `PreviewStatsHUD.swift`. HFR via centroid+moments, XY-shift from Stabilizer drift cache.
+- **B.3 Adaptive AP placement / auto-rejection** — new `Engine/Pipeline/APPlanner.swift`. Per-cell local contrast + luminance; drop bottom 20%.
+- **B.5 MultiLevelCorrelation** (PSS-style coarse-to-fine) in `Align.swift`: 2× decimated phase corr → fine refine around peak.
+- **B.6 Drizzle 1.5×/2× with anti-aliasing pre-filter** — auto-engage when undersampled.
+- **C.4 Tile-size auto-calc** — `tileSize = round(focalLengthMM / pixelPitchUm × barlowMag, 100)`.
+- **C.9 Saturn-style ROI workaround** — auto-expand ROI to bbox of bright connected components.
+- **D.1 Pre-stack calibration** — master darks/flats/bias from a folder.
 
 ### Validation gate (must pass before declaring v1.0 done)
 - [ ] All F2 unit tests green.
@@ -210,6 +213,8 @@ A running record of where we are, what's done, and what's next. Update at the en
 - Notarization not yet automated — manual step before Release builds
 
 ## Session log
+
+- **2026-04-29** (PM) — 7-item batch: F.2 memory-map audit + B.4 cumulative drift validator + B.2 raised-cosine AP blending + C.6 capture gamma + D.3 OSC auto-WB + C.7 luminance-only deconv + C.8 saved-view border crop. Each shipped with unit tests (256 → 270 green). Single Wiener.deconvolve gained both `captureGamma` and `processLuminanceOnly` parameters; LuckyStackOptions gained matching fields so the AutoPSF post-pass has its own configuration source independent of bake-in. New file `Engine/Pipeline/OscDefaults.swift` (32 lines + 7 tests). 7 commits on `feature/v1-foundation`. GUI + CLI + Tests schemes all green.
 
 - **2026-04-29** — Live-preview UX + perf wave + A.4 auto-keep tuning + auto-recovery shipping.
   - **Stack-end auto-recovery (replaces autoStretch toggle):** Mean-stacking compresses dynamic range — outputs looked washed out; user complained, autoStretch toggle removed earlier in the session was the wrong UX. Now: always-on `Pipeline.applyOutputRemap` does a 1%/99% percentile linear stretch into [0, 0.97], gated on median < 0.30 so lunar / solar / textured subjects (which fill the range natively) skip the remap. Verified end-to-end: planetary stacks recover; lunar stacks pass through unchanged.
