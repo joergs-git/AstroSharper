@@ -28,6 +28,7 @@ final class Pipeline {
     private let acdcPSO:    MTLComputePipelineState
     private let stretchPSO: MTLComputePipelineState
     private let bcPSO:      MTLComputePipelineState
+    private let hsPSO:      MTLComputePipelineState     // highlights / shadows
     private let shiftPSO:   MTLComputePipelineState
     private let stackPSO:   MTLComputePipelineState
     private let subPSO:     MTLComputePipelineState
@@ -74,6 +75,7 @@ final class Pipeline {
         self.acdcPSO    = make("shift_rb_channels")
         self.stretchPSO = make("apply_auto_stretch")
         self.bcPSO      = make("apply_brightness_contrast")
+        self.hsPSO      = make("apply_highlights_shadows")
         self.shiftPSO   = make("sub_pixel_shift")
         self.stackPSO   = make("stack_accumulate")
         self.subPSO     = make("subtract_textures")
@@ -436,6 +438,32 @@ final class Pipeline {
             current = result
         }
 
+        // Highlights / Shadows: runs after brightness+contrast (operates on
+        // the user's curve+BC-mapped values) and before saturation (so the
+        // sat boost reads the recovered highlights / lifted shadows). At
+        // identity (both 0) the kernel is skipped so the no-op case costs
+        // nothing. Driven by the live preview's reprocessSubject sink so
+        // slider drags update at ~30 fps.
+        if toneCurve.enabled,
+           abs(toneCurve.highlights) > 1e-4 || abs(toneCurve.shadows) > 1e-4 {
+            let result = borrow(width: w, height: h, format: input.pixelFormat)
+            borrowed.append(result)
+            if let enc = finalCmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(hsPSO)
+                enc.setTexture(current, index: 0)
+                enc.setTexture(result, index: 1)
+                var p = HighlightsShadowsParamsCPU(
+                    highlights: Float(toneCurve.highlights),
+                    shadows:    Float(toneCurve.shadows)
+                )
+                enc.setBytes(&p, length: MemoryLayout<HighlightsShadowsParamsCPU>.stride, index: 0)
+                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: hsPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            current = result
+        }
+
         // Saturation runs even when the tone-curve sub-section is off — it's
         // an independent control on the same panel. Skipped at identity (1.0)
         // so the no-op case costs nothing. Always last in the chain so it
@@ -573,16 +601,49 @@ final class Pipeline {
         outDesc.storageMode = .private
         let output = device.makeTexture(descriptor: outDesc)!
 
-        guard let pts = computeLumaPercentiles(input: input, lowPercentile: 0.01, highPercentile: 0.99) else {
+        // Sample the high-end at p99.8 (was p99). Wiener deconv concentrates
+        // restored power into the brightest 0.5–1% of pixels, so p99 is too
+        // permissive — values between p99 and p998 still drag the highlight
+        // ceiling toward 1.0 and produce the "looks slightly overexposed"
+        // failure mode users reported across all subject types.
+        guard let pts = computeLumaPercentiles(input: input, lowPercentile: 0.01, highPercentile: 0.998) else {
             return copyTexture(input, into: output)
         }
-        // Histogram-shape gate: skip on lunar / solar / wide-range inputs.
-        guard pts.median < 0.30 else {
-            NSLog("LuckyStack: stack-end remap skipped (median=%.3f ≥ 0.30 — wide-range subject, no compression to recover)", pts.median)
+
+        // Two modes share the same kernel; only the params differ.
+        // - DARK (median < 0.30, e.g. planet on dark sky):
+        //     stretch [p1, p998] → [0, whiteCap]. This is the original
+        //     dynamic-range recovery for mean-stacked planet-on-sky output.
+        // - WIDE (median ≥ 0.30, e.g. lunar / solar / textured surfaces):
+        //     scale-only highlight compression. blackPoint=0 so shadows are
+        //     untouched (avoids the "unnatural over-contrast" failure mode
+        //     of the original always-stretch behaviour). Only fires when
+        //     the highlight ceiling actually exceeds whiteCap.
+        //
+        // whiteCap dropped 0.97 → 0.92 universally — gives 8% headroom
+        // above the brightest (clamped) Wiener peaks so the saved TIF
+        // doesn't look like the brightest features pushed into clipped
+        // white. Trade-off: planet-on-sky output is ~5% dimmer after the
+        // remap than before. The user can lift via Tone Curve.
+        let whiteCap: Float = 0.92
+        let blackPoint: Float
+        let scale: Float
+        if pts.median < 0.30 {
+            NSLog("LuckyStack: stack-end remap dark mode (median=%.3f black=%.3f white=%.3f → [0, %.2f])",
+                  pts.median, pts.black, pts.white, whiteCap)
+            blackPoint = pts.black
+            scale = whiteCap / max(1e-4, pts.white - pts.black)
+        } else if pts.white > whiteCap {
+            NSLog("LuckyStack: stack-end highlight compress (wide, median=%.3f white=%.3f → %.2f)",
+                  pts.median, pts.white, whiteCap)
+            blackPoint = 0
+            scale = whiteCap / pts.white
+        } else {
+            NSLog("LuckyStack: stack-end remap skipped (wide-range, well-exposed median=%.3f white=%.3f ≤ %.2f)",
+                  pts.median, pts.white, whiteCap)
             return copyTexture(input, into: output)
         }
-        NSLog("LuckyStack: stack-end remap firing (median=%.3f black=%.3f white=%.3f)", pts.median, pts.black, pts.white)
-        let whiteCap: Float = 0.97
+
         guard let cmdBuf = commandQueue.makeCommandBuffer(),
               let enc = cmdBuf.makeComputeCommandEncoder() else {
             return copyTexture(input, into: output)
@@ -591,8 +652,8 @@ final class Pipeline {
         enc.setTexture(input, index: 0)
         enc.setTexture(output, index: 1)
         var p = AutoStretchParamsCPU(
-            blackPoint: pts.black,
-            scale: whiteCap / (pts.white - pts.black),
+            blackPoint: blackPoint,
+            scale: scale,
             whiteCap: whiteCap,
             gamma: 1.0
         )
@@ -699,6 +760,12 @@ final class Pipeline {
 /// Mirror of the Metal `SaturationParams` struct; sent via `setBytes`.
 struct SaturationParamsCPU {
     var saturation: Float
+}
+
+/// Mirror of the Metal `HighlightsShadowsParams` struct.
+struct HighlightsShadowsParamsCPU {
+    var highlights: Float
+    var shadows: Float
 }
 
 /// Mirror of the Metal `NoiseReduceParams` struct (struct field layout
