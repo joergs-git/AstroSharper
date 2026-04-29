@@ -592,7 +592,7 @@ final class Pipeline {
     /// 2026-04-29: stacked output had p1=0, p99=0.973 with crushed
     /// shadows + blown rims). Skipping is the right call there — the
     /// bare stack already looks natural.
-    func applyOutputRemap(input: MTLTexture) -> MTLTexture {
+    func applyOutputRemap(input: MTLTexture, whiteCap whiteCapOverride: Float? = nil, enabled: Bool = true) -> MTLTexture {
         let w = input.width, h = input.height
         let outDesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: input.pixelFormat, width: w, height: h, mipmapped: false
@@ -600,6 +600,13 @@ final class Pipeline {
         outDesc.usage = [.shaderRead, .shaderWrite, .renderTarget]
         outDesc.storageMode = .private
         let output = device.makeTexture(descriptor: outDesc)!
+
+        // Hard-disable path: copy through. Used by --no-stretch CLI flag and
+        // by the bracketing test runs in /tmp/brightness-comparison/.
+        guard enabled else {
+            NSLog("LuckyStack: stack-end remap disabled (--no-stretch / enabled=false)")
+            return copyTexture(input, into: output)
+        }
 
         // Sample the high-end at p99.8 (was p99). Wiener deconv concentrates
         // restored power into the brightest 0.5–1% of pixels, so p99 is too
@@ -620,12 +627,12 @@ final class Pipeline {
         //     of the original always-stretch behaviour). Only fires when
         //     the highlight ceiling actually exceeds whiteCap.
         //
-        // whiteCap dropped 0.97 → 0.92 universally — gives 8% headroom
-        // above the brightest (clamped) Wiener peaks so the saved TIF
-        // doesn't look like the brightest features pushed into clipped
-        // white. Trade-off: planet-on-sky output is ~5% dimmer after the
-        // remap than before. The user can lift via Tone Curve.
-        let whiteCap: Float = 0.92
+        // Default whiteCap = 0.92 (was 0.97). User-override via CLI
+        // --white-cap N or LuckyStackOptions.outputWhiteCap. Lower values
+        // dim the saved file more aggressively — useful when Wiener
+        // overshoot on bright features still pushes them too close to
+        // pure white at the default.
+        let whiteCap: Float = whiteCapOverride ?? 0.92
         let blackPoint: Float
         let scale: Float
         if pts.median < 0.30 {

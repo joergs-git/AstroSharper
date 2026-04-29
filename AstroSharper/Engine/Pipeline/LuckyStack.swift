@@ -194,6 +194,21 @@ struct LuckyStackOptions {
     /// would leave a non-positive output dimension.
     var borderCropPixels: Int = BorderCrop.defaultViewBorderCropPixels
 
+    /// White-cap override for `Pipeline.applyOutputRemap`. nil = use the
+    /// pipeline's built-in default (0.92). Lower values dim the saved
+    /// file more — useful when Wiener overshoot on bright features still
+    /// pushes them too close to pure white at the default. Range
+    /// [0.5, 1.0]; below 0.5 the output looks unnaturally muted on most
+    /// subjects.
+    var outputWhiteCap: Double? = nil
+
+    /// Disable the stack-end auto-recovery remap entirely. Used by the
+    /// CLI's `--no-stretch` flag and by bracketing comparison runs in
+    /// /tmp/brightness-comparison/. Saves the bare accumulator output
+    /// (still passed through any user-enabled bake-in / AutoPSF / denoise
+    /// stages) without any percentile-based stretch.
+    var disableOutputRemap: Bool = false
+
     /// Dual-stage denoise around the auto-PSF + Wiener path (Block C.5).
     /// Pre-denoise (default 0 = off) wraps the input BEFORE PSF
     /// estimation + deconvolution — suppresses noise so the limb
@@ -712,7 +727,11 @@ enum LuckyStack {
                 // "unnatural super-high-contrast" look on lunar / planetary
                 // captures). Runs on every output regardless of mode /
                 // bake-in / AutoPSF success.
-                final = pipeline.applyOutputRemap(input: final)
+                final = pipeline.applyOutputRemap(
+                    input: final,
+                    whiteCap: options.outputWhiteCap.map { Float($0) },
+                    enabled: !options.disableOutputRemap
+                )
 
                 // Border crop (Block C.8). Hides the deconv edge ring
                 // before writing. Pass-through when borderCropPixels is 0

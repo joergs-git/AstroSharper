@@ -61,6 +61,10 @@ enum Stack {
         // the BiggSky default; 0 disables cropping. Hides the FFT
         // wrap-around / Wiener edge ring on the saved view.
         var borderCropPixels: Int = BorderCrop.defaultViewBorderCropPixels
+        // Override the stack-end remap whiteCap. nil = engine default (0.92).
+        // Bracketed in batch tests under /tmp/brightness-comparison/.
+        var outputWhiteCap: Double? = nil
+        var disableOutputRemap = false
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -283,6 +287,23 @@ enum Stack {
                 }
                 autoPSFSNR = v
                 i += 2
+            case "--white-cap":
+                // Override the stack-end auto-recovery remap target. Lower
+                // values dim the saved file. 0.92 = engine default.
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v > 0.1, v <= 1.0
+                else {
+                    cliStderr("stack: --white-cap requires a number in (0.1, 1.0] (default 0.92)")
+                    return 64
+                }
+                outputWhiteCap = v
+                i += 2
+            case "--no-stretch":
+                // Disable the stack-end auto-recovery remap entirely. Use
+                // when the bare accumulator output is preferred and tone
+                // curve will be applied downstream.
+                disableOutputRemap = true
+                i += 1
             case "--border-crop":
                 // C.8 saved-view border crop in pixels. 0 disables.
                 guard i + 1 < args.count, let v = Int(args[i + 1]),
@@ -465,6 +486,8 @@ enum Stack {
             options.captureGamma = captureGamma
             options.processLuminanceOnly = processLuminanceOnly
             options.borderCropPixels = borderCropPixels
+            options.outputWhiteCap = outputWhiteCap
+            options.disableOutputRemap = disableOutputRemap
             options.useAutoKeepPercent = useAutoKeep && !keepWasExplicit
             options.denoisePrePercent = denoisePrePercent
             options.denoisePostPercent = denoisePostPercent
