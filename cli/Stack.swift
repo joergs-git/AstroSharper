@@ -54,6 +54,9 @@ enum Stack {
         // `CaptureGamma.gamma(fromCameraSliderValue:)`. Wired into the
         // AutoPSF Wiener post-pass through `options.captureGamma`.
         var captureGamma: Double = 1.0
+        // C.7 process luminance only. Default ON for OSC sources;
+        // mono captures yield numerically identical output either way.
+        var processLuminanceOnly: Bool = true
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -276,6 +279,13 @@ enum Stack {
                 }
                 autoPSFSNR = v
                 i += 2
+            case "--per-channel-deconv":
+                // C.7 escape hatch: turn off luminance-only deconv and
+                // run the per-channel pipeline (3 FFTs). Useful when
+                // chrominance noise dominates and you want each channel
+                // independently regularised.
+                processLuminanceOnly = false
+                i += 1
             case "--capture-gamma":
                 // C.6 capture-gamma compensation around the auto-PSF +
                 // Wiener post-pass. Accepts either an actual gamma
@@ -439,6 +449,7 @@ enum Stack {
             options.useAutoPSF = useAutoPSF
             options.autoPSFSNR = autoPSFSNR
             options.captureGamma = captureGamma
+            options.processLuminanceOnly = processLuminanceOnly
             options.useAutoKeepPercent = useAutoKeep && !keepWasExplicit
             options.denoisePrePercent = denoisePrePercent
             options.denoisePostPercent = denoisePostPercent

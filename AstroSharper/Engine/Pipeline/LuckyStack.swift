@@ -177,6 +177,16 @@ struct LuckyStackOptions {
     /// blend / denoise / tone curves see the same encoding throughout.
     var captureGamma: Double = 1.0
 
+    /// Run the AutoPSF Wiener post-pass on luminance only (Block C.7).
+    /// Computes Y = 0.299 R + 0.587 G + 0.114 B, deconvolves Y, then
+    /// adds the deconv Δ to every channel. ~3× faster than per-channel
+    /// FFT and avoids per-channel ringing artefacts on OSC bayer sources
+    /// where R/G/B noise floors differ. Default ON because the failure
+    /// mode (independent per-channel ringing) is more objectionable
+    /// than the loss of per-channel adaptivity. Mono sources produce
+    /// numerically identical output regardless of this flag.
+    var processLuminanceOnly: Bool = true
+
     /// Dual-stage denoise around the auto-PSF + Wiener path (Block C.5).
     /// Pre-denoise (default 0 = off) wraps the input BEFORE PSF
     /// estimation + deconvolution — suppresses noise so the limb
@@ -567,7 +577,8 @@ enum LuckyStack {
                                 sigma: psf.sigma,
                                 snr: Float(options.autoPSFSNR),
                                 device: device,
-                                captureGamma: safeGamma
+                                captureGamma: safeGamma,
+                                processLuminanceOnly: options.processLuminanceOnly
                             )
 
                             // Radial fade is the FIRST blend choice

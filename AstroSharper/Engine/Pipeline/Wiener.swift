@@ -33,13 +33,22 @@ enum Wiener {
     /// when the source is already linear (e.g. raw 16-bit FITS or a
     /// camera with gamma=0 acquisition). Typical planetary cameras
     /// running SharpCap defaults sit at gamma 2.0.
+    ///
+    /// `processLuminanceOnly` (C.7): when true, compute Y (BT.601
+    /// luminance) from R/G/B, run a SINGLE Wiener pass on Y, compute
+    /// Δ = Y' − Y, and add Δ to all three channels. Halves cost vs the
+    /// 3-channel default and avoids per-channel ringing artefacts when
+    /// the three channels have different noise floors (typical OSC
+    /// Bayer pattern). On mono / pre-balanced sources the result is
+    /// numerically identical to per-channel since R=G=B at the input.
     static func deconvolve(
         input: MTLTexture,
         output: MTLTexture,
         sigma: Float,
         snr: Float,
         device: MTLDevice,
-        captureGamma: Float = 1.0
+        captureGamma: Float = 1.0,
+        processLuminanceOnly: Bool = false
     ) {
         let W = input.width
         let H = input.height
@@ -172,10 +181,31 @@ enum Wiener {
             }
         }
 
-        // Step 5: process each channel.
-        rPlane = wienerProcess(channel: rPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
-        gPlane = wienerProcess(channel: gPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
-        bPlane = wienerProcess(channel: bPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
+        // Step 5: deconvolve. Two paths:
+        //   - `processLuminanceOnly`: ONE Wiener on the BT.601 luma plane;
+        //     the deconv Δ = Y' − Y is added to every channel. Halves cost,
+        //     avoids per-channel ringing on OSC bayer sources where R/G/B
+        //     have different noise statistics.
+        //   - default: per-channel pipeline (legacy v0.3.x behaviour). On
+        //     mono inputs the two paths produce identical output since
+        //     R=G=B at the input — only the cost differs.
+        if processLuminanceOnly {
+            var yPlane = [Float](repeating: 0, count: plane)
+            for i in 0..<plane {
+                yPlane[i] = 0.299 * rPlane[i] + 0.587 * gPlane[i] + 0.114 * bPlane[i]
+            }
+            let yDeconv = wienerProcess(channel: yPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
+            for i in 0..<plane {
+                let delta = yDeconv[i] - yPlane[i]
+                rPlane[i] += delta
+                gPlane[i] += delta
+                bPlane[i] += delta
+            }
+        } else {
+            rPlane = wienerProcess(channel: rPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
+            gPlane = wienerProcess(channel: gPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
+            bPlane = wienerProcess(channel: bPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
+        }
 
         // Capture-gamma re-encode (C.6). Inverse of the pre-FFT linearise.
         // Restores the original camera-gamma encoding so downstream stages
