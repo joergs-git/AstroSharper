@@ -57,6 +57,10 @@ enum Stack {
         // C.7 process luminance only. Default ON for OSC sources;
         // mono captures yield numerically identical output either way.
         var processLuminanceOnly: Bool = true
+        // C.8 border crop in pixels (BiggSky SaveView_BorderCrop). 32 is
+        // the BiggSky default; 0 disables cropping. Hides the FFT
+        // wrap-around / Wiener edge ring on the saved view.
+        var borderCropPixels: Int = BorderCrop.defaultViewBorderCropPixels
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -279,6 +283,16 @@ enum Stack {
                 }
                 autoPSFSNR = v
                 i += 2
+            case "--border-crop":
+                // C.8 saved-view border crop in pixels. 0 disables.
+                guard i + 1 < args.count, let v = Int(args[i + 1]),
+                      v >= 0, v <= 256
+                else {
+                    cliStderr("stack: --border-crop requires an integer in [0, 256] (BiggSky default 32)")
+                    return 64
+                }
+                borderCropPixels = v
+                i += 2
             case "--per-channel-deconv":
                 // C.7 escape hatch: turn off luminance-only deconv and
                 // run the per-channel pipeline (3 FFTs). Useful when
@@ -450,6 +464,7 @@ enum Stack {
             options.autoPSFSNR = autoPSFSNR
             options.captureGamma = captureGamma
             options.processLuminanceOnly = processLuminanceOnly
+            options.borderCropPixels = borderCropPixels
             options.useAutoKeepPercent = useAutoKeep && !keepWasExplicit
             options.denoisePrePercent = denoisePrePercent
             options.denoisePostPercent = denoisePostPercent

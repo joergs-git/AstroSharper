@@ -187,6 +187,13 @@ struct LuckyStackOptions {
     /// numerically identical output regardless of this flag.
     var processLuminanceOnly: Bool = true
 
+    /// Border crop applied to the saved view file (Block C.8). Default
+    /// 32 px matches BiggSky's `SaveView_BorderCrop` and hides the FFT
+    /// wrap-around / Wiener edge ring frequency-domain deconv leaves on
+    /// each side. Set to 0 to disable. Cropping is no-op when the value
+    /// would leave a non-positive output dimension.
+    var borderCropPixels: Int = BorderCrop.defaultViewBorderCropPixels
+
     /// Dual-stage denoise around the auto-PSF + Wiener path (Block C.5).
     /// Pre-denoise (default 0 = off) wraps the input BEFORE PSF
     /// estimation + deconvolution — suppresses noise so the limb
@@ -419,6 +426,60 @@ enum LuckyStack {
         return output
     }
 
+    /// Border crop for the saved view (Block C.8). Frequency-domain
+    /// deconvolution leaves an FFT wrap-around / Wiener edge ring on
+    /// each side of the output. Cropping `borderPixels` from each
+    /// side hides that ring before the file is written.
+    ///
+    /// Allocates a smaller private-storage texture and blit-copies the
+    /// interior region. Returns `input` unchanged when borderPixels ≤ 0
+    /// or when the crop would leave a non-positive dimension. Pixel
+    /// format is preserved so downstream `ImageTexture.write` doesn't
+    /// have to branch on bit depth.
+    static func cropBorder(
+        input: MTLTexture,
+        borderPixels: Int,
+        device: MTLDevice
+    ) -> MTLTexture {
+        guard let rect = BorderCrop.cropRect(
+            width: input.width,
+            height: input.height,
+            borderPixels: borderPixels
+        ) else {
+            return input  // crop disabled or impossible — pass through
+        }
+        let newW = Int(rect.width)
+        let newH = Int(rect.height)
+        let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: input.pixelFormat,
+            width: newW, height: newH,
+            mipmapped: false
+        )
+        outDesc.storageMode = .private
+        outDesc.usage = [.shaderRead, .shaderWrite]
+        guard let output = device.makeTexture(descriptor: outDesc) else {
+            return input
+        }
+        let queue = MetalDevice.shared.commandQueue
+        guard let cmd = queue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else {
+            return input
+        }
+        blit.copy(
+            from: input,
+            sourceSlice: 0, sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: Int(rect.minX), y: Int(rect.minY), z: 0),
+            sourceSize: MTLSize(width: newW, height: newH, depth: 1),
+            to: output,
+            destinationSlice: 0, destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        )
+        blit.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        return output
+    }
+
     static func denoiseTexture(
         input: MTLTexture,
         percent: Int,
@@ -644,6 +705,17 @@ enum LuckyStack {
                 // captures). Runs on every output regardless of mode /
                 // bake-in / AutoPSF success.
                 final = pipeline.applyOutputRemap(input: final)
+
+                // Border crop (Block C.8). Hides the deconv edge ring
+                // before writing. Pass-through when borderCropPixels is 0
+                // or when the crop would over-shoot the image dimensions.
+                if options.borderCropPixels > 0 {
+                    final = Self.cropBorder(
+                        input: final,
+                        borderPixels: options.borderCropPixels,
+                        device: MetalDevice.shared.device
+                    )
+                }
 
                 try ImageTexture.write(texture: final, to: outputURL)
                 await onProgress(.finished(outputURL))
