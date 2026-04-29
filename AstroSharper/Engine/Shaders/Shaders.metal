@@ -1076,6 +1076,62 @@ kernel void lucky_mask_blend(
     output.write(mix(base, deconv, m), gid);
 }
 
+// MARK: - Radial deconv-fade (Gibbs ringing fix near disc limb)
+//
+// Wiener deconvolution at high SNR amplifies high frequencies
+// aggressively. Near a sharp limb (bright disc / dark sky) the
+// inverse filter's neighbourhood spans both regions — it "creates"
+// a dark ring just inside the limb as Gibbs overshoot, trying to
+// compensate for what it thinks was blurred out into space. Most
+// visible on small high-contrast subjects (Mars).
+//
+// Fix: AutoPSF already gives us the disc centre + radius. Build a
+// radial mask that fades deconv strength to zero before reaching
+// the limb. Inner disc gets full deconv (sharp), outer ring smoothly
+// blends back to the pre-deconv (bare) input, beyond the disc is
+// pure bare. The trade-off the user accepts: inner sharper than
+// outer, but no ringing.
+//
+//   r < innerRadius                   → m = 1   (full deconv)
+//   innerRadius ≤ r ≤ outerRadius      → m = smooth fade 1 → 0
+//   r > outerRadius                   → m = 0   (pre / bare)
+//
+// Defaults from AutoPSF result: innerRadius = 0.65 × discRadius,
+// outerRadius = 1.05 × discRadius. The slight extension past the
+// disc covers the limb itself with a touch of deconv (bright detail
+// right at the edge) without amplifying the discontinuity.
+
+struct LuckyRadialMaskParams {
+    float2 center;         // disc centroid (output pixel coords)
+    float  innerRadius;    // m=1 inside this radius
+    float  outerRadius;    // m=0 outside this radius
+};
+
+kernel void lucky_radial_deconv_blend(
+    texture2d<float, access::read>  baseTex   [[texture(0)]],
+    texture2d<float, access::read>  deconvTex [[texture(1)]],
+    texture2d<float, access::write> output    [[texture(2)]],
+    constant LuckyRadialMaskParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+
+    float dx = float(gid.x) - p.center.x;
+    float dy = float(gid.y) - p.center.y;
+    float r  = sqrt(dx * dx + dy * dy);
+
+    // Smooth fade. Use smoothstep on a normalised parameter so we get
+    // a Hermite cubic transition (zero derivative at both ends — no
+    // sharp blend boundary that would itself produce a thin ring).
+    float band = max(p.outerRadius - p.innerRadius, 1e-3);
+    float t = clamp((r - p.innerRadius) / band, 0.0, 1.0);
+    float m = 1.0 - smoothstep(0.0, 1.0, t);
+
+    float4 base   = baseTex  .read(gid);
+    float4 deconv = deconvTex.read(gid);
+    output.write(mix(base, deconv, m), gid);
+}
+
 // MARK: - Quality grading
 //
 // Per-frame quality scoring via Diagonal Laplacian (LAPD) variance,

@@ -209,27 +209,37 @@ enum Stack {
                 i += 1
             case "--smart-auto":
                 // Convenience preset — sets sensible Block C defaults:
-                //   auto-PSF ON (auto-bails on textured subjects so
-                //                lunar still gets bare-quality output)
-                //   tiled deconv ON (skips noise amplification on bg)
-                //   dual-stage denoise 50/30 (balanced)
+                //   auto-PSF ON, SNR=200 (aggressive Wiener — user
+                //                empirically picked SNR=200 over
+                //                gentler values; auto-bails on
+                //                textured subjects so lunar still
+                //                gets bare-quality output)
                 //
-                // Per-channel deliberately NOT set here. Empirical:
-                // per-channel's half-res extract + bilinear-upsample
-                // combine introduces a ~1 px low-pass filter that
-                // visibly softens output vs. the standard demosaic
-                // path. The chromatic-dispersion correction it offers
-                // only matters at low altitudes (< 30°) and even then
-                // is subtle. Users who actually need it can pass
-                // --per-channel explicitly.
+                // The radial deconv-fade always runs after AutoPSF
+                // succeeds (no opt-in needed — it just uses the
+                // disc geometry AutoPSF already measured) and it
+                // kills the Gibbs ringing that aggressive Wiener
+                // would otherwise produce at the disc limb on
+                // small high-contrast subjects (Mars).
                 //
-                // Individual flags after `--smart-auto` still override
-                // (e.g. `--smart-auto --denoise-pre 75` keeps the
-                // preset but turns pre-denoise up to BiggSky-default).
+                // Tiled deconv + dual-stage denoise are NOT in the
+                // preset: the radial fade already handles the
+                // background-protection job tiled deconv was
+                // designed for, and denoise softens detail more
+                // than it cleans up artifacts on the SNR=200 path.
+                // Both stay available as manual flags.
+                //
+                // Per-channel deliberately NOT set: its half-res
+                // extract + upsample softens output (~1 px blur);
+                // the chromatic-dispersion correction it offers
+                // matters only at low altitudes. Users who need
+                // it can pass --per-channel explicitly.
+                //
+                // Individual flags after `--smart-auto` still
+                // override (e.g. `--smart-auto --auto-psf-snr 100`
+                // dials Wiener back from the preset's 200).
                 useAutoPSF = true
-                useTiledDeconv = true
-                denoisePrePercent = 50
-                denoisePostPercent = 30
+                autoPSFSNR = 200
                 i += 1
             case "--auto-psf":
                 // Block C.1 v0: estimate Gaussian PSF sigma from the

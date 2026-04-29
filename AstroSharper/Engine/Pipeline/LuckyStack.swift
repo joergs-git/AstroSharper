@@ -233,6 +233,61 @@ enum LuckyStack {
     /// as the manual `sharpen.waveletNoiseThreshold` slider in the
     /// SettingsPanel, so 100% here is "as strong as the user can
     /// already dial in by hand".
+    /// Radial deconv-fade — kills Gibbs ringing at the disc limb on
+    /// high-contrast small-disc subjects (Mars-class). AutoPSF
+    /// provides the disc centre + radius; we mix(pre, deconv, mask)
+    /// where the mask fades from 1 (full deconv) at the disc centre
+    /// to 0 (pre / bare) just past the limb. The user accepted the
+    /// trade-off: outer ring of the disc less sharp than the inner
+    /// core, but the dark ring artifact disappears.
+    ///
+    /// Defaults: inner = 0.65 × discRadius, outer = 1.05 × discRadius.
+    /// The slight extension past the limb (×1.05) keeps a touch of
+    /// deconv on the very edge bright detail without amplifying the
+    /// discontinuity that would re-introduce ringing.
+    static func radialDeconvBlend(
+        pre: MTLTexture,
+        deconv: MTLTexture,
+        center: SIMD2<Float>,
+        discRadius: Float,
+        innerFraction: Float = 0.65,
+        outerFraction: Float = 1.05,
+        device: MTLDevice
+    ) -> MTLTexture? {
+        guard let lib = MetalDevice.shared.library,
+              let fn = lib.makeFunction(name: "lucky_radial_deconv_blend"),
+              let pso = try? device.makeComputePipelineState(function: fn) else {
+            return nil
+        }
+        let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: pre.pixelFormat,
+            width: pre.width, height: pre.height,
+            mipmapped: false
+        )
+        outDesc.storageMode = .private
+        outDesc.usage = [.shaderRead, .shaderWrite]
+        guard let output = device.makeTexture(descriptor: outDesc) else { return nil }
+        let queue = MetalDevice.shared.commandQueue
+        guard let cmd = queue.makeCommandBuffer(),
+              let enc = cmd.makeComputeCommandEncoder() else { return nil }
+        enc.setComputePipelineState(pso)
+        enc.setTexture(pre,    index: 0)
+        enc.setTexture(deconv, index: 1)
+        enc.setTexture(output, index: 2)
+        var p = LuckyRadialMaskParamsCPU(
+            center: center,
+            innerRadius: max(1, innerFraction * discRadius),
+            outerRadius: max(2, outerFraction * discRadius)
+        )
+        enc.setBytes(&p, length: MemoryLayout<LuckyRadialMaskParamsCPU>.stride, index: 0)
+        let (tgC, tgS) = dispatchThreadgroups(for: output, pso: pso)
+        enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+        enc.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        return output
+    }
+
     /// Build the green/yellow/red tile classification + run the GPU
     /// mask-blend that combines the pre-deconv (background) with the
     /// post-Wiener (foreground). Returns nil on any error so the
@@ -488,10 +543,24 @@ enum LuckyStack {
                                 device: device
                             )
 
-                            if options.useTiledDeconv {
-                                // Block C.3 v0: blend pre-deconv (final)
-                                // and post-Wiener (deconvTex) using a
-                                // soft mask classified from APPlanner.
+                            // Radial fade is the FIRST blend choice
+                            // when AutoPSF gave us a clean disc — it
+                            // kills Wiener's Gibbs ringing at the limb
+                            // without the chunky tile boundaries the
+                            // tiled blend can produce on small discs.
+                            // Tiled deconv stays available as a manual
+                            // option for subjects where the radial
+                            // assumption doesn't fit (multi-feature
+                            // solar surface, future use cases).
+                            if let radial = Self.radialDeconvBlend(
+                                pre: final,
+                                deconv: deconvTex,
+                                center: psf.discCenter,
+                                discRadius: psf.discRadius,
+                                device: device
+                            ) {
+                                final = radial
+                            } else if options.useTiledDeconv {
                                 if let blended = Self.tiledDeconvBlend(
                                     pre: final,
                                     deconv: deconvTex,
@@ -1940,6 +2009,12 @@ private struct LuckyDivideParamsCPU {
 
 private struct LuckyMaskBlendParamsCPU {
     var apGrid: UInt32
+}
+
+private struct LuckyRadialMaskParamsCPU {
+    var center: SIMD2<Float>
+    var innerRadius: Float
+    var outerRadius: Float
 }
 
 // MARK: - Phase correlation (CPU FFT on small luma buffers)

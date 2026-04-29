@@ -133,29 +133,26 @@ struct LuckyStackSection: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                // Smart auto preset — one-click sensible defaults for
-                // Block C. Auto-PSF + tiled deconv + 50/30 denoise.
-                // Per-channel deliberately NOT included: empirical
-                // softening from the half-res extract + upsample is
-                // visible even on planetary captures, and the
-                // chromatic-dispersion correction it provides is only
-                // meaningful at low altitudes. Auto-PSF bails on
-                // lunar / textured subjects so this preset works
-                // safely on every subject without manual tweaking.
+                // Smart auto preset — sensible Block C defaults.
+                // Auto-PSF + Wiener at SNR=200 (aggressive, picked
+                // empirically). Radial fade after AutoPSF succeeds
+                // automatically kills Gibbs ringing at the disc limb.
+                // No tiled deconv, no denoise, no per-channel —
+                // those soften without proportional benefit on the
+                // SNR=200 path.
                 Button {
                     app.luckyStack.perChannelStacking = false
                     app.luckyStack.autoPSF = true
-                    app.luckyStack.autoPSFSNR = 50
-                    app.luckyStack.tiledDeconv = true
-                    app.luckyStack.tiledDeconvAPGrid = 8
-                    app.luckyStack.denoisePrePercent = 50
-                    app.luckyStack.denoisePostPercent = 30
+                    app.luckyStack.autoPSFSNR = 200
+                    app.luckyStack.tiledDeconv = false
+                    app.luckyStack.denoisePrePercent = 0
+                    app.luckyStack.denoisePostPercent = 0
                 } label: {
                     Label("Smart auto", systemImage: "wand.and.stars")
                         .font(.caption)
                 }
                 .controlSize(.small)
-                .help("One-click preset: auto-PSF + tiled deconv + balanced denoise (50/30). Auto-PSF auto-bails on lunar / textured subjects so the same preset works for planetary AND lunar. Per-channel is intentionally OFF — its half-res extract + upsample softens output; only useful for low-altitude chromatic-dispersion correction.")
+                .help("One-click preset: aggressive Wiener deconv with auto-estimated PSF (SNR=200). The radial fade keeps the deconv strong inside the disc and smoothly fades to bare near the limb — no Gibbs ringing on small high-contrast subjects (Mars). Auto-PSF auto-bails on lunar / textured subjects so the same preset works for every subject.")
 
                 if app.luckyStack.mode == .scientific {
                     HStack(spacing: 4) {
