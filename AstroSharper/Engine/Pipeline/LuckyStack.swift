@@ -530,11 +530,19 @@ enum LuckyStack {
                 await onProgress(.error("\(error)")); return
             }
 
-            // Mono 8/16 and the four Bayer patterns are supported. Packed
-            // RGB SERs (.rgb / .bgr) are still rejected; conversion would
-            // mostly duplicate the Bayer path with permuted channels.
-            guard reader.header.colorID.isMono || reader.header.colorID.isBayer else {
-                await onProgress(.error("RGB-packed SER not yet supported (got \(reader.header.colorID))"))
+            // Mono 8/16, the four Bayer patterns, and packed 8-bit RGB / BGR
+            // are all supported. 16-bit RGB SERs (.rgb / .bgr with
+            // pixelDepth=16) are rejected here — the unpack_rgb8 kernel
+            // assumes 1 byte per channel. SerReader will mark the colour
+            // ID correctly; this guard catches the RGB48 case the v0
+            // kernel can't handle.
+            let cid = reader.header.colorID
+            if cid.isRGB && reader.header.bytesPerPlane != 1 {
+                await onProgress(.error("16-bit RGB SER not yet supported — re-export as 8-bit RGB or as Bayer."))
+                return
+            }
+            guard cid.isMono || cid.isBayer || cid.isRGB else {
+                await onProgress(.error("Unsupported SER colour layout (got \(cid))."))
                 return
             }
 
@@ -741,6 +749,7 @@ private final class LuckyRunner {
     let unpack8PSO: MTLComputePipelineState
     let bayer16PSO: MTLComputePipelineState
     let bayer8PSO: MTLComputePipelineState
+    let rgb8PSO: MTLComputePipelineState     // packed-RGB SER (3 bytes/pixel, 8-bit)
     let qualityPSO: MTLComputePipelineState
     let lumaPSO: MTLComputePipelineState
     let accumPSO: MTLComputePipelineState
@@ -761,10 +770,17 @@ private final class LuckyRunner {
     let bytesPerPlane: Int
     let isMono16: Bool
     let isBayer: Bool
+    let isRGB: Bool                  // .rgb / .bgr SER (3 bytes per pixel, 8-bit only)
+    let rgbSwapRB: Bool              // true for .bgr — kernel swaps R/B
     let bayerPattern: UInt32
 
-    // Staging pool for SER → GPU upload.
+    // Staging pool for SER → GPU upload. For mono / Bayer we use textures
+    // (1 or 2 bytes per pixel land cleanly in r8Unorm / r16Uint formats).
+    // For RGB SERs (3 bytes per pixel) Metal has no rgb8Unorm format, so
+    // we use a parallel pool of MTLBuffers — the unpack_rgb8 kernel reads
+    // 3 raw bytes per output pixel directly from the buffer.
     let stagingTextures: [MTLTexture]
+    let rgbBuffers: [MTLBuffer]      // empty when !isRGB
     let frameTextures: [MTLTexture]      // unpacked rgba16Float, paired with staging
     let stagingSemaphore: DispatchSemaphore
 
@@ -808,6 +824,7 @@ private final class LuckyRunner {
         self.unpack8PSO  = Self.makePSO(library: lib, device: device, fn: "unpack_mono8_to_rgba")
         self.bayer16PSO  = Self.makePSO(library: lib, device: device, fn: "unpack_bayer16_to_rgba")
         self.bayer8PSO   = Self.makePSO(library: lib, device: device, fn: "unpack_bayer8_to_rgba")
+        self.rgb8PSO     = Self.makePSO(library: lib, device: device, fn: "unpack_rgb8_to_rgba")
         self.qualityPSO  = Self.makePSO(library: lib, device: device, fn: "quality_partials")
         self.lumaPSO     = Self.makePSO(library: lib, device: device, fn: "extract_luma_downsample")
         self.accumPSO    = Self.makePSO(library: lib, device: device, fn: "lucky_accumulate")
@@ -821,13 +838,28 @@ private final class LuckyRunner {
         self.W = W
         self.H = H
         self.bytesPerPlane = bytesPerPlane
-        self.isMono16 = bytesPerPlane == 2
+        self.isMono16 = bytesPerPlane == 2 && !reader.header.colorID.isRGB
         self.isBayer = reader.header.colorID.isBayer
+        self.isRGB = reader.header.colorID.isRGB
+        self.rgbSwapRB = reader.header.colorID == .bgr
         self.bayerPattern = reader.header.colorID.bayerPatternIndex
 
         let dev = self.device
-        self.stagingTextures = (0..<options.stagingPoolSize).map { _ in
-            Self.makeStaging(device: dev, w: W, h: H, mono16: bytesPerPlane == 2)
+        // RGB and mono/Bayer pools are disjoint — only one is populated
+        // per run. Allocating both would waste GPU memory on multi-GB
+        // captures; the empty array path is the lightweight default.
+        let isRGBLocal = reader.header.colorID.isRGB
+        if isRGBLocal {
+            self.stagingTextures = []
+            let rgbFrameBytes = W * H * 3
+            self.rgbBuffers = (0..<options.stagingPoolSize).map { _ in
+                dev.makeBuffer(length: rgbFrameBytes, options: [.storageModeShared])!
+            }
+        } else {
+            self.stagingTextures = (0..<options.stagingPoolSize).map { _ in
+                Self.makeStaging(device: dev, w: W, h: H, mono16: bytesPerPlane == 2)
+            }
+            self.rgbBuffers = []
         }
         self.frameTextures = (0..<options.stagingPoolSize).map { _ in
             Self.makeFrameTexture(device: dev, w: W, h: H)
@@ -884,6 +916,62 @@ private final class LuckyRunner {
             enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
         }
         enc.endEncoding()
+    }
+
+    /// RGB / BGR variant of `encodeUnpack` — reads from an MTLBuffer
+    /// (3 bytes per pixel, 8-bit) and writes to the rgba16Float frame
+    /// texture. `swapRB` is set per .rgb / .bgr at runner-init time.
+    func encodeUnpackRGB(
+        commandBuffer cmd: MTLCommandBuffer,
+        buffer src: MTLBuffer,
+        frameTex: MTLTexture
+    ) {
+        guard let enc = cmd.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(rgb8PSO)
+        var p = RgbUnpackParamsCPU(
+            scale: 1.0 / 255.0,
+            flip: options.meridianFlipped ? 1 : 0,
+            swapRB: rgbSwapRB ? 1 : 0,
+            width: UInt32(W)
+        )
+        enc.setBuffer(src, offset: 0, index: 0)
+        enc.setTexture(frameTex, index: 0)
+        enc.setBytes(&p, length: MemoryLayout<RgbUnpackParamsCPU>.stride, index: 1)
+        let (tgC, tgS) = dispatchThreadgroups(for: frameTex, pso: rgb8PSO)
+        enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+        enc.endEncoding()
+    }
+
+    /// Single entry point that uploads frame `frameIndex` from disk into
+    /// the runner's pool slot `slot` and decodes it into `frameTex`.
+    /// Branches internally on colorID: mono / Bayer use the staging-
+    /// texture path, RGB / BGR use the MTLBuffer path. Keeps the 11
+    /// hot-loop sites uniform — they don't have to know the colour
+    /// layout. The command buffer is shared with downstream passes
+    /// (accumulate, quality, etc.) so no extra GPU sync is introduced.
+    func decodeFrame(
+        commandBuffer cmd: MTLCommandBuffer,
+        frameIndex: Int,
+        slot: Int,
+        frameTex: MTLTexture
+    ) {
+        if isRGB {
+            let buf = rgbBuffers[slot]
+            reader.withFrameBytes(at: frameIndex) { ptr, len in
+                memcpy(buf.contents(), ptr, len)
+            }
+            encodeUnpackRGB(commandBuffer: cmd, buffer: buf, frameTex: frameTex)
+        } else {
+            let staging = stagingTextures[slot]
+            reader.withFrameBytes(at: frameIndex) { ptr, _ in
+                staging.replace(
+                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                      size: MTLSize(width: W, height: H, depth: 1)),
+                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
+                )
+            }
+            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+        }
     }
 
     static func makeFrameTexture(device: MTLDevice, w: Int, h: Int) -> MTLTexture {
@@ -1037,25 +1125,11 @@ private final class LuckyRunner {
         for frameIndex in 0..<total {
             stagingSemaphore.wait()
             let slot = frameIndex % options.stagingPoolSize
-            let staging = stagingTextures[slot]
             let frameTex = frameTextures[slot]
-
-            // Copy SER bytes into the staging texture.
-            reader.withFrameBytes(at: frameIndex) { ptr, len in
-                let bytesPerRow = W * bytesPerPlane
-                staging.replace(
-                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
-                                       size: MTLSize(width: W, height: H, depth: 1)),
-                    mipmapLevel: 0,
-                    withBytes: ptr,
-                    bytesPerRow: bytesPerRow
-                )
-                _ = len
-            }
 
             guard let cmd = queue.makeCommandBuffer() else { continue }
 
-            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+            decodeFrame(commandBuffer: cmd, frameIndex: frameIndex, slot: slot, frameTex: frameTex)
 
             // Quality grade: frameTex → partials buffer.
             quality.encodeGrade(commandBuffer: cmd, frameTex: frameTex, frameIndex: frameIndex)
@@ -1109,19 +1183,36 @@ private final class LuckyRunner {
 
     private func loadAndUnpack(frameIndex: Int, into existing: MTLTexture?) async throws -> MTLTexture {
         let target = existing ?? Self.makeFrameTexture(device: device, w: W, h: H)
-        let staging = Self.makeStaging(device: device, w: W, h: H, mono16: isMono16)
-
-        reader.withFrameBytes(at: frameIndex) { ptr, _ in
-            staging.replace(
-                region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
-                mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
-            )
-        }
 
         guard let cmd = queue.makeCommandBuffer() else {
             throw NSError(domain: "Lucky", code: 1)
         }
-        encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: target)
+
+        // Slot-less path (used for the reference frame load in scientific
+        // mode): allocate fresh staging on every call. RGB / BGR uses a
+        // freshly-allocated MTLBuffer; mono / Bayer uses a freshly-
+        // allocated staging texture. Both paths flow through the runner's
+        // existing encode helpers so the kernel selection logic stays in
+        // one place.
+        if isRGB {
+            let frameBytes = W * H * 3
+            guard let buf = device.makeBuffer(length: frameBytes, options: [.storageModeShared]) else {
+                throw NSError(domain: "Lucky", code: 2)
+            }
+            reader.withFrameBytes(at: frameIndex) { ptr, len in
+                memcpy(buf.contents(), ptr, len)
+            }
+            encodeUnpackRGB(commandBuffer: cmd, buffer: buf, frameTex: target)
+        } else {
+            let staging = Self.makeStaging(device: device, w: W, h: H, mono16: isMono16)
+            reader.withFrameBytes(at: frameIndex) { ptr, _ in
+                staging.replace(
+                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
+                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
+                )
+            }
+            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: target)
+        }
         cmd.commit()
         cmd.waitUntilCompleted()
         return target
@@ -1134,18 +1225,10 @@ private final class LuckyRunner {
         for (i, idx) in indices.enumerated() {
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
-            let staging = stagingTextures[slot]
             let frameTex = frameTextures[slot]
 
-            reader.withFrameBytes(at: idx) { ptr, _ in
-                staging.replace(
-                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
-                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
-                )
-            }
-
             guard let cmd = queue.makeCommandBuffer() else { continue }
-            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+            decodeFrame(commandBuffer: cmd, frameIndex: idx, slot: slot, frameTex: frameTex)
             // Accumulate (no shift, weight = 1)
             if let enc = cmd.makeComputeCommandEncoder() {
                 enc.setComputePipelineState(accumPSO)
@@ -1280,18 +1363,10 @@ private final class LuckyRunner {
         for (i, idx) in indices.enumerated() {
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
-            let staging = stagingTextures[slot]
             let frameTex = frameTextures[slot]
 
-            reader.withFrameBytes(at: idx) { ptr, _ in
-                staging.replace(
-                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
-                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
-                )
-            }
-
             guard let cmd = queue.makeCommandBuffer() else { continue }
-            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+            decodeFrame(commandBuffer: cmd, frameIndex: idx, slot: slot, frameTex: frameTex)
 
             let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
             if let enc = cmd.makeComputeCommandEncoder() {
@@ -1375,18 +1450,10 @@ private final class LuckyRunner {
         for (i, idx) in indices.enumerated() {
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
-            let staging = stagingTextures[slot]
             let frameTex = frameTextures[slot]
 
-            reader.withFrameBytes(at: idx) { ptr, _ in
-                staging.replace(
-                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
-                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
-                )
-            }
-
             guard let cmd = queue.makeCommandBuffer() else { continue }
-            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+            decodeFrame(commandBuffer: cmd, frameIndex: idx, slot: slot, frameTex: frameTex)
 
             let weight = qualityWeight(scores[idx])
             let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
@@ -1543,20 +1610,13 @@ private final class LuckyRunner {
         for (i, idx) in indices.enumerated() {
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
-            let staging = stagingTextures[slot]
             let frameTex = frameTextures[slot]
 
-            reader.withFrameBytes(at: idx) { ptr, _ in
-                staging.replace(
-                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
-                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
-                )
-            }
             guard let cmd = queue.makeCommandBuffer() else {
                 stagingSemaphore.signal()
                 continue
             }
-            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+            decodeFrame(commandBuffer: cmd, frameIndex: idx, slot: slot, frameTex: frameTex)
 
             if let enc = cmd.makeComputeCommandEncoder() {
                 enc.setComputePipelineState(perAPGradePSO)
@@ -1645,20 +1705,13 @@ private final class LuckyRunner {
         for (i, idx) in indices.enumerated() {
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
-            let staging = stagingTextures[slot]
             let frameTex = frameTextures[slot]
 
-            reader.withFrameBytes(at: idx) { ptr, _ in
-                staging.replace(
-                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
-                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
-                )
-            }
             guard let cmd = queue.makeCommandBuffer() else {
                 stagingSemaphore.signal()
                 continue
             }
-            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+            decodeFrame(commandBuffer: cmd, frameIndex: idx, slot: slot, frameTex: frameTex)
 
             let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
             if let enc = cmd.makeComputeCommandEncoder() {
@@ -1752,20 +1805,13 @@ private final class LuckyRunner {
         for (i, idx) in indices.enumerated() {
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
-            let staging = stagingTextures[slot]
             let frameTex = frameTextures[slot]
 
-            reader.withFrameBytes(at: idx) { ptr, _ in
-                staging.replace(
-                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
-                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
-                )
-            }
             guard let cmd = queue.makeCommandBuffer() else {
                 stagingSemaphore.signal()
                 continue
             }
-            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+            decodeFrame(commandBuffer: cmd, frameIndex: idx, slot: slot, frameTex: frameTex)
 
             let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
             let weight = qualityWeight(scores[idx])
@@ -1849,20 +1895,13 @@ private final class LuckyRunner {
         for (i, idx) in indices.enumerated() {
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
-            let staging = stagingTextures[slot]
             let frameTex = frameTextures[slot]
 
-            reader.withFrameBytes(at: idx) { ptr, _ in
-                staging.replace(
-                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
-                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
-                )
-            }
             guard let cmd = queue.makeCommandBuffer() else {
                 stagingSemaphore.signal()
                 continue
             }
-            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+            decodeFrame(commandBuffer: cmd, frameIndex: idx, slot: slot, frameTex: frameTex)
 
             let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
             if let enc = cmd.makeComputeCommandEncoder() {
@@ -1906,20 +1945,13 @@ private final class LuckyRunner {
         for (i, idx) in indices.enumerated() {
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
-            let staging = stagingTextures[slot]
             let frameTex = frameTextures[slot]
 
-            reader.withFrameBytes(at: idx) { ptr, _ in
-                staging.replace(
-                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
-                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
-                )
-            }
             guard let cmd = queue.makeCommandBuffer() else {
                 stagingSemaphore.signal()
                 continue
             }
-            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+            decodeFrame(commandBuffer: cmd, frameIndex: idx, slot: slot, frameTex: frameTex)
 
             let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
             let weight = qualityWeight(scores[idx])
@@ -2063,6 +2095,13 @@ private struct BayerUnpackParamsCPU {
     var scale: Float
     var flip: UInt32
     var pattern: UInt32
+}
+/// Mirrors RgbUnpackParams in Shaders.metal exactly.
+private struct RgbUnpackParamsCPU {
+    var scale: Float
+    var flip: UInt32
+    var swapRB: UInt32
+    var width: UInt32
 }
 
 /// Mirrors APSearchParams in Shaders.metal exactly.

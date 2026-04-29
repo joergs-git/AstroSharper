@@ -38,7 +38,15 @@ enum SerFrameLoader {
                log: log, type: .info,
                url.lastPathComponent, h.imageWidth, h.imageHeight, h.frameCount,
                h.pixelDepthPerPlane, String(describing: h.colorID), h.bytesPerFrame)
-        guard h.colorID.isMono || h.colorID.isBayer else {
+        // 16-bit RGB SERs are out of scope for the v0 RGB unpack kernel —
+        // throw a specific error so the user-facing surface tells them
+        // why instead of producing wrong-coloured output.
+        if h.colorID.isRGB && h.bytesPerPlane != 1 {
+            os_log("SerFrameLoader: 16-bit RGB SER not yet supported (colorID=%{public}@, depth=%d)",
+                   log: log, type: .error, String(describing: h.colorID), h.pixelDepthPerPlane)
+            throw Error.unsupportedColor
+        }
+        guard h.colorID.isMono || h.colorID.isBayer || h.colorID.isRGB else {
             os_log("SerFrameLoader: unsupported colorID %{public}@", log: log, type: .error,
                    String(describing: h.colorID))
             throw Error.unsupportedColor
@@ -49,32 +57,9 @@ enum SerFrameLoader {
             throw Error.decodeFailed
         }
 
-        let mono16 = h.bytesPerPlane == 2
-
-        // Staging texture (shared) gets a memcpy of the raw frame bytes.
-        let stageDesc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: mono16 ? .r16Uint : .r8Unorm,
-            width: h.imageWidth, height: h.imageHeight, mipmapped: false
-        )
-        stageDesc.storageMode = .shared
-        stageDesc.usage = [.shaderRead]
-        guard let staging = device.makeTexture(descriptor: stageDesc) else {
-            os_log("SerFrameLoader: staging texture allocation failed (%dx%d, mono16=%{public}@)",
-                   log: log, type: .error, h.imageWidth, h.imageHeight, mono16 ? "true" : "false")
-            throw Error.stagingTextureFailed(width: h.imageWidth, height: h.imageHeight)
-        }
-
-        reader.withFrameBytes(at: frameIndex) { ptr, _ in
-            staging.replace(
-                region: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: h.imageWidth, height: h.imageHeight, depth: 1)
-                ),
-                mipmapLevel: 0,
-                withBytes: ptr,
-                bytesPerRow: h.imageWidth * h.bytesPerPlane
-            )
-        }
+        let isBayer = h.colorID.isBayer
+        let isRGB = h.colorID.isRGB
+        let mono16 = h.bytesPerPlane == 2 && !isRGB   // RGB v0 is 8-bit only
 
         // Destination — same format as ImageTexture.load output.
         let dstDesc = MTLTextureDescriptor.texture2DDescriptor(
@@ -90,9 +75,12 @@ enum SerFrameLoader {
         }
 
         // Pick the right unpack kernel based on colour layout.
-        let isBayer = h.colorID.isBayer
+        // RGB / BGR uses an MTLBuffer source (3 bytes per pixel — Metal has
+        // no .rgb8Unorm texture format); mono / bayer use a texture source.
         let kernelName: String
-        if isBayer {
+        if isRGB {
+            kernelName = "unpack_rgb8_to_rgba"
+        } else if isBayer {
             kernelName = mono16 ? "unpack_bayer16_to_rgba" : "unpack_bayer8_to_rgba"
         } else {
             kernelName = mono16 ? "unpack_mono16_to_rgba" : "unpack_mono8_to_rgba"
@@ -121,21 +109,68 @@ enum SerFrameLoader {
         }
 
         enc.setComputePipelineState(pso)
-        if isBayer {
-            // BayerUnpackParams: scale + flip + pattern.
-            var p: (Float, UInt32, UInt32) = (
-                mono16 ? 1.0 / 65535.0 : 1.0,
+
+        // Path A — RGB / BGR: MTLBuffer source + dst texture.
+        if isRGB {
+            // 3 bytes per pixel — copy the raw frame bytes into a shared
+            // MTLBuffer the kernel reads via `device const uchar*`.
+            let frameBytes = h.imageWidth * h.imageHeight * 3
+            guard let buffer = device.makeBuffer(length: frameBytes, options: [.storageModeShared]) else {
+                os_log("SerFrameLoader: RGB MTLBuffer allocation failed (%d bytes)",
+                       log: log, type: .error, frameBytes)
+                throw Error.stagingTextureFailed(width: h.imageWidth, height: h.imageHeight)
+            }
+            reader.withFrameBytes(at: frameIndex) { ptr, _ in
+                memcpy(buffer.contents(), ptr, frameBytes)
+            }
+            // RgbUnpackParams: scale, flip, swapRB, width.
+            var p: (Float, UInt32, UInt32, UInt32) = (
+                1.0 / 255.0,
                 0,
-                h.colorID.bayerPatternIndex
+                h.colorID == .bgr ? 1 : 0,
+                UInt32(h.imageWidth)
             )
-            enc.setBytes(&p, length: MemoryLayout<(Float, UInt32, UInt32)>.stride, index: 0)
+            enc.setBuffer(buffer, offset: 0, index: 0)
+            enc.setTexture(dst, index: 0)
+            enc.setBytes(&p, length: MemoryLayout<(Float, UInt32, UInt32, UInt32)>.stride, index: 1)
         } else {
-            // SerUnpackParams: scale + flip.
-            var paramBuf: (Float, UInt32) = (mono16 ? 1.0 / 65535.0 : 1.0, 0)
-            enc.setBytes(&paramBuf, length: MemoryLayout<(Float, UInt32)>.stride, index: 0)
+            // Path B — mono / Bayer: staging texture source + dst texture.
+            let stageDesc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: mono16 ? .r16Uint : .r8Unorm,
+                width: h.imageWidth, height: h.imageHeight, mipmapped: false
+            )
+            stageDesc.storageMode = .shared
+            stageDesc.usage = [.shaderRead]
+            guard let staging = device.makeTexture(descriptor: stageDesc) else {
+                os_log("SerFrameLoader: staging texture allocation failed (%dx%d, mono16=%{public}@)",
+                       log: log, type: .error, h.imageWidth, h.imageHeight, mono16 ? "true" : "false")
+                throw Error.stagingTextureFailed(width: h.imageWidth, height: h.imageHeight)
+            }
+            reader.withFrameBytes(at: frameIndex) { ptr, _ in
+                staging.replace(
+                    region: MTLRegion(
+                        origin: MTLOrigin(x: 0, y: 0, z: 0),
+                        size: MTLSize(width: h.imageWidth, height: h.imageHeight, depth: 1)
+                    ),
+                    mipmapLevel: 0,
+                    withBytes: ptr,
+                    bytesPerRow: h.imageWidth * h.bytesPerPlane
+                )
+            }
+            if isBayer {
+                var p: (Float, UInt32, UInt32) = (
+                    mono16 ? 1.0 / 65535.0 : 1.0,
+                    0,
+                    h.colorID.bayerPatternIndex
+                )
+                enc.setBytes(&p, length: MemoryLayout<(Float, UInt32, UInt32)>.stride, index: 0)
+            } else {
+                var paramBuf: (Float, UInt32) = (mono16 ? 1.0 / 65535.0 : 1.0, 0)
+                enc.setBytes(&paramBuf, length: MemoryLayout<(Float, UInt32)>.stride, index: 0)
+            }
+            enc.setTexture(staging, index: 0)
+            enc.setTexture(dst, index: 1)
         }
-        enc.setTexture(staging, index: 0)
-        enc.setTexture(dst, index: 1)
         let tgw = pso.threadExecutionWidth
         let tgh = pso.maxTotalThreadsPerThreadgroup / tgw
         let tgSize = MTLSize(width: tgw, height: tgh, depth: 1)

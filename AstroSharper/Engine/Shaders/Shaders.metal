@@ -802,6 +802,47 @@ kernel void unpack_bayer8_to_rgba(
     dst.write(float4(rgb, 1.0), gid);
 }
 
+// MARK: - RGB / BGR packed (3 bytes per pixel) → rgba16Float
+//
+// Some capture tools write debayered RGB24 SER files (each pixel is 3
+// tightly-packed bytes — R, G, B in row-major order). Metal has no
+// `.rgb8Unorm` texture format, so the staging path uses an MTLBuffer
+// and the kernel decodes 3 bytes per output pixel. Same `flip` and
+// `scale` semantics as the mono / Bayer kernels above. `swapRB` flips
+// channel order so the same kernel handles BGR with `swapRB = 1`.
+//
+// 16-bit RGB48 captures are out of scope for this kernel — they need a
+// separate u16 buffer kernel; defer until the field shows up.
+
+struct RgbUnpackParams {
+    float scale;        // 1/255.0 (8-bit only — see kernel comment)
+    uint  flip;         // 0 = direct, 1 = 180° rotate
+    uint  swapRB;       // 0 = RGB, 1 = BGR (swap red/blue channels)
+    uint  width;        // pixel width — needed because device buffers
+                        // don't carry geometry like textures do.
+};
+
+kernel void unpack_rgb8_to_rgba(
+    device const uchar*             src [[buffer(0)]],
+    texture2d<float, access::write> dst [[texture(0)]],
+    constant RgbUnpackParams&       p   [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint W = dst.get_width();
+    uint H = dst.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+    uint flippedX = (p.flip != 0u) ? (W - 1 - gid.x) : gid.x;
+    uint flippedY = (p.flip != 0u) ? (H - 1 - gid.y) : gid.y;
+    uint base = (flippedY * p.width + flippedX) * 3u;
+    float c0 = float(src[base + 0u]) * p.scale;
+    float c1 = float(src[base + 1u]) * p.scale;
+    float c2 = float(src[base + 2u]) * p.scale;
+    float r = (p.swapRB != 0u) ? c2 : c0;
+    float g = c1;
+    float b = (p.swapRB != 0u) ? c0 : c2;
+    dst.write(float4(r, g, b, 1.0), gid);
+}
+
 // MARK: - Bayer single-channel extraction (Path B per-channel stacking)
 //
 // Each kernel emits a half-resolution (W/2 × H/2) plane containing TRUE
