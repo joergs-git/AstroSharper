@@ -321,15 +321,21 @@ struct ToneCurveSettings: Equatable, Codable {
     /// (typically 30–60% of [0,1]) and looks washed-out / low-contrast
     /// even though the underlying detail is the same.
     ///
-    /// Default ON since 2026-04-29 — user feedback was that the
-    /// preview + saved files always looked too bright / washed out;
-    /// flipping the default closed the perceived gap to SharpCap and
-    /// other auto-stretching viewers. The decoder default below
-    /// stays at false so older saved-preset JSON (without this field)
-    /// still loads with the historical unstretched behaviour;
-    /// only fresh ToneCurveSettings instances + new built-in presets
-    /// get the new default.
-    var autoStretch: Bool = true
+    /// Default OFF — flipping it on (commit `e0da97c` 2026-04-29)
+    /// was reverted the same day after user feedback: the percentile
+    /// fit + 0.85 scale + 0.8 gamma combination produces an
+    /// "unnatural super-high-contrast" look on lunar / planetary
+    /// captures (especially with the auto-PSF + bake-in chain),
+    /// which is worse than the original "too bright / washed out"
+    /// complaint that motivated the flip. Leaving auto-stretch as
+    /// an opt-in so users who want SharpCap-style display stretch
+    /// can enable it manually, but the default preserves the
+    /// bare-stack tonal range the user already approved on lunar
+    /// (16_moon_bare quality). Real fix for the original "too
+    /// bright" issue is probably a softer display-only stretch
+    /// (black-point clip without white-point pull) or a different
+    /// gamma — TBD with more user feedback.
+    var autoStretch: Bool = false
 
     // MARK: - Codable
     /// Backwards-compatible decoder so older preset JSON keeps loading. The
@@ -360,7 +366,7 @@ struct ToneCurveSettings: Equatable, Codable {
         saturation: Double = 1.0,
         autoWB: Bool = false,
         chromaticAlignment: Bool = false,
-        autoStretch: Bool = true,
+        autoStretch: Bool = false,
         brightness: Double = 0.0,
         contrast: Double = 1.0
     ) {

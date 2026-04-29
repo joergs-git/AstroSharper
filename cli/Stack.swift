@@ -436,19 +436,17 @@ enum Stack {
             // own). Each flag enables only its specific stage so users can
             // empirically test 'pure' deconvolution against the reference
             // without unsharp halos getting in the way.
-            // --smart-auto needs bake-in too — the auto-stretch tone-
-            // curve step lives inside Pipeline.process (which is what
-            // bake-in invokes). Without it the saved file uses only
-            // the camera's native dim range (typically 30–60% of [0,1])
-            // and looks washed-out compared to SharpCap-style auto-
-            // stretched displays. ToneCurveSettings now defaults
-            // autoStretch=true (see PipelineSettings.swift), so any
-            // bake-in fires it automatically.
-            let needsBakeIn = doUnsharpWavelet || wienerSigma != nil
-                              || lrSigma != nil || useAutoPSF
+            // Bake-in fires only when the user explicitly asked for
+            // sharpen / Wiener / LR. --smart-auto + --auto-psf flow
+            // produces a stack + RFF-deconv saved file directly —
+            // no Pipeline.process pass. The 2026-04-29 attempt to
+            // route smart-auto through bake-in (for auto-stretch)
+            // was reverted: the stretch + auto-PSF + RFF chain was
+            // worse than the bare RFF output on lunar.
+            let needsBakeIn = doUnsharpWavelet || wienerSigma != nil || lrSigma != nil
             if needsBakeIn {
                 var sharpen = SharpenSettings()
-                sharpen.enabled = doUnsharpWavelet || wienerSigma != nil || lrSigma != nil
+                sharpen.enabled = true
                 sharpen.unsharpEnabled = doUnsharpWavelet
                 sharpen.amount = sharpenAmount
                 sharpen.waveletEnabled = doUnsharpWavelet
