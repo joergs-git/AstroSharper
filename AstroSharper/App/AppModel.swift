@@ -1112,6 +1112,13 @@ final class AppModel: ObservableObject {
         perItemOpts.useTiledDeconv = luckyStack.tiledDeconv
         perItemOpts.tiledDeconvAPGrid = luckyStack.tiledDeconvAPGrid
         perItemOpts.useAutoKeepPercent = luckyStack.autoKeepPercent
+        // Sigma-clip accumulator (B.1) — Scientific mode only. The
+        // engine's `accumulateAlignedSigmaClipped` path triggers when
+        // `options.sigmaThreshold` is non-nil, so we leave it nil
+        // unless the GUI checkbox is on AND we're in scientific mode.
+        perItemOpts.sigmaThreshold = (luckyStack.mode == .scientific && luckyStack.sigmaClipEnabled)
+            ? Float(luckyStack.sigmaClipThreshold)
+            : nil
 
         if luckyStack.bakeInProcessing {
             let lut: MTLTexture? = toneCurve.enabled
@@ -1748,6 +1755,18 @@ struct LuckyStackUIState {
     /// `keepPercent` slider value. Smart auto turns this on; the
     /// user can always override by setting `keepPercent` manually.
     var autoKeepPercent: Bool = false
+
+    /// Sigma-clipped stacking (Block B.1). When ON in Scientific mode,
+    /// the accumulator does a Welford pass to compute per-pixel mean +
+    /// variance, then a second pass that re-means only samples within
+    /// `sigmaClipThreshold × σ` of the per-pixel mean — outlier frames
+    /// (cosmic rays, satellite trails, single-frame seeing spikes) get
+    /// clipped per-pixel rather than rejected wholesale. Default OFF
+    /// because the two-pass cost is ~2× the unclipped accumulator;
+    /// users opt in when they have visible outlier contamination.
+    /// AS!4 / RegiStax default σ=2.5; we mirror that.
+    var sigmaClipEnabled: Bool = false
+    var sigmaClipThreshold: Double = 2.5
 }
 
 enum LuckyStackNaming {

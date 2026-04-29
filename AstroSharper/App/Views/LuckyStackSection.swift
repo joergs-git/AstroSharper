@@ -245,6 +245,47 @@ struct LuckyStackSection: View {
                             .controlSize(.small)
                         }
                     }
+
+                    // Sigma-clipped accumulator (Block B.1). Scientific-
+                    // mode only because it doubles GPU work (Welford pass
+                    // + clipped re-mean pass) and only helps when there
+                    // are visible per-pixel outliers — cosmic ray hits,
+                    // satellite trails, single-frame seeing spikes.
+                    // AS!4 / RegiStax default σ=2.5; tighter (σ=2.0)
+                    // clips harder, looser (σ=3.0) only catches obvious
+                    // outliers.
+                    HStack(spacing: 4) {
+                        Toggle("Sigma-clip", isOn: $app.luckyStack.sigmaClipEnabled)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                        if app.luckyStack.sigmaClipEnabled {
+                            Spacer()
+                            Text("σ")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            Text(String(format: "%.1f", app.luckyStack.sigmaClipThreshold))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .help("Two-pass accumulator: per-pixel mean + variance, then re-mean only samples within σ × stddev. Clips outlier frames per-pixel (cosmic rays, satellite trails, single-frame seeing spikes) without rejecting the whole frame. ~2× the GPU cost of the unclipped accumulator. AS!4 / RegiStax default σ=2.5.")
+
+                    if app.luckyStack.sigmaClipEnabled {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text("Threshold").font(.caption)
+                                Spacer()
+                                Text(String(format: "%.1f σ", app.luckyStack.sigmaClipThreshold))
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                            Slider(
+                                value: $app.luckyStack.sigmaClipThreshold,
+                                in: 1.5...4.0, step: 0.1
+                            )
+                            .controlSize(.small)
+                        }
+                    }
                 }
 
                 // Per-channel stacking (Path B). Bayer-only — mono SER
