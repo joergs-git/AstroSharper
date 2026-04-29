@@ -111,4 +111,57 @@ final class DriftCache {
         guard let predicted = predictNextShift() else { return false }
         return DriftCache.distance(shift, predicted) > thresholdPx
     }
+
+    // MARK: - Stabilizer integration (B.4)
+
+    /// Default outlier threshold for the post-alignment validation pass.
+    /// 10 px sits well above the typical frame-to-frame drift on
+    /// planetary captures (1-3 px) and only fires on gross phase-corr
+    /// peak-finding failures (which usually return shifts of 50+ px
+    /// landing on noise). Tunable per call via the `outlierThresholdPx`
+    /// parameter on `validateChronologically`.
+    static let defaultOutlierThresholdPx: Float = 10
+
+    /// Replay a chronologically-ordered list of (frameIndex, shift)
+    /// entries, replacing outlier shifts with the linear-extrapolated
+    /// prediction from the trailing history. Returns the corrected
+    /// shifts in input order and the number of replacements.
+    ///
+    /// Reference frames (where `frameIndex == referenceIndex`) are
+    /// always emitted as `(0, 0)` and counted as a clean entry in the
+    /// cache so predictions across the reference stay continuous.
+    ///
+    /// Pure Swift; called by Stabilizer.run after the phase-correlation
+    /// loop. Same logic is reusable from CLI or batch pipelines.
+    static func validateChronologically(
+        shifts: [(frameIndex: Int, shift: AlignShift)],
+        referenceIndex: Int,
+        outlierThresholdPx: Float = defaultOutlierThresholdPx
+    ) -> (corrected: [AlignShift], outlierCount: Int) {
+        let cache = DriftCache()
+        var corrected: [AlignShift] = []
+        corrected.reserveCapacity(shifts.count)
+        var outliers = 0
+        for entry in shifts {
+            // Reference frame: shift is (0,0) by definition. Anchor it
+            // in the cache so predictions on either side of it remain
+            // chronologically consistent.
+            if entry.frameIndex == referenceIndex {
+                let zero = AlignShift(dx: 0, dy: 0)
+                cache.append(frameIndex: entry.frameIndex, shift: zero)
+                corrected.append(zero)
+                continue
+            }
+            if let predicted = cache.predictNextShift(),
+               DriftCache.distance(entry.shift, predicted) > outlierThresholdPx {
+                cache.append(frameIndex: entry.frameIndex, shift: predicted)
+                corrected.append(predicted)
+                outliers += 1
+            } else {
+                cache.append(frameIndex: entry.frameIndex, shift: entry.shift)
+                corrected.append(entry.shift)
+            }
+        }
+        return (corrected, outliers)
+    }
 }

@@ -1925,6 +1925,80 @@ struct DriftCacheTests {
         )
         #expect(abs(d - 5.0) < 1e-6)
     }
+
+    // MARK: - validateChronologically (B.4 Stabilizer integration)
+
+    @Test("validateChronologically — clean linear drift passes through")
+    func validateCleanDrift() {
+        // 6 frames drifting at +1 px/frame in x; ref = frame 0 (shift 0,0).
+        // No outliers expected.
+        let shifts: [(frameIndex: Int, shift: AlignShift)] = [
+            (0, AlignShift(dx: 0, dy: 0)),  // ref
+            (1, AlignShift(dx: 1, dy: 0)),
+            (2, AlignShift(dx: 2, dy: 0)),
+            (3, AlignShift(dx: 3, dy: 0)),
+            (4, AlignShift(dx: 4, dy: 0)),
+            (5, AlignShift(dx: 5, dy: 0)),
+        ]
+        let r = DriftCache.validateChronologically(
+            shifts: shifts, referenceIndex: 0
+        )
+        #expect(r.outlierCount == 0)
+        #expect(r.corrected.map { $0.dx } == [0, 1, 2, 3, 4, 5])
+    }
+
+    @Test("validateChronologically — single noisy frame is clamped to prediction")
+    func validateOutlierClamped() {
+        // Frame 4 lands on noise (dx = 100); should be replaced with the
+        // ~4 px prediction extrapolated from the 1-px-per-frame trend.
+        let shifts: [(frameIndex: Int, shift: AlignShift)] = [
+            (0, AlignShift(dx: 0, dy: 0)),  // ref
+            (1, AlignShift(dx: 1, dy: 0)),
+            (2, AlignShift(dx: 2, dy: 0)),
+            (3, AlignShift(dx: 3, dy: 0)),
+            (4, AlignShift(dx: 100, dy: 0)),   // noise spike
+            (5, AlignShift(dx: 5, dy: 0)),
+        ]
+        let r = DriftCache.validateChronologically(
+            shifts: shifts, referenceIndex: 0, outlierThresholdPx: 10
+        )
+        #expect(r.outlierCount == 1)
+        // The clamped value should be near 4 (prediction); definitely
+        // not 100 (the noise) and clearly within threshold of trend.
+        let frame4Corrected = r.corrected[4]
+        #expect(abs(frame4Corrected.dx - 4) < 1)
+    }
+
+    @Test("validateChronologically — reference in middle anchors at (0,0)")
+    func validateRefMidSequence() {
+        // 7-frame sequence with reference at index 3. Drift is linear
+        // before and after the ref. No outliers — every entry should
+        // pass through.
+        let shifts: [(frameIndex: Int, shift: AlignShift)] = [
+            (0, AlignShift(dx: -3, dy: 0)),
+            (1, AlignShift(dx: -2, dy: 0)),
+            (2, AlignShift(dx: -1, dy: 0)),
+            (3, AlignShift(dx: 0, dy: 0)),  // ref
+            (4, AlignShift(dx: 1, dy: 0)),
+            (5, AlignShift(dx: 2, dy: 0)),
+            (6, AlignShift(dx: 3, dy: 0)),
+        ]
+        let r = DriftCache.validateChronologically(
+            shifts: shifts, referenceIndex: 3
+        )
+        #expect(r.outlierCount == 0)
+        #expect(r.corrected[3] == AlignShift(dx: 0, dy: 0))
+        #expect(r.corrected[6].dx == 3)
+    }
+
+    @Test("validateChronologically — empty input returns empty output")
+    func validateEmpty() {
+        let r = DriftCache.validateChronologically(
+            shifts: [], referenceIndex: 0
+        )
+        #expect(r.corrected.isEmpty)
+        #expect(r.outlierCount == 0)
+    }
 }
 
 // MARK: - TimingRecorder

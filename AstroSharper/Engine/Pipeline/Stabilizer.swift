@@ -4,8 +4,16 @@
 //
 // The result is a list of aligned MTLTextures the caller keeps in RAM for
 // playback / scrubbing / on-screen verification BEFORE deciding to export.
+//
+// B.4 cumulative drift validation: after the phase-corr loop, shifts run
+// through `DriftCache.validateChronologically` which linear-extrapolates
+// the cumulative drift trend and replaces outliers (default >10 px from
+// prediction) with the predicted shift. Removes the "single bad frame
+// blows up the crop rectangle" failure mode that hit captures with
+// occasional poor seeing.
 import Foundation
 import Metal
+import os
 
 enum Stabilizer {
     struct Inputs {
@@ -134,6 +142,27 @@ enum Stabilizer {
                 }
                 shifts[urls[i].id] = s
                 await onProgress(.computingShifts(done: i + 1, total: urls.count))
+            }
+
+            // Cumulative-drift outlier validation. Replays the per-frame
+            // shifts in chronological order and clamps any whose distance
+            // from the linear-extrapolated prediction exceeds the
+            // threshold. Catches frames where phase-corr's peak-finder
+            // landed on noise (typically 50+ px off the trend).
+            let chronological: [(frameIndex: Int, shift: AlignShift)] = urls.enumerated().map { idx, item in
+                (frameIndex: idx, shift: shifts[item.id] ?? AlignShift(dx: 0, dy: 0))
+            }
+            let validated = DriftCache.validateChronologically(
+                shifts: chronological,
+                referenceIndex: refIdx
+            )
+            for (idx, item) in urls.enumerated() {
+                shifts[item.id] = validated.corrected[idx]
+            }
+            if validated.outlierCount > 0 {
+                os_log("Stabilizer: clamped %d outlier shift(s) to drift prediction (out of %d frames)",
+                       log: OSLog(subsystem: "com.joergsflow.AstroSharper", category: "Stabilizer"),
+                       type: .info, validated.outlierCount, urls.count)
             }
 
             // Crop rectangle (if mode = crop).
