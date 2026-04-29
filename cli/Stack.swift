@@ -49,6 +49,11 @@ enum Stack {
         var denoisePostPercent: Int = 0
         var useTiledDeconv = false
         var tiledDeconvAPGrid = 8
+        // C.6 capture-gamma compensation. 1.0 = no correction (data
+        // assumed linear). Camera UI sliders (50, 100, 200) convert via
+        // `CaptureGamma.gamma(fromCameraSliderValue:)`. Wired into the
+        // AutoPSF Wiener post-pass through `options.captureGamma`.
+        var captureGamma: Double = 1.0
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -271,6 +276,22 @@ enum Stack {
                 }
                 autoPSFSNR = v
                 i += 2
+            case "--capture-gamma":
+                // C.6 capture-gamma compensation around the auto-PSF +
+                // Wiener post-pass. Accepts either an actual gamma
+                // exponent (1, 1.5, 2, 2.2) or a camera-UI slider value
+                // (>4.5 → treated as a SharpCap/ZWO 0..200 slider where
+                // 50 ≈ linear). Identity at 1.0 (default).
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v > 0
+                else {
+                    cliStderr("stack: --capture-gamma requires a positive number (gamma exponent or camera slider 50..200)")
+                    return 64
+                }
+                captureGamma = CaptureGamma.looksLikeCameraSlider(v)
+                    ? CaptureGamma.gamma(fromCameraSliderValue: v)
+                    : v
+                i += 2
             case "--denoise-pre":
                 // C.5 dual-stage denoise — strength [0, 100] applied
                 // BEFORE the auto-PSF estimate + Wiener deconv.
@@ -352,7 +373,7 @@ enum Stack {
 
         guard let input = inputPath, let output = outputPath else {
             cliStderr("stack: missing input or output path")
-            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--sharpen [--sharpen-amount X]] [--auto-psf [--auto-psf-snr N]] [--metrics file.json] [--quiet]")
+            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--sharpen [--sharpen-amount X]] [--auto-psf [--auto-psf-snr N] [--capture-gamma N]] [--metrics file.json] [--quiet]")
             return 64
         }
 
@@ -417,6 +438,7 @@ enum Stack {
             options.perChannelStacking = usePerChannelStacking
             options.useAutoPSF = useAutoPSF
             options.autoPSFSNR = autoPSFSNR
+            options.captureGamma = captureGamma
             options.useAutoKeepPercent = useAutoKeep && !keepWasExplicit
             options.denoisePrePercent = denoisePrePercent
             options.denoisePostPercent = denoisePostPercent

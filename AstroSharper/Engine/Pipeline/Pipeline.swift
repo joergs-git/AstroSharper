@@ -330,7 +330,8 @@ final class Pipeline {
                         input: smallIn, output: smallOut,
                         sigma: Float(sharpen.wienerSigma) * 0.5,  // PSF shrinks with downsample
                         snr: Float(sharpen.wienerSNR),
-                        device: device
+                        device: device,
+                        captureGamma: Float(sharpen.captureGamma)
                     )
                     let upscaler = MPSImageBilinearScale(device: device)
                     upscaler.encode(commandBuffer: scaleCmd2, sourceTexture: smallOut, destinationTexture: result)
@@ -342,7 +343,8 @@ final class Pipeline {
                         input: current, output: result,
                         sigma: Float(sharpen.wienerSigma),
                         snr: Float(sharpen.wienerSNR),
-                        device: device
+                        device: device,
+                        captureGamma: Float(sharpen.captureGamma)
                     )
                 }
             } else {
@@ -350,7 +352,8 @@ final class Pipeline {
                     input: current, output: result,
                     sigma: Float(sharpen.wienerSigma),
                     snr: Float(sharpen.wienerSNR),
-                    device: device
+                    device: device,
+                    captureGamma: Float(sharpen.captureGamma)
                 )
             }
             current = result

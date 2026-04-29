@@ -25,12 +25,21 @@ enum Wiener {
     /// Deconvolves `input` with a Gaussian PSF of stddev `sigma` (px) and
     /// signal-to-noise ratio `snr`, writing the result into `output`. Both
     /// must be the same size; `output` is allowed to be private-storage.
+    ///
+    /// `captureGamma` (C.6): pre-linearises the input by raising each
+    /// channel to `captureGamma`, runs the linear-forward-model Wiener
+    /// inverse on the linear data, then re-encodes the output with
+    /// `1/captureGamma`. Pass 1.0 (default) to skip the linearisation
+    /// when the source is already linear (e.g. raw 16-bit FITS or a
+    /// camera with gamma=0 acquisition). Typical planetary cameras
+    /// running SharpCap defaults sit at gamma 2.0.
     static func deconvolve(
         input: MTLTexture,
         output: MTLTexture,
         sigma: Float,
         snr: Float,
-        device: MTLDevice
+        device: MTLDevice,
+        captureGamma: Float = 1.0
     ) {
         let W = input.width
         let H = input.height
@@ -127,6 +136,19 @@ enum Wiener {
             }
         }
 
+        // Capture-gamma linearisation (C.6). When the source has a non-
+        // linear gamma encoding baked in by the camera, raising each
+        // channel to `captureGamma` recovers the linear domain that the
+        // Wiener inverse-filter assumes. Skipped when gamma == 1.0 to
+        // keep the no-correction path identical to v0.3.x.
+        if captureGamma != 1.0, captureGamma > 0, captureGamma.isFinite {
+            for i in 0..<plane {
+                rPlane[i] = rPlane[i] > 0 ? powf(rPlane[i], captureGamma) : rPlane[i]
+                gPlane[i] = gPlane[i] > 0 ? powf(gPlane[i], captureGamma) : gPlane[i]
+                bPlane[i] = bPlane[i] > 0 ? powf(bPlane[i], captureGamma) : bPlane[i]
+            }
+        }
+
         // Step 3: pad to next power of two (padding = 0). Mirror padding would
         // reduce edge ringing further but doubles complexity — for typical
         // lucky-stack outputs the result is a centred object on a dark field,
@@ -154,6 +176,19 @@ enum Wiener {
         rPlane = wienerProcess(channel: rPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
         gPlane = wienerProcess(channel: gPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
         bPlane = wienerProcess(channel: bPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
+
+        // Capture-gamma re-encode (C.6). Inverse of the pre-FFT linearise.
+        // Restores the original camera-gamma encoding so downstream stages
+        // (radial / tiled blend with the still-encoded `pre`, denoise, tone
+        // curve) see the same encoding throughout the pipeline.
+        if captureGamma != 1.0, captureGamma > 0, captureGamma.isFinite {
+            let invGamma = 1.0 / captureGamma
+            for i in 0..<plane {
+                rPlane[i] = rPlane[i] > 0 ? powf(rPlane[i], invGamma) : rPlane[i]
+                gPlane[i] = gPlane[i] > 0 ? powf(gPlane[i], invGamma) : gPlane[i]
+                bPlane[i] = bPlane[i] > 0 ? powf(bPlane[i], invGamma) : bPlane[i]
+            }
+        }
 
         // Step 6: pack back into RGBA at the input's native precision,
         // clamped to [0, 1]. Branch on isFloat32 so the byte layout matches

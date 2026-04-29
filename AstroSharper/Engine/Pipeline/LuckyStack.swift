@@ -168,6 +168,15 @@ struct LuckyStackOptions {
     var useAutoPSF: Bool = false
     var autoPSFSNR: Double = 50
 
+    /// Capture-gamma compensation around the auto-PSF + Wiener post-pass
+    /// (Block C.6). 1.0 = no correction (data assumed linear). Typical
+    /// SharpCap / FireCapture defaults apply gamma 2.0 by default; pre-
+    /// linearising the input restores the linear forward-model assumption
+    /// the Wiener inverse filter relies on, killing planetary edge ringing.
+    /// Re-encoded with `1/captureGamma` after the deconv so downstream
+    /// blend / denoise / tone curves see the same encoding throughout.
+    var captureGamma: Double = 1.0
+
     /// Dual-stage denoise around the auto-PSF + Wiener path (Block C.5).
     /// Pre-denoise (default 0 = off) wraps the input BEFORE PSF
     /// estimation + deconvolution — suppresses noise so the limb
@@ -547,12 +556,18 @@ enum LuckyStack {
                         outDesc.storageMode = .private
                         outDesc.usage = [.shaderRead, .shaderWrite]
                         if let deconvTex = device.makeTexture(descriptor: outDesc) {
+                            // Capture-gamma (C.6). Defensive: 0 / NaN fall
+                            // back to 1.0 so a malformed setting can't
+                            // divide-by-zero in the inverse re-encode.
+                            let safeGamma: Float = (options.captureGamma > 0 && options.captureGamma.isFinite)
+                                ? Float(options.captureGamma) : 1.0
                             Wiener.deconvolve(
                                 input: final,
                                 output: deconvTex,
                                 sigma: psf.sigma,
                                 snr: Float(options.autoPSFSNR),
-                                device: device
+                                device: device,
+                                captureGamma: safeGamma
                             )
 
                             // Radial fade is the FIRST blend choice
