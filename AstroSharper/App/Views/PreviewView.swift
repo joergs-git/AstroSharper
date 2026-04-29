@@ -137,6 +137,47 @@ struct PreviewView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: app.isLoadingPreview)
+            // Preview-load error banner. Surfaces SerFrameLoader /
+            // SerReader / AviReader / ImageTexture failures (unsupported
+            // ColorID, corrupt header, RGB SER not yet implemented) so
+            // the user sees what went wrong instead of a black canvas
+            // with the file silently rejected. Auto-clears the next time
+            // a successful load lands.
+            .overlay(alignment: .top) {
+                if let err = app.previewError, !app.isLoadingPreview {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.yellow)
+                            .font(.system(size: 16, weight: .semibold))
+                        Text(err)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.white)
+                            .lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        Button {
+                            app.previewError = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.white.opacity(0.7))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: 540)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.yellow.opacity(0.55), lineWidth: 1)
+                    )
+                    .padding(.top, 16)
+                    .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.easeInOut(duration: 0.22), value: app.previewError)
             // Mini-map overlay was disabled — pan/zoom recomputed it on
             // every drag tick, and the user found it slow without
             // commensurate value. The view + computation helpers stay in
@@ -470,6 +511,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         if app.displayedSection == .memory && app.playback.hasFrames { return }
 
         currentFileID = app.previewFileID
+        // Clear any previous-file error banner up front. The completion
+        // path will (re-)set it if the new load fails. Without this, the
+        // user briefly sees the previous error while navigating to a
+        // healthy file.
+        app.previewError = nil
         // A different file invalidates the SER quality scan from the previous
         // file — cancel before kicking new work or stale results land.
         qualityScanner.cancel()
@@ -575,6 +621,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             var tex: MTLTexture?
+            var loadError: String?   // surfaced to PreviewView overlay
             let loadStart = Date()
             if isSER {
                 do {
@@ -582,11 +629,18 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 } catch {
                     NSLog("PreviewView: SerFrameLoader.loadFrame failed for %@ — %@",
                           url.lastPathComponent, String(describing: error))
+                    loadError = Self.userFacingSerError(error: error, fileName: url.lastPathComponent)
                 }
             } else if let avi = aviForBackground {
                 tex = try? avi.loadFrame(at: 0, device: MetalDevice.shared.device)
+                if tex == nil {
+                    loadError = "Couldn't decode AVI frame from \(url.lastPathComponent)"
+                }
             } else {
                 tex = try? ImageTexture.load(url: url, device: MetalDevice.shared.device)
+                if tex == nil {
+                    loadError = "Couldn't read image from \(url.lastPathComponent)"
+                }
             }
             let loadMs = Int(Date().timeIntervalSince(loadStart) * 1000)
             // Diagnostic: log file load + first-frame brightness so the
@@ -630,6 +684,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                     }
                     return
                 }
+                self.app.previewError = loadError
                 self.beforeTex = tex
                 self.afterTex = nil
                 // Zoom + pan deliberately PRESERVED across file switches — this
@@ -667,6 +722,37 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         if !isSER, let s = entry.sharpness {
             app.previewStats.currentSharpness = s
         }
+    }
+
+    /// Translate a low-level SerFrameLoader / SerReader error into a
+    /// short user-friendly message for the preview error overlay. Keeps
+    /// the developer-facing context in NSLog while showing something
+    /// actionable on screen (e.g. "Unsupported SER ColorID 101 — …").
+    /// `nonisolated` so the background-queue load path can call it
+    /// without the @MainActor coordinator's actor hop.
+    nonisolated private static func userFacingSerError(error: Error, fileName: String) -> String {
+        let descr = String(describing: error)
+        if descr.contains("unsupportedFormat") {
+            // Pull the colorID out of the embedded message if present.
+            if let range = descr.range(of: #"ColorID (\d+)"#, options: .regularExpression) {
+                let cid = String(descr[range])
+                return "\(fileName) — \(cid) is not a standard SER ColorID. Re-export from your capture tool as mono / Bayer / RGB."
+            }
+            if descr.contains("pixelDepth") {
+                return "\(fileName) — pixel depth not supported (SER must be 8 or 16 bit)."
+            }
+            return "\(fileName) — unsupported SER format. Re-export from your capture tool."
+        }
+        if descr.contains("unsupportedColor") {
+            return "\(fileName) — RGB SER files aren't yet supported in preview/stack. Capture as mono or Bayer."
+        }
+        if descr.contains("cannotOpen") || descr.contains("readerOpenFailed") {
+            return "\(fileName) — couldn't open. Check the network volume / file isn't truncated."
+        }
+        if descr.contains("invalidHeader") || descr.contains("tooSmall") {
+            return "\(fileName) — header looks corrupt or truncated."
+        }
+        return "\(fileName) — failed to decode (\(descr))"
     }
 
     /// Read back a 64×64 centre region of an rgba16Float / rgba32Float

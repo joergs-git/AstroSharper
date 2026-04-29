@@ -180,6 +180,14 @@ final class AppModel: ObservableObject {
     /// false.
     @Published var loadingPreviewLabel: String? = nil
 
+    /// User-facing error from the most recent preview load. nil means
+    /// the load succeeded or there's no current file. PreviewView shows
+    /// this as an inline overlay so SER format / decode failures
+    /// (unsupported ColorID, corrupt header, RGB-not-yet-supported,
+    /// readerOpenFailed on a bad NAS share) don't silently leave the
+    /// user with a black canvas.
+    @Published var previewError: String? = nil
+
     /// Which high-level pipeline stage is currently executing in the
     /// live preview. nil = idle. Drives the colored highlight on the
     /// SettingsPanel section headers so the user can see which step
