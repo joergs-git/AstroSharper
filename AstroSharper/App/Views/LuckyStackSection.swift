@@ -134,11 +134,16 @@ struct LuckyStackSection: View {
                 }
 
                 // Smart auto preset — one-click sensible defaults for
-                // Block C. Per-channel + auto-PSF + tiled deconv +
-                // 50/30 denoise. Auto-PSF bails on lunar / textured
-                // subjects, so this is safe to leave on by default.
+                // Block C. Auto-PSF + tiled deconv + 50/30 denoise.
+                // Per-channel deliberately NOT included: empirical
+                // softening from the half-res extract + upsample is
+                // visible even on planetary captures, and the
+                // chromatic-dispersion correction it provides is only
+                // meaningful at low altitudes. Auto-PSF bails on
+                // lunar / textured subjects so this preset works
+                // safely on every subject without manual tweaking.
                 Button {
-                    app.luckyStack.perChannelStacking = true
+                    app.luckyStack.perChannelStacking = false
                     app.luckyStack.autoPSF = true
                     app.luckyStack.autoPSFSNR = 50
                     app.luckyStack.tiledDeconv = true
@@ -150,7 +155,7 @@ struct LuckyStackSection: View {
                         .font(.caption)
                 }
                 .controlSize(.small)
-                .help("One-click preset: per-channel + auto-PSF + tiled deconv + balanced denoise (50/30). Auto-PSF auto-bails on lunar / textured subjects (no over-deconv risk), so the same preset works for planetary AND lunar without manual tweaking.")
+                .help("One-click preset: auto-PSF + tiled deconv + balanced denoise (50/30). Auto-PSF auto-bails on lunar / textured subjects so the same preset works for planetary AND lunar. Per-channel is intentionally OFF — its half-res extract + upsample softens output; only useful for low-altitude chromatic-dispersion correction.")
 
                 if app.luckyStack.mode == .scientific {
                     HStack(spacing: 4) {
@@ -214,12 +219,13 @@ struct LuckyStackSection: View {
 
                 // Per-channel stacking (Path B). Bayer-only — mono SER
                 // captures ignore the flag and use the standard runner.
+                // Experimental — see tooltip.
                 HStack(spacing: 4) {
-                    Toggle("Per-channel (Path B)", isOn: $app.luckyStack.perChannelStacking)
+                    Toggle("Per-channel (experimental)", isOn: $app.luckyStack.perChannelStacking)
                         .toggleStyle(.switch)
                         .controlSize(.small)
                 }
-                .help("Path B: split Bayer SER into R/G/B planes, align + stack each independently, recombine. Catches per-frame chromatic dispersion. Bayer captures only — mono SER ignored. ~3× runtime cost.")
+                .help("Experimental: split Bayer SER into R/G/B planes, align + stack each independently. Catches per-frame chromatic dispersion at low altitudes (< 30°). Half-res extract + bilinear-upsample combine softens the output by ~1 px vs. the standard demosaic path — only enable when the chromatic-dispersion correction is actually needed. Bayer captures only. ~3× runtime cost.")
 
                 // Auto-PSF post-pass (Block C.1 v0).
                 HStack(spacing: 4) {

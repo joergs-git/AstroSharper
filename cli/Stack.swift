@@ -209,15 +209,23 @@ enum Stack {
                 i += 1
             case "--smart-auto":
                 // Convenience preset — sets sensible Block C defaults:
-                // per-channel ON (no-op for mono SER, real win on
-                // OSC Bayer); auto-PSF ON (auto-bails on textured
-                // subjects so lunar still gets bare-quality output);
-                // tiled deconv ON (skips noise amplification on
-                // background); dual-stage denoise 50/30 (balanced).
-                // Individual flags after `--smart-auto` still
-                // override (so `--smart-auto --denoise-pre 75` is
-                // smart-auto with stronger pre-denoise).
-                usePerChannelStacking = true
+                //   auto-PSF ON (auto-bails on textured subjects so
+                //                lunar still gets bare-quality output)
+                //   tiled deconv ON (skips noise amplification on bg)
+                //   dual-stage denoise 50/30 (balanced)
+                //
+                // Per-channel deliberately NOT set here. Empirical:
+                // per-channel's half-res extract + bilinear-upsample
+                // combine introduces a ~1 px low-pass filter that
+                // visibly softens output vs. the standard demosaic
+                // path. The chromatic-dispersion correction it offers
+                // only matters at low altitudes (< 30°) and even then
+                // is subtle. Users who actually need it can pass
+                // --per-channel explicitly.
+                //
+                // Individual flags after `--smart-auto` still override
+                // (e.g. `--smart-auto --denoise-pre 75` keeps the
+                // preset but turns pre-denoise up to BiggSky-default).
                 useAutoPSF = true
                 useTiledDeconv = true
                 denoisePrePercent = 50
