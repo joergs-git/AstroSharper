@@ -1206,6 +1206,11 @@ final class AppModel: ObservableObject {
         perItemOpts.useTiledDeconv = luckyStack.tiledDeconv
         perItemOpts.tiledDeconvAPGrid = luckyStack.tiledDeconvAPGrid
         perItemOpts.useAutoKeepPercent = luckyStack.autoKeepPercent
+        // Stack-end remap: GUI toggle drives the engine flag. Default OFF
+        // in luckyStack.autoRecoverDynamicRange — bare accumulator
+        // preserves highlight detail, which the bracket on 2026-04-30
+        // showed users prefer over the percentile stretch.
+        perItemOpts.disableOutputRemap = !luckyStack.autoRecoverDynamicRange
         // Sigma-clip accumulator (B.1) — Scientific mode only. The
         // engine's `accumulateAlignedSigmaClipped` path triggers when
         // `options.sigmaThreshold` is non-nil, so we leave it nil
@@ -1806,6 +1811,14 @@ struct LuckyStackUIState {
     /// settings into the saved TIF, which can be unintended on the first
     /// stack of a session.
     var bakeInProcessing: Bool = false
+
+    /// Stack-end auto-recovery (percentile stretch) toggle. Default OFF
+    /// since the bracket on lunar + jupiter (2026-04-30) confirmed that
+    /// every non-trivial whiteCap clamps the brightest 0.2% of pixels
+    /// into a flat plateau and destroys highlight detail. Users who
+    /// want washed-out-stack recovery can flip this ON; the engine
+    /// applies the same percentile remap that was previously always-on.
+    var autoRecoverDynamicRange: Bool = false
 
     /// Optional target tag used to fill the WinJUPOS `<obj>` field. Defaults
     /// to whatever is in the active preset's target if any.
