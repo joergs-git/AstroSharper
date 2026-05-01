@@ -559,6 +559,14 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         let isSER = entry.isSER
         let isAVI = entry.isAVI
 
+        // Per-file Auto-stretch default. Raw frame-sequence captures (SER/AVI)
+        // store dim 16-bit linear values straight from the sensor, so without
+        // a stretch they look near-black. Saved stills (TIFF/PNG/JPEG) are
+        // already in display space, so auto-stretch would over-brighten them
+        // and the result wouldn't match Preview.app or Photoshop. Toggle the
+        // global default per file so each format opens looking "right".
+        app.displayAutoRange = (isSER || isAVI)
+
         // Seed the HUD with header-derived info immediately. Bytes / dates
         // come from the FileEntry and the (optional) SER / AVI header.
         var stats = PreviewStats()

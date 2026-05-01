@@ -93,42 +93,35 @@ fragment float4 display_fragment(
             return float4(1, 1, 1, 1);
         }
     }
-    // Auto-range stretch + gamma. Two-step process matching AS!4's
-    // "Auto Range" + "Brightness pow" + the implicit sRGB display
-    // gamma, validated by user bracket (file 26_stretch_g25 picked
-    // for solar Ha):
-    //   1. (col − p1) · autoScale → [0, 1] (stretch over the data range)
-    //   2. pow(., 2.5) → midtone darkening (high contrast)
-    //   3. user's Brightness slider multiplies on top
-    //   4. sRGB display encode (pow ., 2.2) so the on-screen result
-    //      matches what an sRGB-tagged PNG of the same math looks like
+    // Industry-standard display chain. Two layers:
     //
-    // Step 4 is the missing piece that made the live preview look
-    // brighter / flatter than the bracket PNGs: my Python `pow(stretched,
-    // 2.5) * 255` saves to PNG, Preview.app reads it as sRGB and applies
-    // an implicit pow(., 2.2) decode at display. The Metal `rgba16Float`
-    // swap chain by default is treated as EXTENDED-LINEAR by the macOS
-    // compositor, so values written directly hit the display without
-    // that extra encode. Adding it here re-creates the de-facto PNG
-    // display chain inside the shader.
+    //   1. Optional auto-range stretch + gamma (Auto toggle ON):
+    //      stretches [p1, p99] of the texture's histogram into [0, 1]
+    //      and applies pow(., 2.5) for AS!4-style midtone darkening.
+    //      This is for previewing RAW frames (dim SER captures, deep
+    //      sky) — turn OFF when viewing already-processed TIFFs.
     //
-    // Skipped entirely when autoRangeOn = 0; the slider alone still
-    // applies and the sRGB encode is also skipped so users see bare
-    // pixel values.
+    //   2. UNCONDITIONAL sRGB display encode at end (pow(., 2.2)).
+    //      The macOS compositor treats `rgba16Float` swap chains as
+    //      extended-linear: values go straight to the display panel
+    //      with no implicit gamma. Standard image viewers (Preview,
+    //      Photoshop, Lightroom) treat untagged file values as sRGB
+    //      and apply pow(., 2.2) at display to get linear luminance.
+    //      Adding pow(., 2.2) here makes our display chain match,
+    //      i.e. Auto OFF + no filters = WYSIWYG with Preview.app.
+    //
+    // The user's Brightness slider sits between (1) and (2) so its
+    // effect is on the linear data BEFORE the display encode.
     if (u.autoRangeOn != 0u) {
         float3 stretched = clamp((col.rgb - u.autoBlack) * u.autoScale, 0.0, 1.0);
         col.rgb = pow(stretched, float3(u.autoGamma));
-        if (u.displayGain != 1.0) {
-            col.rgb = clamp(col.rgb * u.displayGain, 0.0, 1.0);
-        } else {
-            col.rgb = clamp(col.rgb, 0.0, 1.0);
-        }
-        col.rgb = pow(col.rgb, float3(2.2));   // sRGB display encode
-    } else if (u.displayGain != 1.0) {
+    }
+    if (u.displayGain != 1.0) {
         col.rgb = clamp(col.rgb * u.displayGain, 0.0, 1.0);
     } else {
         col.rgb = clamp(col.rgb, 0.0, 1.0);
     }
+    col.rgb = pow(col.rgb, float3(2.2));   // sRGB display encode (always)
     return col;
 }
 

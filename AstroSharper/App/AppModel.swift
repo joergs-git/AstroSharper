@@ -146,12 +146,16 @@ final class AppModel: ObservableObject {
     @Published var serPlaybackActive: Bool = false
     private var serPlaybackTimer: Timer?
 
-    /// Display-only AUTO gain. ON (default): the coordinator computes a
-    /// per-texture gain that targets p99 ≈ 0.85 (so dim Ha SER / DSO
-    /// captures land at sensible brightness without manual tuning).
-    /// OFF: only the user's `displayGain` slider applies. Saved files
-    /// and the underlying texture are unaffected — display only.
-    @Published var displayAutoRange: Bool = true
+    /// Display-only auto-range stretch. OFF by default (2026-05-01):
+    /// matches Preview.app / Photoshop's industry-standard chain for
+    /// saved files — the shader applies the standard sRGB display
+    /// encode (pow ., 2.2) unconditionally so a TIFF in our app and
+    /// in Preview render identically with no other filters active.
+    /// Toggle ON when viewing dim raw SER frames where the auto
+    /// stretch + γ=2.5 reveals contrast the file's narrow [p1, p99]
+    /// band hides at standard brightness. Saved files and the
+    /// underlying texture are unaffected — display only.
+    @Published var displayAutoRange: Bool = false
 
     /// User-controlled display brightness slider (AS!4-style "Brightness
     /// Nx"). Multiplies the displayed pixel value AFTER the auto-gain
