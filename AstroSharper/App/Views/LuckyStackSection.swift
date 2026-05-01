@@ -339,6 +339,24 @@ struct LuckyStackSection: View {
                             .controlSize(.small)
                         }
                         .help("Drop size as a fraction of the input pixel. BiggSky default 0.7. Lower = sharper but more dropouts on sparse keep-% runs; higher = smoother but blurrier output.")
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text("AA σ").font(.caption)
+                                Spacer()
+                                Text(app.luckyStack.drizzleAASigma > 0
+                                     ? String(format: "%.2f px", app.luckyStack.drizzleAASigma)
+                                     : "off")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                            Slider(
+                                value: $app.luckyStack.drizzleAASigma,
+                                in: 0.0...2.0, step: 0.1
+                            )
+                            .controlSize(.small)
+                        }
+                        .help("Anti-aliasing pre-filter applied to each frame before splat. Smooths the splat-drop hard edges so they don't beat with the underlying signal — the BiggSky-warned grid-moiré protection. Default 0.7 input-pixels (matches pixfrac). 0 disables, restoring pre-AA splat behaviour.")
                     }
                 }
 

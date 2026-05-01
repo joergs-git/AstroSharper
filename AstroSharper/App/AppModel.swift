@@ -1261,6 +1261,7 @@ final class AppModel: ObservableObject {
         // drizzle splat path with the configured pixfrac.
         perItemOpts.drizzleScale = luckyStack.drizzleScale
         perItemOpts.drizzlePixfrac = Float(luckyStack.drizzlePixfrac)
+        perItemOpts.drizzleAASigma = Float(luckyStack.drizzleAASigma)
 
         if luckyStack.bakeInProcessing {
             let lut: MTLTexture? = toneCurve.enabled
@@ -1976,6 +1977,13 @@ struct LuckyStackUIState {
     /// B.6 follow-up.
     var drizzleScale: Int = 1
     var drizzlePixfrac: Double = 0.7
+
+    /// Drizzle AA pre-filter sigma in input pixels. 0 = off (pre-
+    /// 2026-05-01 behaviour); 0.7 default smooths the splat-drop hard
+    /// edges so they don't beat with the underlying signal on sparse
+    /// / coarse-shift inputs (the BiggSky-warned grid-moiré artefact).
+    /// Only effective when `drizzleScale > 1`.
+    var drizzleAASigma: Double = 0.7
 }
 
 enum LuckyStackNaming {

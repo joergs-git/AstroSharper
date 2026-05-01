@@ -25,6 +25,9 @@ enum Stack {
         var sigmaThreshold: Float?
         var drizzleScale = 1
         var drizzlePixfrac: Float = 0.7
+        // B.6 AA pre-filter sigma in input pixels. Default 0.7 matches
+        // the engine default; --drizzle-aa-sigma 0 disables.
+        var drizzleAASigma: Float = 0.7
         var useTwoStage = false
         var twoStageGrid = 8
         var mode: LuckyStackMode = .lightspeed
@@ -122,6 +125,15 @@ enum Stack {
                     return 64
                 }
                 drizzleScale = v
+                i += 2
+            case "--drizzle-aa-sigma":
+                guard i + 1 < args.count, let v = Float(args[i + 1]),
+                      v.isFinite, v >= 0, v <= 5
+                else {
+                    cliStderr("stack: --drizzle-aa-sigma requires a number in [0, 5] (default 0.7, 0 = off)")
+                    return 64
+                }
+                drizzleAASigma = v
                 i += 2
             case "--pixfrac":
                 guard i + 1 < args.count, let v = Float(args[i + 1]),
@@ -582,6 +594,7 @@ enum Stack {
             options.sigmaThreshold = sigmaThreshold
             options.drizzleScale = drizzleScale
             options.drizzlePixfrac = drizzlePixfrac
+            options.drizzleAASigma = drizzleAASigma
             options.useTwoStageQuality = useTwoStage
             options.twoStageAPGrid = twoStageGrid
             options.mode = mode

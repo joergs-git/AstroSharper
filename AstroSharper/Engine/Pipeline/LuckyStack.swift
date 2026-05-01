@@ -127,6 +127,17 @@ struct LuckyStackOptions {
     /// per-pixel weight texture).
     var drizzlePixfrac: Float = 0.7
 
+    /// Drizzle AA pre-filter sigma in input pixels (B.6 follow-up).
+    /// Applied as a Gaussian blur on each aligned frame BEFORE the
+    /// splat kernel writes it onto the upsampled accumulator. Smooths
+    /// the splat pattern's hard drop edges so they don't beat with
+    /// the underlying signal on sparse / coarse-shift inputs — the
+    /// grid moiré artefact BiggSky's documentation warns about.
+    /// Default 0.7 (same as pixfrac so the drop blur ≈ drop size).
+    /// 0 = disabled (pre-2026-05-01 behaviour). No effect when
+    /// drizzleScale == 1 since the splat path doesn't fire.
+    var drizzleAASigma: Float = 0.7
+
     /// Per-AP local quality re-ranking (PSS / AS!4 two-stage grading).
     /// false = single global ranking (existing); true = each AP cell
     /// picks its own top-k frames independently. Directly addresses
@@ -926,6 +937,23 @@ private final class LuckyRunner {
     lazy var perPixelNormPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_normalize_per_pixel")
     // B.6 drizzle splat — only built when options.drizzleScale > 1.
     lazy var drizzlePSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_drizzle_splat")
+
+    // B.6 anti-aliasing pre-filter for drizzle. Built lazily so the
+    // non-drizzle path (the regression-suite default) doesn't pay
+    // the MPS allocation. Sigma comes from `options.drizzleAASigma`
+    // and is set on first access in `accumulateAlignedDrizzled`.
+    private var _drizzleAABlur: MPSImageGaussianBlur?
+    private var _drizzleAABlurSigma: Float = -1
+    func drizzleAABlur(sigma: Float) -> MPSImageGaussianBlur? {
+        guard sigma > 0 else { return nil }
+        if let cached = _drizzleAABlur, _drizzleAABlurSigma == sigma {
+            return cached
+        }
+        let blur = MPSImageGaussianBlur(device: device, sigma: sigma)
+        _drizzleAABlur = blur
+        _drizzleAABlurSigma = sigma
+        return blur
+    }
     // A.2 two-stage quality kernels — only built when useTwoStageQuality is on.
     lazy var perAPGradePSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "quality_partials_per_ap")
     lazy var perAPAccumPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_accumulate_per_ap_keep")
@@ -2138,6 +2166,23 @@ private final class LuckyRunner {
         let accum = Self.makeFloatBuffer(device: device, w: outW, h: outH, format: .rgba32Float)
         let wtTex = Self.makeFloatBuffer(device: device, w: outW, h: outH, format: .rgba32Float)
 
+        // B.6 anti-aliasing pre-filter (default-on for scale > 1).
+        // MPSImageGaussianBlur smooths each frame's hard splat-drop
+        // edges so they don't beat with the underlying signal on
+        // sparse / coarse-shift inputs (BiggSky-warned grid moiré).
+        // Per-slot scratch — encoder runs concurrently across slots.
+        // Sigma 0 disables (set via options.drizzleAASigma).
+        let aaSigma = options.drizzleAASigma
+        let aaBlur = aaSigma > 0 ? drizzleAABlur(sigma: aaSigma) : nil
+        let aaTextures: [MTLTexture]? = aaBlur != nil
+            ? (0..<options.stagingPoolSize).map { _ in
+                Self.makeFrameTexture(device: device, w: W, h: H)
+            }
+            : nil
+        if aaBlur != nil {
+            NSLog("Drizzle AA pre-filter: σ=%.2f input-pixels", aaSigma)
+        }
+
         // Quality weighting curve (mirrors accumulateAligned).
         let keptScores = indices.map { scores[$0] }
         let lo = keptScores.min() ?? 0
@@ -2161,11 +2206,25 @@ private final class LuckyRunner {
             }
             decodeFrame(commandBuffer: cmd, frameIndex: idx, slot: slot, frameTex: frameTex)
 
+            // AA pre-filter pass: frameTex → aaTextures[slot] via MPS
+            // Gaussian blur. Splat then reads from the blurred texture
+            // instead of the raw frame. When AA is off (sigma == 0)
+            // the splat reads frameTex directly — same fast path as
+            // before this change.
+            let splatSource: MTLTexture
+            if let blur = aaBlur, let aaTexs = aaTextures {
+                let scratch = aaTexs[slot]
+                blur.encode(commandBuffer: cmd, sourceTexture: frameTex, destinationTexture: scratch)
+                splatSource = scratch
+            } else {
+                splatSource = frameTex
+            }
+
             let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
             let weight = qualityWeight(scores[idx])
             if let enc = cmd.makeComputeCommandEncoder() {
                 enc.setComputePipelineState(drizzlePSO)
-                enc.setTexture(frameTex, index: 0)
+                enc.setTexture(splatSource, index: 0)
                 enc.setTexture(accum, index: 1)
                 enc.setTexture(wtTex, index: 2)
                 var p = LuckyDrizzleParamsCPU(
