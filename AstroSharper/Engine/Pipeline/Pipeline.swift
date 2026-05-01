@@ -592,7 +592,7 @@ final class Pipeline {
     /// 2026-04-29: stacked output had p1=0, p99=0.973 with crushed
     /// shadows + blown rims). Skipping is the right call there — the
     /// bare stack already looks natural.
-    func applyOutputRemap(input: MTLTexture, whiteCap whiteCapOverride: Float? = nil, enabled: Bool = true) -> MTLTexture {
+    func applyOutputRemap(input: MTLTexture, whiteCap whiteCapOverride: Float? = nil, enabled: Bool = true, gammaOverride: Float? = nil) -> MTLTexture {
         let w = input.width, h = input.height
         let outDesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: input.pixelFormat, width: w, height: h, mipmapped: false
@@ -606,20 +606,22 @@ final class Pipeline {
             return copyTexture(input, into: output)
         }
 
-        // Subject-aware tone (2026-05-01). User bracket on lunar + jupiter
-        // confirmed:
-        //   lunar (wide-range, median ≥ 0.30): bare accumulator IS the right
-        //     output — gamma 1.0 / no offset preferred over every other
-        //     bracket value. Identity is correct.
-        //   jupiter (dark-dominated, median < 0.30): bare accumulator was
-        //     too bright; gamma 1.3 picked as the favourite. That's a pure
-        //     midtone compression, no clamping → no detail loss.
+        // Subject-aware tone (re-validated 2026-05-01 on the corrected sRGB
+        // swap chain — see PreviewView commit 582e5d8).
+        //   wide-bright (solar Ha, lunar close-up): stretch + γ=2.5 — same
+        //     formula the live preview's auto path uses, so the saved TIF
+        //     carries the tone the user saw on screen during stacking.
+        //   dark-dominated bright peak (Jupiter / Saturn / Mars): bare
+        //     accumulator. Earlier γ=1.3 default was an eye-tune on the
+        //     pre-fix display chain; once the chain matched Preview.app,
+        //     the bracket pick collapsed to "no bake at all".
+        //   highlight peak ≤ 0.5 (lunar full disc): bare accumulator (early
+        //     return below).
         //
-        // Implementation: reuse the existing apply_auto_stretch kernel with
-        // blackPoint=0, scale=1, whiteCap=1, gamma=1.3 — i.e. just `pow(v, gamma)`
-        // per pixel. The kernel's whiteCap clamp at 1.0 leaves all in-range
-        // values untouched (only would-clamp negative-resulting overshoots,
-        // which gamma > 1 doesn't produce).
+        // Two of three branches now want bare accumulator. The bright-peak
+        // branch is preserved as an explicit identity (γ=1.0, scale=1) so
+        // future bracket runs via --bake-gamma can still exercise the dark-
+        // dominated path without rerouting through the wide-bright branch.
         //
         // Backwards-compat: `whiteCapOverride` from --white-cap CLI flag
         // overrides the gamma-only path with the legacy hard-clamp stretch.
@@ -672,21 +674,35 @@ final class Pipeline {
             gamma = 2.5
         } else if pts.white > 0.50 {
             // Bright peak + dark-dominated median: small planet on dark
-            // sky (Jupiter / Saturn / Mars). User-picked γ=1.3 — pure
-            // midtone darkening, no clamp, preserves all detail.
-            // Verified on jupiter (p998=0.717 → 0.654).
-            NSLog("LuckyStack: subject-aware tone bright-peak mode (median=%.3f white=%.3f → gamma 1.3)",
+            // sky (Jupiter / Saturn / Mars). γ=1.0 = bare accumulator —
+            // user-picked /tmp/gamma-recheck/jupiter-03-identity-g1.0
+            // on the corrected display (2026-05-01), preferred over the
+            // previous γ=1.3 default which read as too punchy once the
+            // sRGB swap chain stopped under-encoding.
+            NSLog("LuckyStack: subject-aware tone bright-peak mode (median=%.3f white=%.3f → gamma 1.0 / identity)",
                   pts.median, pts.white)
             blackPoint = 0
             scale = 1.0
             whiteCap = 1.0
-            gamma = 1.3
+            gamma = 1.0
         } else {
             // Highlight peak ≤ 0.5 — lunar full disc, well-exposed wide.
             // Bare accumulator is what the user wants.
             NSLog("LuckyStack: subject-aware tone identity mode (median=%.3f white=%.3f → no change)",
                   pts.median, pts.white)
             return copyTexture(input, into: output)
+        }
+
+        // Manual override (re-validation bracket): replaces whichever
+        // subject-aware gamma was just selected, keeping the stretch /
+        // routing decision intact. Skipped in identity mode (early
+        // return above) since there's no gamma to override there.
+        let finalGamma: Float
+        if let g = gammaOverride {
+            finalGamma = g
+            NSLog("LuckyStack: bake-gamma override → %.2f (was %.2f)", g, gamma)
+        } else {
+            finalGamma = gamma
         }
 
         guard let cmdBuf = commandQueue.makeCommandBuffer(),
@@ -700,7 +716,7 @@ final class Pipeline {
             blackPoint: blackPoint,
             scale: scale,
             whiteCap: whiteCap,
-            gamma: gamma
+            gamma: finalGamma
         )
         enc.setBytes(&p, length: MemoryLayout<AutoStretchParamsCPU>.stride, index: 0)
         let (tgC, tgS) = dispatchThreadgroups(for: output, pso: stretchPSO)

@@ -282,6 +282,15 @@ struct LuckyStackOptions {
     /// lunar but slightly bright on planetary).
     var disableOutputRemap: Bool = false
 
+    /// Manual bake-gamma override. nil = subject-aware defaults (2.5
+    /// for wide-bright, 1.3 for dark-dominated). When set, replaces
+    /// the gamma value in whichever branch fires while keeping the
+    /// stretch + routing logic intact. Used by the post-2026-05-01
+    /// re-validation bracket: the prior tone defaults were eye-tuned
+    /// on a slightly off display chain, so this exposes the gamma as
+    /// a knob without reshuffling the routing thresholds.
+    var bakeGammaOverride: Float? = nil
+
     /// Dual-stage denoise around the auto-PSF + Wiener path (Block C.5).
     /// Pre-denoise (default 0 = off) wraps the input BEFORE PSF
     /// estimation + deconvolution — suppresses noise so the limb
@@ -864,7 +873,8 @@ enum LuckyStack {
                 final = pipeline.applyOutputRemap(
                     input: final,
                     whiteCap: options.outputWhiteCap.map { Float($0) },
-                    enabled: !options.disableOutputRemap
+                    enabled: !options.disableOutputRemap,
+                    gammaOverride: options.bakeGammaOverride
                 )
 
                 // Border crop (Block C.8). Hides the deconv edge ring

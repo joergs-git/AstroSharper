@@ -65,6 +65,9 @@ enum Stack {
         // Bracketed in batch tests under /tmp/brightness-comparison/.
         var outputWhiteCap: Double? = nil
         var disableOutputRemap = false
+        // Manual override of the bake gamma (re-validation bracket).
+        // nil = subject-aware defaults (2.5 wide-bright / 1.3 dark).
+        var bakeGammaOverride: Double? = nil
         // Radial Fade Filter overrides — bracket-script use only.
         var rffInnerFraction: Double? = nil
         var rffOuterFraction: Double? = nil
@@ -364,6 +367,19 @@ enum Stack {
                 // curve will be applied downstream.
                 disableOutputRemap = true
                 i += 1
+            case "--bake-gamma":
+                // Re-validation bracket: replace whichever subject-aware
+                // gamma applyOutputRemap selected (2.5 wide-bright /
+                // 1.3 dark-dominated) with this value, keeping the
+                // stretch + routing logic intact.
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v > 0.1, v <= 5.0
+                else {
+                    cliStderr("stack: --bake-gamma requires a number in (0.1, 5.0]")
+                    return 64
+                }
+                bakeGammaOverride = v
+                i += 2
             case "--border-crop":
                 // C.8 saved-view border crop in pixels. 0 disables.
                 guard i + 1 < args.count, let v = Int(args[i + 1]),
@@ -548,6 +564,7 @@ enum Stack {
             options.borderCropPixels = borderCropPixels
             options.outputWhiteCap = outputWhiteCap
             options.disableOutputRemap = disableOutputRemap
+            options.bakeGammaOverride = bakeGammaOverride.map { Float($0) }
             options.rffInnerFraction = rffInnerFraction
             options.rffOuterFraction = rffOuterFraction
             options.adaptiveAPRejectFraction = adaptiveAPRejectFraction
