@@ -257,10 +257,67 @@ enum ImageTexture {
             try ciContext.writePNGRepresentation(of: toEncode, to: url, format: .RGBA8, colorSpace: colorSpace, options: [:])
         case "jpg", "jpeg":
             try ciContext.writeJPEGRepresentation(of: toEncode, to: url, colorSpace: colorSpace, options: [:])
+        case "fits", "fit":
+            // FITS export. Re-renders the (possibly border-cropped)
+            // CIImage into a 32-bit float RGBA CPU buffer, collapses to
+            // mono via Rec. 709 luma (0.2126/0.7152/0.0722), then hands
+            // off to FitsWriter. Linear-light values flow straight
+            // through — no sRGB encode — so PixInsight / Siril round-
+            // trip the float pixel data without our display-side
+            // gamma sneaking in.
+            try writeFITS(ci: toEncode, ciContext: ciContext, url: url)
         default:
             // Unknown extension → fall back to TIFF, honouring bit depth.
             let format: CIFormat = (bitDepth == .float32) ? .RGBAf : .RGBA16
             try ciContext.writeTIFFRepresentation(of: toEncode, to: url, format: format, colorSpace: colorSpace, options: [:])
+        }
+    }
+
+    /// FITS export helper. Pixel values come straight off the CIImage
+    /// in linear-light Float32 RGBA, get collapsed to mono, and land
+    /// in `FitsImage` with `BITPIX=-32 NAXIS=2`. Metadata: filename
+    /// stamp + creator tag so external tools see what produced this.
+    private static func writeFITS(ci: CIImage, ciContext: CIContext, url: URL) throws {
+        let extent = ci.extent
+        let w = Int(extent.width.rounded())
+        let h = Int(extent.height.rounded())
+        guard w > 0, h > 0 else { throw ImageTextureError.cannotWrite(url) }
+        // 4 channels × 4 bytes each. CIContext.render writes RGBA in
+        // the supplied colorspace; sticking with linearSRGB keeps the
+        // values linear (the same domain the accumulator works in).
+        var rgba = [Float](repeating: 0, count: w * h * 4)
+        let bytesPerRow = w * 4 * MemoryLayout<Float>.size
+        let linearCS = CGColorSpace(name: CGColorSpace.linearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+        rgba.withUnsafeMutableBufferPointer { ptr in
+            guard let base = ptr.baseAddress else { return }
+            ciContext.render(
+                ci,
+                toBitmap: base,
+                rowBytes: bytesPerRow,
+                bounds: extent,
+                format: .RGBAf,
+                colorSpace: linearCS
+            )
+        }
+        // RGBA → mono (Rec. 709 luma). FITS is single-channel; mono
+        // captures most of the visible content for the typical
+        // monochrome / planetary lucky-stack output.
+        var mono = [Float](repeating: 0, count: w * h)
+        for i in 0..<(w * h) {
+            let off = i * 4
+            mono[i] = 0.2126 * rgba[off + 0]
+                    + 0.7152 * rgba[off + 1]
+                    + 0.0722 * rgba[off + 2]
+        }
+        let metadata: [String: String] = [
+            "CREATOR": "AstroSharper",
+            "OBJECT":  url.deletingPathExtension().lastPathComponent,
+        ]
+        let image = FitsImage(width: w, height: h, pixels: mono, metadata: metadata)
+        do {
+            try FitsWriter.write(image, to: url)
+        } catch {
+            throw ImageTextureError.cannotWrite(url)
         }
     }
 }
