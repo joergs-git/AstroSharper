@@ -93,25 +93,21 @@ fragment float4 display_fragment(
             return float4(1, 1, 1, 1);
         }
     }
-    // Industry-standard display chain. Two layers:
+    // Display chain — pure pass-through in the simple case.
     //
-    //   1. Optional auto-range stretch + gamma (Auto toggle ON):
-    //      stretches [p1, p99] of the texture's histogram into [0, 1]
-    //      and applies pow(., 2.5) for AS!4-style midtone darkening.
-    //      This is for previewing RAW frames (dim SER captures, deep
-    //      sky) — turn OFF when viewing already-processed TIFFs.
+    // The CAMetalLayer is tagged with sRGB colorspace (see PreviewView
+    // makeNSView), so whatever bytes we write are interpreted directly
+    // as sRGB display values. ImageTexture loads TIFFs into a DeviceRGB
+    // float CGContext, which preserves the file's sRGB-encoded byte
+    // values without re-linearising them, so the texture data already
+    // matches what Preview.app shows pixel-for-pixel — no shader gamma
+    // needed when nothing else is enabled.
     //
-    //   2. UNCONDITIONAL sRGB display encode at end (pow(., 2.2)).
-    //      The macOS compositor treats `rgba16Float` swap chains as
-    //      extended-linear: values go straight to the display panel
-    //      with no implicit gamma. Standard image viewers (Preview,
-    //      Photoshop, Lightroom) treat untagged file values as sRGB
-    //      and apply pow(., 2.2) at display to get linear luminance.
-    //      Adding pow(., 2.2) here makes our display chain match,
-    //      i.e. Auto OFF + no filters = WYSIWYG with Preview.app.
-    //
-    // The user's Brightness slider sits between (1) and (2) so its
-    // effect is on the linear data BEFORE the display encode.
+    // The optional Auto path is only for raw-data previews (SER/AVI
+    // straight from sensor): linear 16-bit values barely register on
+    // an sRGB display, so we stretch [p1, p99] into [0, 1] and apply
+    // pow(., 2.5) as an AS!4-style midtone curve. The result is in
+    // "looks-like-sRGB" space and the swap chain takes it as-is.
     if (u.autoRangeOn != 0u) {
         float3 stretched = clamp((col.rgb - u.autoBlack) * u.autoScale, 0.0, 1.0);
         col.rgb = pow(stretched, float3(u.autoGamma));
@@ -121,7 +117,6 @@ fragment float4 display_fragment(
     } else {
         col.rgb = clamp(col.rgb, 0.0, 1.0);
     }
-    col.rgb = pow(col.rgb, float3(2.2));   // sRGB display encode (always)
     return col;
 }
 

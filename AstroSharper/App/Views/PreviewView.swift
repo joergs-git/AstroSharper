@@ -222,6 +222,20 @@ private struct MetalPreviewRepresentable: NSViewRepresentable {
         let view = ZoomableMTKView(frame: .zero, device: MetalDevice.shared.device)
         view.colorPixelFormat = .rgba16Float
         view.framebufferOnly = false
+        // Tag the swap chain as plain sRGB. With `rgba16Float` the default
+        // is `extendedLinearSRGB`, which makes the compositor apply an
+        // implicit sRGB encode (pow ., 1/2.2) on the shader's output. That
+        // double-encodes any sRGB-tagged data we already loaded straight
+        // from a TIFF (CoreGraphics linearises on decode → pow back in
+        // shader → compositor encodes again), and the displayed image
+        // ends up either too dark or too bright depending on which side
+        // of the chain we touched. Setting the layer colorspace to sRGB
+        // makes the compositor a pass-through: whatever bytes the shader
+        // writes are interpreted directly as sRGB display values, exactly
+        // like Preview.app / Photoshop drawing the same TIFF.
+        if let layer = view.layer as? CAMetalLayer {
+            layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+        }
         // Drive on demand. Continuous 60 fps was redundant — the display
         // shader only changes when textures or zoom/pan do, and free-running
         // burned cycles during window resize, making large SERs feel sluggish
