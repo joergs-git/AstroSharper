@@ -94,21 +94,37 @@ fragment float4 display_fragment(
         }
     }
     // Auto-range stretch + gamma. Two-step process matching AS!4's
-    // "Auto Range" + "Brightness pow" combination, validated by user
-    // bracket (file 26_stretch_g25 picked for solar Ha):
+    // "Auto Range" + "Brightness pow" + the implicit sRGB display
+    // gamma, validated by user bracket (file 26_stretch_g25 picked
+    // for solar Ha):
     //   1. (col − p1) · autoScale → [0, 1] (stretch over the data range)
-    //   2. pow(., 2.5) → midtone darkening (high contrast on bright data
-    //      that fills most of the histogram, like solar / lunar surfaces)
-    // Then the user's Brightness slider multiplies on top (linear gain
-    // AFTER gamma — same order as AS!4's "Brightness Nx" applied on
-    // top of "pow"). Skipped entirely when autoRangeOn = 0; the slider
-    // alone still applies for users who want bare values.
+    //   2. pow(., 2.5) → midtone darkening (high contrast)
+    //   3. user's Brightness slider multiplies on top
+    //   4. sRGB display encode (pow ., 2.2) so the on-screen result
+    //      matches what an sRGB-tagged PNG of the same math looks like
+    //
+    // Step 4 is the missing piece that made the live preview look
+    // brighter / flatter than the bracket PNGs: my Python `pow(stretched,
+    // 2.5) * 255` saves to PNG, Preview.app reads it as sRGB and applies
+    // an implicit pow(., 2.2) decode at display. The Metal `rgba16Float`
+    // swap chain by default is treated as EXTENDED-LINEAR by the macOS
+    // compositor, so values written directly hit the display without
+    // that extra encode. Adding it here re-creates the de-facto PNG
+    // display chain inside the shader.
+    //
+    // Skipped entirely when autoRangeOn = 0; the slider alone still
+    // applies and the sRGB encode is also skipped so users see bare
+    // pixel values.
     if (u.autoRangeOn != 0u) {
         float3 stretched = clamp((col.rgb - u.autoBlack) * u.autoScale, 0.0, 1.0);
         col.rgb = pow(stretched, float3(u.autoGamma));
-    }
-    // Multiplicative display gain (= user's Brightness slider).
-    if (u.displayGain != 1.0) {
+        if (u.displayGain != 1.0) {
+            col.rgb = clamp(col.rgb * u.displayGain, 0.0, 1.0);
+        } else {
+            col.rgb = clamp(col.rgb, 0.0, 1.0);
+        }
+        col.rgb = pow(col.rgb, float3(2.2));   // sRGB display encode
+    } else if (u.displayGain != 1.0) {
         col.rgb = clamp(col.rgb * u.displayGain, 0.0, 1.0);
     } else {
         col.rgb = clamp(col.rgb, 0.0, 1.0);
