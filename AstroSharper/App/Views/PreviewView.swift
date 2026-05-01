@@ -1087,53 +1087,50 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         var splitX: Float
         var hasAfter: UInt32
         var autoBlack: Float
+        var autoScale: Float
+        var autoGamma: Float
         var displayGain: Float
         var autoRangeOn: UInt32
     }
 
-    // Cached auto-range parameters. Recomputed only when beforeTex changes
-    // (NOT every draw call).
-    private var displayBlack: Float = 0.0     // p1 of the texture's luma histogram
-    private var displayAutoGain: Float = 1.0  // chosen so (p99 − p1) maps to 0.85
+    // Cached auto-range params. Recomputed only when beforeTex changes
+    // (NOT every draw call). Match AS!4's "Auto Range + Brightness pow"
+    // formula picked by the user bracket (file 26_stretch_g25):
+    //   stretched = clamp((col − autoBlack) · autoScale, 0, 1)
+    //   displayed = pow(stretched, autoGamma)
+    private var displayBlack: Float = 0.0    // = p1 of the luma histogram
+    private var displayScale: Float = 1.0    // = 1 / max(0.005, p99 − p1)
+    private var displayGamma: Float = 2.5    // user-bracket pick — fixed for now
 
-    /// Recompute auto-range black point + gain for the current `beforeTex`.
-    /// Cheap (~5 ms via the existing 256² downsample + CPU sort).
-    ///
-    /// Two parameters drive the display look:
-    ///   `autoBlack` — texture's p1 luma. Subtracted in the shader so the
-    ///       dark background / sky becomes pure black (recovers the
-    ///       contrast AS!4's "Auto Range" provides — without this, dim
-    ///       captures show as flat mid-grey because their data lives in
-    ///       a narrow slice of [0, 1]).
-    ///   `autoGain` — chosen so the texture's p99 maps to ~0.85 of the
-    ///       displayed range AFTER black-point subtraction:
-    ///         autoGain = 0.85 / max(0.005, p99 − p1)
-    ///       Clamped to [0.5, 64] so degenerate inputs (constant texture)
-    ///       don't blow up the multiplier.
+    /// Recompute auto-range params for the current `beforeTex`. Cheap
+    /// (~5 ms via the existing 256² downsample + sort). Same formula
+    /// as the user's picked file `26_stretch_g25.png` from the
+    /// /tmp/display-bracket/ comparison: stretch [p1, p99] → [0, 1]
+    /// then `pow(., 2.5)` to darken midtones into AS!4-style contrast.
     ///
     /// Examples:
-    ///   solar Ha (p1=0.05, p99=0.65) → autoBlack=0.05, autoGain=1.42
-    ///     → 0.5 pixel: (0.5−0.05)·1.42 = 0.64 (light grey, contrasty)
-    ///     → 0.65 pixel: 0.85 (near-white, slight highlight headroom)
-    ///   DSO (p1=0.001, p99=0.05) → autoBlack=0.001, autoGain=17
-    ///     → 0.04 pixel: (0.04−0.001)·17 = 0.66 (visible)
-    ///   Already-bright (p1=0.5, p99=0.95) → autoBlack=0.5, autoGain=1.89
-    ///     → 0.7 pixel: (0.7−0.5)·1.89 = 0.38 (mid-grey)
+    ///   solar Ha (p1=0.008, p99=0.89): autoScale = 1.13, gamma = 2.5
+    ///     → 0.67 raw: (0.67−0.008)·1.13 = 0.748 → pow(0.748, 2.5) = 0.484
+    ///       (mid-grey disc face — matches AS!4 reference)
+    ///   Jupiter (p1=0, p99=0.6): autoScale = 1.67, gamma = 2.5
+    ///     → 0.5 raw: 0.83 stretched → pow(0.83, 2.5) = 0.625 (visible disc)
+    ///   Lunar (p1=0.05, p99=0.5): autoScale = 2.22, gamma = 2.5
+    ///     → 0.3 raw: 0.555 stretched → pow(0.555, 2.5) = 0.229 (dim mid)
+    ///       (lunar gets darker than user wants if Auto is on by default
+    ///       on lunar — they can dial Brightness up or toggle Auto off)
     func refreshDisplayAutoRange() {
         guard let tex = beforeTex else {
-            displayBlack = 0
-            displayAutoGain = 1.0
-            return
+            displayBlack = 0; displayScale = 1; return
         }
         if let pts = pipeline.computeLumaPercentiles(
             input: tex, lowPercentile: 0.01, highPercentile: 0.99
         ) {
             displayBlack = max(0, pts.black)
             let range = max(Float(0.005), pts.white - pts.black)
-            displayAutoGain = max(0.5, min(64.0, 0.85 / range))
+            displayScale = 1.0 / range
         } else {
             displayBlack = 0
-            displayAutoGain = 1.0
+            displayScale = 1.0
         }
     }
 
@@ -1160,13 +1157,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         // else 0 (fully "before"). The display shader already handles both paths.
         let split: Float = app.showAfter ? 1.0 : 0.0
         let autoOn = app.displayAutoRange
-        // When auto is on: subtract the texture's p1 (so dark background
-        // becomes black) AND multiply by autoGain (so [p1, p99] maps to
-        // [0, ~0.85]) — matches AS!4's "Auto Range" + "Brightness 1×"
-        // baseline. The user's slider multiplies further on top.
-        let auto: Float = autoOn ? displayAutoGain : 1.0
         let user: Float = Float(max(0.1, app.displayGain))
-        let gain: Float = max(0.01, auto * user)
         var uniforms = DisplayUniforms(
             texSize: SIMD2(tw, th),
             viewSize: SIMD2(vw, vh),
@@ -1175,7 +1166,9 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             splitX: split,
             hasAfter: afterTex == nil ? 0 : 1,
             autoBlack: autoOn ? displayBlack : 0,
-            displayGain: gain,
+            autoScale: autoOn ? displayScale : 1,
+            autoGamma: autoOn ? displayGamma : 1,
+            displayGain: user,
             autoRangeOn: autoOn ? 1 : 0
         )
 

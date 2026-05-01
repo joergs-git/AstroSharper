@@ -651,18 +651,26 @@ final class Pipeline {
                 NSLog("LuckyStack: legacy whiteCap stretch skipped (well-exposed)")
                 return copyTexture(input, into: output)
             }
+        } else if pts.white > 0.50 && pts.median >= 0.30 {
+            // Wide-range bright (solar Ha, lunar close-up, terrestrial-
+            // light surfaces). Median high → most pixels are mid-bright.
+            // White high → already filling most of the histogram. The
+            // user-picked stretch + γ=2.0 reveals contrast similar to
+            // AS!4 "Brightness pow" mode. γ=2.0 instead of the display's
+            // 2.5 leaves headroom for further Tone Curve adjustment.
+            // Verified on solar Ha SER per 2026-05-01 bracket (file 26).
+            NSLog("LuckyStack: subject-aware tone wide-bright mode (median=%.3f white=%.3f → stretch+γ=2.0)",
+                  pts.median, pts.white)
+            blackPoint = pts.black
+            let range = max(Float(0.005), pts.white - pts.black)
+            scale = 1.0 / range
+            whiteCap = 1.0
+            gamma = 2.0
         } else if pts.white > 0.50 {
-            // Highlight peak above 0.5 — bright planet on dark sky case.
-            // Empirical user pick: gamma 1.3 (no clamp, no scale — pure
-            // midtone darkening). Verified on jupiter (p998=0.717 → 0.654).
-            //
-            // Median alone was the wrong gate (2026-05-01 false positive):
-            // BiggSky lunar lands at median=0.245 (large dark-sky border)
-            // which would have triggered gamma 1.3 even though the lunar
-            // user pick was identity. Highlight-peak gate cleanly separates
-            // "tiny planet on dark sky" (peaks bright, want darken) from
-            // "lunar / solar disc filling most of frame" (peaks moderate,
-            // want identity).
+            // Bright peak + dark-dominated median: small planet on dark
+            // sky (Jupiter / Saturn / Mars). User-picked γ=1.3 — pure
+            // midtone darkening, no clamp, preserves all detail.
+            // Verified on jupiter (p998=0.717 → 0.654).
             NSLog("LuckyStack: subject-aware tone bright-peak mode (median=%.3f white=%.3f → gamma 1.3)",
                   pts.median, pts.white)
             blackPoint = 0
@@ -670,7 +678,7 @@ final class Pipeline {
             whiteCap = 1.0
             gamma = 1.3
         } else {
-            // Highlight peak ≤ 0.5 — lunar / solar / textured subject.
+            // Highlight peak ≤ 0.5 — lunar full disc, well-exposed wide.
             // Bare accumulator is what the user wants.
             NSLog("LuckyStack: subject-aware tone identity mode (median=%.3f white=%.3f → no change)",
                   pts.median, pts.white)

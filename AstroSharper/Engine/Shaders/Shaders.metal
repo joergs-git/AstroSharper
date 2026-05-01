@@ -15,14 +15,16 @@ struct DisplayUniforms {
     float2 panPx;       // pan offset in image pixels
     float  splitX;      // 0..1 — fraction from left showing "after"; outside: before
     uint   hasAfter;    // 0 = only show before
-    // Display-only auto-range. Subtracts `autoBlack` (= p1 of the
-    // texture's luma histogram) so the dark background lands at zero
-    // and the displayed range starts using the full [0, 1] gamut. Then
-    // multiplies by `displayGain` (= autoGain × userGain). Saved files
-    // and the underlying texture are unchanged. Setting autoRangeOn = 0
-    // skips the black-point shift; the gain alone still applies (so the
-    // user's brightness slider works without the auto stretch).
+    // Display-only auto-range stretch + gamma curve. AS!4-equivalent
+    // path: (col − autoBlack) · autoScale → [0, 1] → pow(., autoGamma)
+    // → · displayGain. autoBlack/autoScale are computed from the
+    // current texture's percentiles; autoGamma defaults to 2.5 (user
+    // bracket pick for solar Ha) and is fixed in the shader for now.
+    // displayGain is the user's Brightness slider. autoRangeOn = 0 →
+    // pass through, slider alone still applies. Saved files unaffected.
     float  autoBlack;
+    float  autoScale;
+    float  autoGamma;
     float  displayGain;
     uint   autoRangeOn;
 };
@@ -91,14 +93,21 @@ fragment float4 display_fragment(
             return float4(1, 1, 1, 1);
         }
     }
-    // Auto-range black-point subtract: sky / dark border lands at 0
-    // so the visible dynamic range starts from there instead of from
-    // wherever the histogram begins. Skipped when autoRangeOn = 0.
+    // Auto-range stretch + gamma. Two-step process matching AS!4's
+    // "Auto Range" + "Brightness pow" combination, validated by user
+    // bracket (file 26_stretch_g25 picked for solar Ha):
+    //   1. (col − p1) · autoScale → [0, 1] (stretch over the data range)
+    //   2. pow(., 2.5) → midtone darkening (high contrast on bright data
+    //      that fills most of the histogram, like solar / lunar surfaces)
+    // Then the user's Brightness slider multiplies on top (linear gain
+    // AFTER gamma — same order as AS!4's "Brightness Nx" applied on
+    // top of "pow"). Skipped entirely when autoRangeOn = 0; the slider
+    // alone still applies for users who want bare values.
     if (u.autoRangeOn != 0u) {
-        col.rgb = max(float3(0.0), col.rgb - u.autoBlack);
+        float3 stretched = clamp((col.rgb - u.autoBlack) * u.autoScale, 0.0, 1.0);
+        col.rgb = pow(stretched, float3(u.autoGamma));
     }
-    // Multiplicative display gain. Combines the per-texture auto value
-    // with the toolbar Brightness slider. Identity at gain=1.0.
+    // Multiplicative display gain (= user's Brightness slider).
     if (u.displayGain != 1.0) {
         col.rgb = clamp(col.rgb * u.displayGain, 0.0, 1.0);
     } else {
