@@ -416,6 +416,53 @@ kernel void apply_brightness_contrast(
     output.write(float4(v, c.a), gid);
 }
 
+// MARK: - Pre-stack calibration (Block D.1)
+//
+// Apply the standard astrophoto calibration chain per pixel:
+//
+//   calibrated = (light − masterDark) / masterFlatNormalized
+//
+// `masterFlatNormalized` MUST already have its global mean ≈ 1.0 so
+// dividing preserves overall brightness (CPU side: Calibration.buildMasterFlat).
+// Pixels where the flat is at-or-below `flatEpsilon` pass through
+// without the divide so a dust-blocked region doesn't blow up to
+// infinity. Negative results clamp to zero so downstream sqrt / log
+// stages don't NaN.
+//
+// `hasDark` / `hasFlat` flags let one kernel handle three cases:
+// dark-only, flat-only, both. Dark and flat textures (when present)
+// must match the light texture's dimensions.
+
+struct CalibrationParams {
+    uint  hasDark;
+    uint  hasFlat;
+    float flatEpsilon;
+};
+
+kernel void apply_calibration(
+    texture2d<float, access::read>  light [[texture(0)]],
+    texture2d<float, access::read>  dark  [[texture(1)]],
+    texture2d<float, access::read>  flat  [[texture(2)]],
+    texture2d<float, access::write> outTex [[texture(3)]],
+    constant CalibrationParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= outTex.get_width() || gid.y >= outTex.get_height()) return;
+    float4 l = light.read(gid);
+    float3 v = l.rgb;
+    if (p.hasDark != 0u) {
+        v -= dark.read(gid).rgb;
+    }
+    if (p.hasFlat != 0u) {
+        float3 f = flat.read(gid).rgb;
+        // Per-channel divide where the flat is above epsilon.
+        v.x = (f.x > p.flatEpsilon) ? (v.x / f.x) : v.x;
+        v.y = (f.y > p.flatEpsilon) ? (v.y / f.y) : v.y;
+        v.z = (f.z > p.flatEpsilon) ? (v.z / f.z) : v.z;
+    }
+    outTex.write(float4(max(float3(0), v), l.a), gid);
+}
+
 // MARK: - Highlights / Shadows
 //
 // Hue-preserving tone mask: scales each pixel's RGB by the new-luma /

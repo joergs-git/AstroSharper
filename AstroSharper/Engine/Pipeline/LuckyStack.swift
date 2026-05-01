@@ -148,6 +148,18 @@ struct LuckyStackOptions {
     /// reduced-coverage caveat.
     var cropToCommonArea: Bool = true
 
+    /// Pre-stack calibration (Block D.1). Master dark / master flat
+    /// frames applied per-pixel before the quality grade + accumulator,
+    /// using `apply_calibration` Metal kernel. Both URLs are optional;
+    /// passing only the dark gives bias / dark subtraction; passing only
+    /// the flat gives vignetting + dust correction. The master frames
+    /// are loaded once at runner init, kept resident as MTLTextures, and
+    /// applied per frame after the SER unpack and before grading.
+    /// Master flat MUST be normalised (global mean ≈ 1.0) — see
+    /// Calibration.buildMasterFlat for the math the master should match.
+    var masterDarkURL: URL? = nil
+    var masterFlatURL: URL? = nil
+
     /// Per-channel stacking (Path B). When true, OSC Bayer sources are
     /// split into R / G / B mono streams BEFORE alignment, each
     /// channel is aligned and stacked independently against its own
@@ -406,14 +418,38 @@ enum LuckyStack {
         )
         guard !plan.scores.isEmpty else { return nil }
 
-        // Score-based green/yellow split among the surviving cells.
+        // Block C.3 v1: continuous LAPD-rank-weighted tile mask
+        // (replaces the previous 1.0 / 0.5 / 0.0 step). Each surviving
+        // tile's deconv contribution is proportional to its LAPD-score
+        // percentile within the surviving set. The brightest, most
+        // detail-rich tile stays at 1.0 (full deconv) and the dimmest
+        // surviving tile floors at 0.40 (gentle deconv) — preserves
+        // the existing "yellow ≥ red" guarantee while letting the
+        // bilinear-sampling kernel produce smooth tile boundaries
+        // instead of a visible 0.5 → 1.0 step. Rejected (RED) cells
+        // stay at 0.0; the kernel skips those entirely.
+        //
+        // Math:
+        //   rank ∈ [0, 1]  (0 = lowest LAPD among survivors, 1 = highest)
+        //   mask = 0.40 + 0.60 · sqrt(rank)
+        //   sqrt() biases toward the brighter end so the strongest
+        //   features get near-full deconv while the dimmest survivors
+        //   still see meaningful contribution.
+        //
+        // Per-tile σ estimation (true per-tile PSF) deferred — running
+        // multiple Wiener passes at quantized σ levels was traded off
+        // against the ~3× runtime cost; the continuous mask captures
+        // most of the visual win at a fraction of the cost.
         let surviving = plan.mask.enumerated().compactMap { $1 ? $0 : nil }
         var mask = [Float](repeating: 0, count: safeGrid * safeGrid) // RED default
         if !surviving.isEmpty {
-            let scoresOfSurviving = surviving.map { plan.scores[$0] }.sorted()
-            let medianScore = scoresOfSurviving[scoresOfSurviving.count / 2]
-            for cellIdx in surviving {
-                mask[cellIdx] = plan.scores[cellIdx] >= medianScore ? 1.0 : 0.5
+            // Sort surviving cells by score, ascending. rank/n maps each
+            // cell to a [0, 1] percentile.
+            let sortedSurviving = surviving.sorted { plan.scores[$0] < plan.scores[$1] }
+            let denom = Float(max(1, sortedSurviving.count - 1))
+            for (rank, cellIdx) in sortedSurviving.enumerated() {
+                let r = Float(rank) / denom
+                mask[cellIdx] = 0.40 + 0.60 * sqrt(r)
             }
         }
 
@@ -828,6 +864,7 @@ private final class LuckyRunner {
     let bayer16PSO: MTLComputePipelineState
     let bayer8PSO: MTLComputePipelineState
     let rgb8PSO: MTLComputePipelineState     // packed-RGB SER (3 bytes/pixel, 8-bit)
+    let calibrationPSO: MTLComputePipelineState   // D.1 dark/flat applier
     let qualityPSO: MTLComputePipelineState
     let lumaPSO: MTLComputePipelineState
     let accumPSO: MTLComputePipelineState
@@ -861,6 +898,13 @@ private final class LuckyRunner {
     let rgbBuffers: [MTLBuffer]      // empty when !isRGB
     let frameTextures: [MTLTexture]      // unpacked rgba16Float, paired with staging
     let stagingSemaphore: DispatchSemaphore
+
+    // Calibration (Block D.1). nil unless masterDarkURL / masterFlatURL
+    // are set on the options. Loaded once at runner init; applied per
+    // frame after the unpack step via the apply_calibration kernel.
+    let masterDarkTex: MTLTexture?
+    let masterFlatTex: MTLTexture?
+    let calibrationScratch: [MTLTexture]   // empty when no calibration enabled
 
     // Quality grading buffers.
     let quality: QualityGrader
@@ -903,6 +947,7 @@ private final class LuckyRunner {
         self.bayer16PSO  = Self.makePSO(library: lib, device: device, fn: "unpack_bayer16_to_rgba")
         self.bayer8PSO   = Self.makePSO(library: lib, device: device, fn: "unpack_bayer8_to_rgba")
         self.rgb8PSO     = Self.makePSO(library: lib, device: device, fn: "unpack_rgb8_to_rgba")
+        self.calibrationPSO = Self.makePSO(library: lib, device: device, fn: "apply_calibration")
         self.qualityPSO  = Self.makePSO(library: lib, device: device, fn: "quality_partials")
         self.lumaPSO     = Self.makePSO(library: lib, device: device, fn: "extract_luma_downsample")
         self.accumPSO    = Self.makePSO(library: lib, device: device, fn: "lucky_accumulate")
@@ -943,6 +988,49 @@ private final class LuckyRunner {
             Self.makeFrameTexture(device: dev, w: W, h: H)
         }
         self.stagingSemaphore = DispatchSemaphore(value: options.stagingPoolSize)
+
+        // Block D.1: load master frames if URLs supplied. ImageTexture.load
+        // produces rgba16Float matching frameTextures' format. Failure
+        // logs + falls back to no-calibration so a missing / corrupt
+        // master doesn't abort the whole stack.
+        let darkLoaded = options.masterDarkURL.flatMap { url -> MTLTexture? in
+            do { return try ImageTexture.load(url: url, device: dev) }
+            catch {
+                NSLog("Calibration: failed to load master dark %@ — %@",
+                      url.lastPathComponent, String(describing: error))
+                return nil
+            }
+        }
+        let flatLoaded = options.masterFlatURL.flatMap { url -> MTLTexture? in
+            do { return try ImageTexture.load(url: url, device: dev) }
+            catch {
+                NSLog("Calibration: failed to load master flat %@ — %@",
+                      url.lastPathComponent, String(describing: error))
+                return nil
+            }
+        }
+        // Dimension-match check. SER vs master mismatch → drop the master
+        // (per-pixel kernel needs identical dimensions).
+        func sized(_ t: MTLTexture?) -> MTLTexture? {
+            guard let t else { return nil }
+            if t.width == W && t.height == H { return t }
+            NSLog("Calibration: master dimensions %dx%d ≠ SER %dx%d — disabled",
+                  t.width, t.height, W, H)
+            return nil
+        }
+        self.masterDarkTex = sized(darkLoaded)
+        self.masterFlatTex = sized(flatLoaded)
+        let calibActive = (self.masterDarkTex != nil) || (self.masterFlatTex != nil)
+        self.calibrationScratch = calibActive
+            ? (0..<options.stagingPoolSize).map { _ in
+                Self.makeFrameTexture(device: dev, w: W, h: H)
+            }
+            : []
+        if calibActive {
+            NSLog("Calibration: ACTIVE (dark=%@ flat=%@)",
+                  options.masterDarkURL?.lastPathComponent ?? "—",
+                  options.masterFlatURL?.lastPathComponent ?? "—")
+        }
 
         self.quality = QualityGrader(device: dev, frameCount: reader.header.frameCount, w: W, h: H, pso: qualityPSO)
     }
@@ -1033,12 +1121,19 @@ private final class LuckyRunner {
         slot: Int,
         frameTex: MTLTexture
     ) {
+        let calibActive = !calibrationScratch.isEmpty
+        // When calibration is on, decode into a SCRATCH texture so the
+        // calibration kernel can read it as input while writing to the
+        // proper frameTex. When off, decode directly into frameTex
+        // (existing behaviour, zero overhead).
+        let unpackTarget = calibActive ? calibrationScratch[slot] : frameTex
+
         if isRGB {
             let buf = rgbBuffers[slot]
             reader.withFrameBytes(at: frameIndex) { ptr, len in
                 memcpy(buf.contents(), ptr, len)
             }
-            encodeUnpackRGB(commandBuffer: cmd, buffer: buf, frameTex: frameTex)
+            encodeUnpackRGB(commandBuffer: cmd, buffer: buf, frameTex: unpackTarget)
         } else {
             let staging = stagingTextures[slot]
             reader.withFrameBytes(at: frameIndex) { ptr, _ in
@@ -1048,7 +1143,31 @@ private final class LuckyRunner {
                     mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
                 )
             }
-            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: frameTex)
+            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: unpackTarget)
+        }
+
+        if calibActive {
+            // apply_calibration reads light + dark + flat, writes
+            // (light − dark) / flat into frameTex. Bound textures must
+            // exist regardless of which masters are present (the kernel's
+            // hasDark/hasFlat flags drive the per-pixel branch); pass
+            // the unpackTarget itself as a stand-in when a master is
+            // missing — flagged off, never read in that branch.
+            guard let enc = cmd.makeComputeCommandEncoder() else { return }
+            enc.setComputePipelineState(calibrationPSO)
+            enc.setTexture(unpackTarget, index: 0)
+            enc.setTexture(masterDarkTex ?? unpackTarget, index: 1)
+            enc.setTexture(masterFlatTex ?? unpackTarget, index: 2)
+            enc.setTexture(frameTex, index: 3)
+            var p = CalibrationParamsCPU(
+                hasDark: masterDarkTex != nil ? 1 : 0,
+                hasFlat: masterFlatTex != nil ? 1 : 0,
+                flatEpsilon: 1e-4
+            )
+            enc.setBytes(&p, length: MemoryLayout<CalibrationParamsCPU>.stride, index: 0)
+            let (tgC, tgS) = dispatchThreadgroups(for: frameTex, pso: calibrationPSO)
+            enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+            enc.endEncoding()
         }
     }
 
@@ -2257,6 +2376,13 @@ private struct QualityPartialResult {
 private struct LuckyAccumParams {
     var weight: Float
     var shift: SIMD2<Float>
+}
+
+/// Mirrors CalibrationParams in Shaders.metal exactly.
+private struct CalibrationParamsCPU {
+    var hasDark: UInt32
+    var hasFlat: UInt32
+    var flatEpsilon: Float
 }
 
 private struct UnpackParamsCPU {

@@ -72,6 +72,10 @@ enum Stack {
         var adaptiveAPRejectFraction: Double = 0.20
         // F.2 common-area auto-crop. Default ON for AS!4 parity.
         var cropToCommonArea = true
+        // D.1 pre-stack calibration. Master frames provided as paths to
+        // already-built TIFFs (typical PixInsight / ASTAP workflow output).
+        var masterDarkURL: URL? = nil
+        var masterFlatURL: URL? = nil
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -293,6 +297,20 @@ enum Stack {
                     return 64
                 }
                 autoPSFSNR = v
+                i += 2
+            case "--master-dark":
+                guard i + 1 < args.count else {
+                    cliStderr("stack: --master-dark requires a path to a master dark TIFF")
+                    return 64
+                }
+                masterDarkURL = URL(fileURLWithPath: args[i + 1])
+                i += 2
+            case "--master-flat":
+                guard i + 1 < args.count else {
+                    cliStderr("stack: --master-flat requires a path to a normalised master flat TIFF (mean ≈ 1.0)")
+                    return 64
+                }
+                masterFlatURL = URL(fileURLWithPath: args[i + 1])
                 i += 2
             case "--no-common-crop":
                 // F.2: keep the full-resolution edges with reduced-coverage
@@ -534,6 +552,8 @@ enum Stack {
             options.rffOuterFraction = rffOuterFraction
             options.adaptiveAPRejectFraction = adaptiveAPRejectFraction
             options.cropToCommonArea = cropToCommonArea
+            options.masterDarkURL = masterDarkURL
+            options.masterFlatURL = masterFlatURL
             options.useAutoKeepPercent = useAutoKeep && !keepWasExplicit
             options.denoisePrePercent = denoisePrePercent
             options.denoisePostPercent = denoisePostPercent

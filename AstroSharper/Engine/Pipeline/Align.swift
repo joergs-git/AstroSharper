@@ -80,11 +80,54 @@ enum Align {
     /// `+shift` to `frame` aligns it to `reference`). Convenience wrapper —
     /// when correlating many frames against the same reference, prefer the
     /// `computeFFT` + `phaseCorrelate(refFFT:frameFFT:)` path.
+    ///
+    /// Runs the existing fine-resolution (up to 1024²) phase-correlation
+    /// and an independent coarse 256² pass; if the two disagree by more
+    /// than `multiLevelTolerancePx`, the coarse value is returned. The
+    /// fine pass is sub-pixel-accurate via parabolic fit, but its
+    /// cross-power peak can lock onto a noise / aliased basin on
+    /// low-contrast frames or sources with periodic features. The coarse
+    /// pass operates on a heavily down-sampled buffer where those
+    /// failure modes are filtered out by the Hann window's leakage
+    /// suppression. Robustness check, not precision improvement.
     static func phaseCorrelate(reference: MTLTexture, frame: MTLTexture) -> AlignShift? {
-        guard let r = computeFFT(of: reference),
-              let f = computeFFT(of: frame),
-              r.log2n == f.log2n else { return nil }
-        return phaseCorrelate(refFFT: r, frameFFT: f)
+        let fine: AlignShift?
+        if let r = computeFFT(of: reference),
+           let f = computeFFT(of: frame),
+           r.log2n == f.log2n {
+            fine = phaseCorrelate(refFFT: r, frameFFT: f)
+        } else {
+            fine = nil
+        }
+        // Coarse 256² independent estimate (Block B.5 v0).
+        guard let coarseRefBox = luminanceBuffer(from: reference, size: 256),
+              let coarseFrameBox = luminanceBuffer(from: frame, size: 256) else {
+            return fine
+        }
+        var c0 = coarseRefBox.wrappedValue
+        var c1 = coarseFrameBox.wrappedValue
+        prepareBuffer(&c0, size: 256)
+        prepareBuffer(&c1, size: 256)
+        guard let coarse256 = phaseCorrelateBuffers(reference: c0, frame: c1, log2n: 8) else {
+            return fine
+        }
+        let sx = Float(reference.width) / 256.0
+        let sy = Float(reference.height) / 256.0
+        let coarse = AlignShift(dx: coarse256.dx * sx, dy: coarse256.dy * sy)
+
+        // No fine pass available → coarse-only fallback.
+        guard let fineShift = fine else { return coarse }
+        // Mismatch detector: coarse vs fine disagreement implies the fine
+        // peak is unreliable. Tolerance 5 px tracks typical capture
+        // jitter; fine/coarse should otherwise agree to <1 px.
+        let multiLevelTolerancePx: Float = 5.0
+        if abs(fineShift.dx - coarse.dx) > multiLevelTolerancePx
+            || abs(fineShift.dy - coarse.dy) > multiLevelTolerancePx {
+            NSLog("Align: multi-level mismatch (fine=%.1f,%.1f coarse=%.1f,%.1f) — using coarse",
+                  fineShift.dx, fineShift.dy, coarse.dx, coarse.dy)
+            return coarse
+        }
+        return fineShift
     }
 
     /// Phase-correlate two raw float buffers of size n×n (n = 1 << log2n).
