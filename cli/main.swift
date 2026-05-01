@@ -39,8 +39,7 @@ case "stack":
     exitCode = await Stack.run(args: subargs)
 
 case "validate":
-    cliStderr("validate: not yet implemented (F3 regression harness work)")
-    exitCode = 2
+    exitCode = await Validate.run(args: subargs)
 
 case "version", "--version", "-v":
     print("astrosharper \(CLIInfo.version) — \(CLIInfo.gitDescription)")

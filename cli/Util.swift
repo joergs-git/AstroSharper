@@ -41,9 +41,12 @@ enum Usage {
               Run the lucky-stack pipeline headless. (Coming with the
               SourceReader-fed accumulator refactor.)
 
-          validate <testimages-dir>
-              Run the regression suite against a TESTIMAGES tree and
-              print pass/fail metrics. (Coming with F3.)
+          validate <testimages-dir> [--regenerate] [--filter X] [--quiet]
+              Run the regression suite against a TESTIMAGES tree.
+              Walks for .ser files, runs analyze + stack on each,
+              and diffs metrics against committed baselines under
+              Tests/Regression/baselines/. Use --regenerate after
+              an intentional calibration change.
 
           version
               Print build version.

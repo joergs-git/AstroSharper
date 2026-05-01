@@ -1,10 +1,11 @@
 {
-  "inputFile": "mond-00_06_53_.ser",
-  "keepPercents": [
+  "inputFile" : "mond-00_06_53_.ser",
+  "keepPercents" : [
     {
-      "keepPercent": 25,
-      "outputBytes": 10486658,
-      "outputFile": "biggsky__mond-00_06_53_.ser.stack.tif"
+      "elapsedSeconds" : 23.21531093120575,
+      "keepPercent" : 25,
+      "outputBytes" : 8489210,
+      "outputFile" : "biggsky__mond-00_06_53_.ser.tif"
     }
   ]
 }

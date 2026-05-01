@@ -1,17 +1,17 @@
 {
-  "bytesPerFrame" : 2621440,
-  "captureDateUTC" : "2025-05-10T22:06:53Z",
+  "bytesPerFrame" : 614400,
+  "captureDateUTC" : "2026-04-28T15:23:09Z",
   "colorID" : "mono",
   "colorIsBayer" : false,
   "colorIsMono" : true,
   "colorIsRGB" : false,
-  "filename" : "mond-00_06_53_.ser",
+  "filename" : "17_23_09_.ser",
   "frameCount" : 5000,
-  "imageHeight" : 1024,
-  "imageWidth" : 1280,
+  "imageHeight" : 480,
+  "imageWidth" : 640,
   "instrument" : "ZWO ASI174MM",
   "observer" : "Observer",
   "pixelDepth" : 16,
   "telescope" : "Telescope",
-  "totalBytes" : 13107200000
+  "totalBytes" : 3072000000
 }

@@ -1,0 +1,11 @@
+{
+  "inputFile" : "17_23_09_.ser",
+  "keepPercents" : [
+    {
+      "elapsedSeconds" : 2.5040130615234375,
+      "keepPercent" : 25,
+      "outputBytes" : 1476018,
+      "outputFile" : "sun__17_23_09_.ser.tif"
+    }
+  ]
+}

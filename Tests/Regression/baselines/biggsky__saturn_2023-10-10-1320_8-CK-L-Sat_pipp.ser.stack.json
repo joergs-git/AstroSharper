@@ -1,10 +1,11 @@
 {
-  "inputFile": "saturn_2023-10-10-1320_8-CK-L-Sat_pipp.ser",
-  "keepPercents": [
+  "inputFile" : "saturn_2023-10-10-1320_8-CK-L-Sat_pipp.ser",
+  "keepPercents" : [
     {
-      "keepPercent": 25,
-      "outputBytes": 1311010,
-      "outputFile": "biggsky__saturn_2023-10-10-1320_8-CK-L-Sat_pipp.ser.stack.tif"
+      "elapsedSeconds" : 9.8453249931335449,
+      "keepPercent" : 25,
+      "outputBytes" : 567162,
+      "outputFile" : "biggsky__saturn_2023-10-10-1320_8-CK-L-Sat_pipp.ser.tif"
     }
   ]
 }

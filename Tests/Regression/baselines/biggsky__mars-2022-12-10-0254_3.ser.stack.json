@@ -1,10 +1,11 @@
 {
-  "inputFile": "mars-2022-12-10-0254_3.ser",
-  "keepPercents": [
+  "inputFile" : "mars-2022-12-10-0254_3.ser",
+  "keepPercents" : [
     {
-      "keepPercent": 25,
-      "outputBytes": 991506,
-      "outputFile": "biggsky__mars-2022-12-10-0254_3.ser.stack.tif"
+      "elapsedSeconds" : 10.538629055023193,
+      "keepPercent" : 25,
+      "outputBytes" : 627450,
+      "outputFile" : "biggsky__mars-2022-12-10-0254_3.ser.tif"
     }
   ]
 }
