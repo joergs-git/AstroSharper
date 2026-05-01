@@ -1086,39 +1086,53 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         var panPx: SIMD2<Float>
         var splitX: Float
         var hasAfter: UInt32
+        var autoBlack: Float
         var displayGain: Float
+        var autoRangeOn: UInt32
     }
 
-    // Auto-computed gain from the current beforeTex's p99. Targets p99
-    // ≈ 0.85 of the displayed range so dim solar Ha / DSO captures land
-    // sensibly bright by default and already-bright captures aren't
-    // pushed to white. Recomputed only when beforeTex changes.
-    private var displayAutoGain: Float = 1.0
+    // Cached auto-range parameters. Recomputed only when beforeTex changes
+    // (NOT every draw call).
+    private var displayBlack: Float = 0.0     // p1 of the texture's luma histogram
+    private var displayAutoGain: Float = 1.0  // chosen so (p99 − p1) maps to 0.85
 
-    /// Recompute the auto display gain for the current `beforeTex`.
-    /// Cheap (~5 ms via the existing 256² downsample + CPU sort path
-    /// used by `applyOutputRemap`) but only worth doing when the
-    /// texture itself changes — calling per-draw would burn CPU during
-    /// pan/zoom for nothing.
+    /// Recompute auto-range black point + gain for the current `beforeTex`.
+    /// Cheap (~5 ms via the existing 256² downsample + CPU sort).
     ///
-    /// Formula: `autoGain = clamp(0.85 / max(0.005, p99), 0.5, 64)`
-    /// - p99 ≈ 0.5  (planetary on dark sky) → autoGain = 1.7
-    /// - p99 ≈ 0.05 (dim solar Ha at low gain) → autoGain = 17
-    /// - p99 ≈ 0.95 (already-bright capture) → autoGain = 0.89
-    /// User can multiply further via the toolbar slider (effectiveGain
-    /// = autoGain × userGain).
+    /// Two parameters drive the display look:
+    ///   `autoBlack` — texture's p1 luma. Subtracted in the shader so the
+    ///       dark background / sky becomes pure black (recovers the
+    ///       contrast AS!4's "Auto Range" provides — without this, dim
+    ///       captures show as flat mid-grey because their data lives in
+    ///       a narrow slice of [0, 1]).
+    ///   `autoGain` — chosen so the texture's p99 maps to ~0.85 of the
+    ///       displayed range AFTER black-point subtraction:
+    ///         autoGain = 0.85 / max(0.005, p99 − p1)
+    ///       Clamped to [0.5, 64] so degenerate inputs (constant texture)
+    ///       don't blow up the multiplier.
+    ///
+    /// Examples:
+    ///   solar Ha (p1=0.05, p99=0.65) → autoBlack=0.05, autoGain=1.42
+    ///     → 0.5 pixel: (0.5−0.05)·1.42 = 0.64 (light grey, contrasty)
+    ///     → 0.65 pixel: 0.85 (near-white, slight highlight headroom)
+    ///   DSO (p1=0.001, p99=0.05) → autoBlack=0.001, autoGain=17
+    ///     → 0.04 pixel: (0.04−0.001)·17 = 0.66 (visible)
+    ///   Already-bright (p1=0.5, p99=0.95) → autoBlack=0.5, autoGain=1.89
+    ///     → 0.7 pixel: (0.7−0.5)·1.89 = 0.38 (mid-grey)
     func refreshDisplayAutoRange() {
         guard let tex = beforeTex else {
+            displayBlack = 0
             displayAutoGain = 1.0
             return
         }
         if let pts = pipeline.computeLumaPercentiles(
             input: tex, lowPercentile: 0.01, highPercentile: 0.99
         ) {
-            let target: Float = 0.85
-            let p99: Float = max(0.005, pts.white)
-            displayAutoGain = max(0.5, min(64.0, target / p99))
+            displayBlack = max(0, pts.black)
+            let range = max(Float(0.005), pts.white - pts.black)
+            displayAutoGain = max(0.5, min(64.0, 0.85 / range))
         } else {
+            displayBlack = 0
             displayAutoGain = 1.0
         }
     }
@@ -1145,9 +1159,12 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         // Before/After toggle: pass splitX=1 (fully "after") when showAfter is on,
         // else 0 (fully "before"). The display shader already handles both paths.
         let split: Float = app.showAfter ? 1.0 : 0.0
-        // Effective gain combines the per-texture auto value (only when
-        // app.displayAutoRange is on) with the user's toolbar slider.
-        let auto: Float = app.displayAutoRange ? displayAutoGain : 1.0
+        let autoOn = app.displayAutoRange
+        // When auto is on: subtract the texture's p1 (so dark background
+        // becomes black) AND multiply by autoGain (so [p1, p99] maps to
+        // [0, ~0.85]) — matches AS!4's "Auto Range" + "Brightness 1×"
+        // baseline. The user's slider multiplies further on top.
+        let auto: Float = autoOn ? displayAutoGain : 1.0
         let user: Float = Float(max(0.1, app.displayGain))
         let gain: Float = max(0.01, auto * user)
         var uniforms = DisplayUniforms(
@@ -1157,7 +1174,9 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             panPx: panPx,
             splitX: split,
             hasAfter: afterTex == nil ? 0 : 1,
-            displayGain: gain
+            autoBlack: autoOn ? displayBlack : 0,
+            displayGain: gain,
+            autoRangeOn: autoOn ? 1 : 0
         )
 
         if let before = beforeTex {

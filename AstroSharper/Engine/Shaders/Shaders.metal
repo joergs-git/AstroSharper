@@ -15,14 +15,16 @@ struct DisplayUniforms {
     float2 panPx;       // pan offset in image pixels
     float  splitX;      // 0..1 — fraction from left showing "after"; outside: before
     uint   hasAfter;    // 0 = only show before
-    // Display-only brightness gain (AS!4-style "Brightness Nx"). Final
-    // pixel = clamp(sampled · displayGain, 0, 1). Texture and saved
-    // files are unchanged. displayGain = 1.0 is identity. The value is
-    // (autoGain · userGain) computed in PreviewCoordinator: autoGain
-    // targets p99 ≈ 0.85 of the texture's luma histogram so dim
-    // captures land at sensible default brightness; userGain is the
-    // toolbar slider for further user adjustment.
+    // Display-only auto-range. Subtracts `autoBlack` (= p1 of the
+    // texture's luma histogram) so the dark background lands at zero
+    // and the displayed range starts using the full [0, 1] gamut. Then
+    // multiplies by `displayGain` (= autoGain × userGain). Saved files
+    // and the underlying texture are unchanged. Setting autoRangeOn = 0
+    // skips the black-point shift; the gain alone still applies (so the
+    // user's brightness slider works without the auto stretch).
+    float  autoBlack;
     float  displayGain;
+    uint   autoRangeOn;
 };
 
 struct DisplayVertexOut {
@@ -89,10 +91,18 @@ fragment float4 display_fragment(
             return float4(1, 1, 1, 1);
         }
     }
-    // Multiplicative display gain. Black stays black (no shift); brighter
-    // values progressively saturate at 1.0. Identity at gain=1.0.
+    // Auto-range black-point subtract: sky / dark border lands at 0
+    // so the visible dynamic range starts from there instead of from
+    // wherever the histogram begins. Skipped when autoRangeOn = 0.
+    if (u.autoRangeOn != 0u) {
+        col.rgb = max(float3(0.0), col.rgb - u.autoBlack);
+    }
+    // Multiplicative display gain. Combines the per-texture auto value
+    // with the toolbar Brightness slider. Identity at gain=1.0.
     if (u.displayGain != 1.0) {
         col.rgb = clamp(col.rgb * u.displayGain, 0.0, 1.0);
+    } else {
+        col.rgb = clamp(col.rgb, 0.0, 1.0);
     }
     return col;
 }
