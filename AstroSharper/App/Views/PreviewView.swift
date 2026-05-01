@@ -375,6 +375,14 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             .removeDuplicates()
             .sink { [weak self] _ in self?.view?.needsDisplay = true }
             .store(in: &cancellables)
+        // displayGain slider: redraw on every change. Throttle so a
+        // continuous drag doesn't thrash the GPU (display path is cheap
+        // but the shader recompiles uniform buffers per frame anyway).
+        app.$displayGain
+            .removeDuplicates()
+            .throttle(for: .milliseconds(16), scheduler: DispatchQueue.main, latest: true)
+            .sink { [weak self] _ in self?.view?.needsDisplay = true }
+            .store(in: &cancellables)
         // SER frame scrub — throttled to ~30 fps so dragging stays smooth
         // even on multi-thousand-frame SERs.
         app.$previewSerFrameIndex
@@ -917,8 +925,18 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             // during scrub; the "Calculate Video Quality" button populates
             // the sampled distribution when the user opts in.
             DispatchQueue.main.async {
-                guard self.app.previewFileID == dispatchedID,
-                      self.app.previewSerFrameIndex == dispatchedFrameIndex else { return }
+                guard self.app.previewFileID == dispatchedID else { return }
+                // During SER playback the timer typically advances faster
+                // than the disk read finishes (especially on NAS). The
+                // strict index-match check used to drop EVERY decoded
+                // frame as "stale" — leaving the user staring at a frozen
+                // texture while the frame counter ticked through. During
+                // playback we accept any successful decode; when NOT
+                // playing back we keep the strict guard so fast scrubbing
+                // doesn't paint stale frames in the wrong order.
+                if !self.app.serPlaybackActive {
+                    guard self.app.previewSerFrameIndex == dispatchedFrameIndex else { return }
+                }
                 guard let tex else { return }
                 // Drop the stale sharpened texture so the raw frame paints
                 // immediately. Without this the user stares at the previous
@@ -1068,37 +1086,40 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         var panPx: SIMD2<Float>
         var splitX: Float
         var hasAfter: UInt32
-        var autoBlack: Float
-        var autoWhite: Float
-        var autoRangeOn: UInt32
+        var displayGain: Float
     }
 
-    // Cached percentiles for display-time auto-range. Recomputed whenever
-    // beforeTex changes (NOT every draw call). Identity until populated.
-    private var displayBlack: Float = 0
-    private var displayWhite: Float = 1
+    // Auto-computed gain from the current beforeTex's p99. Targets p99
+    // ≈ 0.85 of the displayed range so dim solar Ha / DSO captures land
+    // sensibly bright by default and already-bright captures aren't
+    // pushed to white. Recomputed only when beforeTex changes.
+    private var displayAutoGain: Float = 1.0
 
-    /// Recompute the display auto-range percentiles for the current
-    /// `beforeTex`. Cheap (~5 ms via the existing 256² downsample +
-    /// CPU sort path used by `applyOutputRemap`) but only worth doing
-    /// when the texture itself changes — calling per-draw would burn
-    /// CPU during pan/zoom for nothing. We sample p1 / p99 since the
-    /// extremes already get clipped at display, and a tighter window
-    /// (p2 / p98) starts crushing legitimate dim or bright detail.
+    /// Recompute the auto display gain for the current `beforeTex`.
+    /// Cheap (~5 ms via the existing 256² downsample + CPU sort path
+    /// used by `applyOutputRemap`) but only worth doing when the
+    /// texture itself changes — calling per-draw would burn CPU during
+    /// pan/zoom for nothing.
+    ///
+    /// Formula: `autoGain = clamp(0.85 / max(0.005, p99), 0.5, 64)`
+    /// - p99 ≈ 0.5  (planetary on dark sky) → autoGain = 1.7
+    /// - p99 ≈ 0.05 (dim solar Ha at low gain) → autoGain = 17
+    /// - p99 ≈ 0.95 (already-bright capture) → autoGain = 0.89
+    /// User can multiply further via the toolbar slider (effectiveGain
+    /// = autoGain × userGain).
     func refreshDisplayAutoRange() {
         guard let tex = beforeTex else {
-            displayBlack = 0
-            displayWhite = 1
+            displayAutoGain = 1.0
             return
         }
         if let pts = pipeline.computeLumaPercentiles(
             input: tex, lowPercentile: 0.01, highPercentile: 0.99
         ) {
-            displayBlack = pts.black
-            displayWhite = pts.white
+            let target: Float = 0.85
+            let p99: Float = max(0.005, pts.white)
+            displayAutoGain = max(0.5, min(64.0, target / p99))
         } else {
-            displayBlack = 0
-            displayWhite = 1
+            displayAutoGain = 1.0
         }
     }
 
@@ -1124,10 +1145,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         // Before/After toggle: pass splitX=1 (fully "after") when showAfter is on,
         // else 0 (fully "before"). The display shader already handles both paths.
         let split: Float = app.showAfter ? 1.0 : 0.0
-        // Auto-range stretch is identity when range is degenerate (constant
-        // texture) — guard at the uniform level so the shader can keep its
-        // hot path branchless.
-        let autoOn: UInt32 = (app.displayAutoRange && displayWhite > displayBlack + 1e-4) ? 1 : 0
+        // Effective gain combines the per-texture auto value (only when
+        // app.displayAutoRange is on) with the user's toolbar slider.
+        let auto: Float = app.displayAutoRange ? displayAutoGain : 1.0
+        let user: Float = Float(max(0.1, app.displayGain))
+        let gain: Float = max(0.01, auto * user)
         var uniforms = DisplayUniforms(
             texSize: SIMD2(tw, th),
             viewSize: SIMD2(vw, vh),
@@ -1135,9 +1157,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             panPx: panPx,
             splitX: split,
             hasAfter: afterTex == nil ? 0 : 1,
-            autoBlack: displayBlack,
-            autoWhite: displayWhite,
-            autoRangeOn: autoOn
+            displayGain: gain
         )
 
         if let before = beforeTex {

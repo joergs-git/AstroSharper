@@ -15,13 +15,14 @@ struct DisplayUniforms {
     float2 panPx;       // pan offset in image pixels
     float  splitX;      // 0..1 — fraction from left showing "after"; outside: before
     uint   hasAfter;    // 0 = only show before
-    // Display-only auto-range (AS!4-style "Auto Range 16-bit"). Mirrors
-    // the percentile black / white the coordinator computed for the
-    // current beforeTex; remap is applied AT DISPLAY TIME ONLY so the
-    // saved file is never affected. autoRangeOn = 0 = identity.
-    float  autoBlack;
-    float  autoWhite;
-    uint   autoRangeOn;
+    // Display-only brightness gain (AS!4-style "Brightness Nx"). Final
+    // pixel = clamp(sampled · displayGain, 0, 1). Texture and saved
+    // files are unchanged. displayGain = 1.0 is identity. The value is
+    // (autoGain · userGain) computed in PreviewCoordinator: autoGain
+    // targets p99 ≈ 0.85 of the texture's luma histogram so dim
+    // captures land at sensible default brightness; userGain is the
+    // toolbar slider for further user adjustment.
+    float  displayGain;
 };
 
 struct DisplayVertexOut {
@@ -88,12 +89,10 @@ fragment float4 display_fragment(
             return float4(1, 1, 1, 1);
         }
     }
-    // Display-time auto-range: linearly remap [autoBlack, autoWhite] →
-    // [0, 1] before output. AS!4 calls this "Auto Range 16-bit (A)".
-    // Texture data is unchanged; only the on-screen pixels are stretched.
-    if (u.autoRangeOn != 0u) {
-        float range = max(1e-4, u.autoWhite - u.autoBlack);
-        col.rgb = clamp((col.rgb - u.autoBlack) / range, 0.0, 1.0);
+    // Multiplicative display gain. Black stays black (no shift); brighter
+    // values progressively saturate at 1.0. Identity at gain=1.0.
+    if (u.displayGain != 1.0) {
+        col.rgb = clamp(col.rgb * u.displayGain, 0.0, 1.0);
     }
     return col;
 }
