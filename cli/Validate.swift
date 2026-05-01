@@ -209,10 +209,17 @@ enum Validate {
             cliStderr("  ✗ \(baselineKey) stack: missing baseline at \(baselinePath.path) — run with --regenerate to create")
             return false
         }
+        // outputBytes drifts ±2 % between builds (TIFF compression
+        // version-quirks); outputSharpness drifts ±5 % (variance-of-
+        // Laplacian on rgba16Float is sensitive to last-bit noise in
+        // the stack output). Both tolerances are wired in
+        // `sameLeaf(a:b:key:byteTolerantKeys:)` — F3 v1 used a single
+        // ±2 % bucket; v1.1 splits per-key for the noisier sharpness.
         let diff = diffJSON(
             produced, baseline,
             ignore: ["elapsedSeconds", "outputFile"],
-            byteTolerantKeys: ["outputBytes"]
+            byteTolerantKeys: ["outputBytes"],
+            qualityTolerantKeys: ["outputSharpness"]
         )
         if diff.isEmpty {
             if !quiet { print("  ✓ stack") }
@@ -243,11 +250,18 @@ enum Validate {
     }
 
     /// Recursive JSON diff. Returns human-readable lines.
-    /// `ignore` keys are skipped at any depth. `byteTolerantKeys` are
-    /// compared with ±2 % tolerance instead of exact match.
+    ///
+    /// - `ignore`: keys skipped at any depth.
+    /// - `byteTolerantKeys`: compared with ±2 % tolerance (tight —
+    ///   for output file-size drift across builds).
+    /// - `qualityTolerantKeys`: compared with ±5 % tolerance (looser
+    ///   — for variance-of-Laplacian style image-quality metrics
+    ///   that ride last-bit noise in the rgba16Float stack output).
     private static func diffJSON(
         _ produced: [String: Any], _ baseline: [String: Any],
-        ignore: Set<String>, byteTolerantKeys: Set<String>,
+        ignore: Set<String>,
+        byteTolerantKeys: Set<String>,
+        qualityTolerantKeys: Set<String> = [],
         path: String = ""
     ) -> [String] {
         var lines: [String] = []
@@ -263,7 +277,10 @@ enum Validate {
                 lines.append("UNEXPECTED in produced: \(key) = \(String(describing: pVal!))")
             case (let p as [String: Any], let b as [String: Any]):
                 lines.append(contentsOf: diffJSON(
-                    p, b, ignore: ignore, byteTolerantKeys: byteTolerantKeys, path: key
+                    p, b, ignore: ignore,
+                    byteTolerantKeys: byteTolerantKeys,
+                    qualityTolerantKeys: qualityTolerantKeys,
+                    path: key
                 ))
             case (let p as [Any], let b as [Any]):
                 if p.count != b.count {
@@ -272,16 +289,26 @@ enum Validate {
                     for idx in 0..<p.count {
                         if let pd = p[idx] as? [String: Any], let bd = b[idx] as? [String: Any] {
                             lines.append(contentsOf: diffJSON(
-                                pd, bd, ignore: ignore, byteTolerantKeys: byteTolerantKeys,
+                                pd, bd, ignore: ignore,
+                                byteTolerantKeys: byteTolerantKeys,
+                                qualityTolerantKeys: qualityTolerantKeys,
                                 path: "\(key)[\(idx)]"
                             ))
-                        } else if !sameLeaf(p[idx], b[idx], key: k, byteTolerantKeys: byteTolerantKeys) {
+                        } else if !sameLeaf(
+                            p[idx], b[idx], key: k,
+                            byteTolerantKeys: byteTolerantKeys,
+                            qualityTolerantKeys: qualityTolerantKeys
+                        ) {
                             lines.append("\(key)[\(idx)]: produced=\(p[idx]) baseline=\(b[idx])")
                         }
                     }
                 }
             default:
-                if !sameLeaf(pVal!, bVal!, key: k, byteTolerantKeys: byteTolerantKeys) {
+                if !sameLeaf(
+                    pVal!, bVal!, key: k,
+                    byteTolerantKeys: byteTolerantKeys,
+                    qualityTolerantKeys: qualityTolerantKeys
+                ) {
                     lines.append("\(key): produced=\(pVal!) baseline=\(bVal!)")
                 }
             }
@@ -289,14 +316,22 @@ enum Validate {
         return lines
     }
 
-    /// Tolerant leaf comparison: ±2 % for keys in `byteTolerantKeys`,
-    /// exact match otherwise.
-    private static func sameLeaf(_ a: Any, _ b: Any, key: String, byteTolerantKeys: Set<String>) -> Bool {
-        if byteTolerantKeys.contains(key),
-           let an = (a as? NSNumber)?.doubleValue,
-           let bn = (b as? NSNumber)?.doubleValue,
-           bn > 0 {
-            return abs(an - bn) / bn <= 0.02
+    /// Tolerant leaf comparison:
+    /// - ±2 % for keys in `byteTolerantKeys` (file-size drift)
+    /// - ±5 % for keys in `qualityTolerantKeys` (image-quality metrics)
+    /// - exact match otherwise.
+    private static func sameLeaf(
+        _ a: Any, _ b: Any, key: String,
+        byteTolerantKeys: Set<String>,
+        qualityTolerantKeys: Set<String> = []
+    ) -> Bool {
+        if byteTolerantKeys.contains(key) || qualityTolerantKeys.contains(key) {
+            guard let an = (a as? NSNumber)?.doubleValue,
+                  let bn = (b as? NSNumber)?.doubleValue,
+                  bn > 0
+            else { return false }
+            let tol = byteTolerantKeys.contains(key) ? 0.02 : 0.05
+            return abs(an - bn) / bn <= tol
         }
         return String(describing: a) == String(describing: b)
     }

@@ -2,10 +2,11 @@
   "inputFile" : "jupiter-2026-03-05-0104_6-.ser",
   "keepPercents" : [
     {
-      "elapsedSeconds" : 9.2736109495162964,
+      "elapsedSeconds" : 5.0390100479125977,
       "keepPercent" : 25,
       "outputBytes" : 1649114,
-      "outputFile" : "biggsky__jupiter-2026-03-05-0104_6-.ser.tif"
+      "outputFile" : "biggsky__jupiter-2026-03-05-0104_6-.ser.tif",
+      "outputSharpness" : 4.5588276407215744e-06
     }
   ]
 }

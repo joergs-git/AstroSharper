@@ -643,12 +643,30 @@ enum Stack {
                 let outputBytes = (
                     (try? FileManager.default.attributesOfItem(atPath: resultURL.path))?[.size] as? Int
                 ) ?? 0
-                perPercentMetrics.append([
+                // Quality metric: variance-of-Laplacian sharpness on the
+                // final stacked output. F3 v1 — gives the regression
+                // harness a number that quantifies image quality, not
+                // just behavioural identity. Failure to load comes back
+                // as NaN, which we serialise as null so downstream diff
+                // logic skips the field rather than crashing.
+                let sharpness: Double? = {
+                    guard let tex = try? ImageTexture.load(
+                        url: resultURL,
+                        device: MetalDevice.shared.device
+                    ) else { return nil }
+                    let v = SharpnessProbe.shared.compute(texture: tex)
+                    return v.isFinite ? Double(v) : nil
+                }()
+                var entry: [String: Any] = [
                     "keepPercent": plan.percent,
                     "outputFile": resultURL.lastPathComponent,
                     "outputBytes": outputBytes,
                     "elapsedSeconds": elapsed
-                ])
+                ]
+                if let s = sharpness {
+                    entry["outputSharpness"] = s
+                }
+                perPercentMetrics.append(entry)
                 if !quiet {
                     // `plan.percent` is the configured request; under
                     // --auto-keep the resolved keep% comes from the

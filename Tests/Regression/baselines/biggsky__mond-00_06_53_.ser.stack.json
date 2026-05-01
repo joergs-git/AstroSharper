@@ -2,10 +2,11 @@
   "inputFile" : "mond-00_06_53_.ser",
   "keepPercents" : [
     {
-      "elapsedSeconds" : 23.21531093120575,
+      "elapsedSeconds" : 6.2750599384307861,
       "keepPercent" : 25,
       "outputBytes" : 8489210,
-      "outputFile" : "biggsky__mond-00_06_53_.ser.tif"
+      "outputFile" : "biggsky__mond-00_06_53_.ser.tif",
+      "outputSharpness" : 1.045149201672757e-05
     }
   ]
 }
