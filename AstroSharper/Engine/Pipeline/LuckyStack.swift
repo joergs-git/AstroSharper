@@ -194,6 +194,16 @@ struct LuckyStackOptions {
     /// would leave a non-positive output dimension.
     var borderCropPixels: Int = BorderCrop.defaultViewBorderCropPixels
 
+    /// Radial-fade-filter (RFF) inner / outer radius fractions. nil =
+    /// engine defaults (inner=0.65, outer=1.05). These control where
+    /// the fade from "full deconv" to "bare pre-deconv" happens
+    /// relative to the auto-detected disc radius. Bracketing values
+    /// closer to 1.0 keeps the limb sharper at the cost of potentially
+    /// re-introducing the dark ring artifact. Used by the bracket
+    /// script /tmp/rff-bracket/.
+    var rffInnerFraction: Double? = nil
+    var rffOuterFraction: Double? = nil
+
     /// White-cap override for `Pipeline.applyOutputRemap`. nil = use the
     /// pipeline's built-in default (0.92). Lower values dim the saved
     /// file more — useful when Wiener overshoot on bright features still
@@ -684,6 +694,8 @@ enum LuckyStack {
                                 deconv: deconvTex,
                                 center: psf.discCenter,
                                 discRadius: psf.discRadius,
+                                innerFraction: options.rffInnerFraction.map { Float($0) } ?? 0.65,
+                                outerFraction: options.rffOuterFraction.map { Float($0) } ?? 1.05,
                                 device: device
                             ) {
                                 final = radial

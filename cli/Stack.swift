@@ -65,6 +65,9 @@ enum Stack {
         // Bracketed in batch tests under /tmp/brightness-comparison/.
         var outputWhiteCap: Double? = nil
         var disableOutputRemap = false
+        // Radial Fade Filter overrides — bracket-script use only.
+        var rffInnerFraction: Double? = nil
+        var rffOuterFraction: Double? = nil
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -287,6 +290,24 @@ enum Stack {
                 }
                 autoPSFSNR = v
                 i += 2
+            case "--rff-inner":
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v >= 0, v <= 1.5
+                else {
+                    cliStderr("stack: --rff-inner requires a number in [0, 1.5] (default 0.65)")
+                    return 64
+                }
+                rffInnerFraction = v
+                i += 2
+            case "--rff-outer":
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v >= 0.5, v <= 2.0
+                else {
+                    cliStderr("stack: --rff-outer requires a number in [0.5, 2.0] (default 1.05)")
+                    return 64
+                }
+                rffOuterFraction = v
+                i += 2
             case "--white-cap":
                 // Override the stack-end auto-recovery remap target. Lower
                 // values dim the saved file. 0.92 = engine default.
@@ -488,6 +509,8 @@ enum Stack {
             options.borderCropPixels = borderCropPixels
             options.outputWhiteCap = outputWhiteCap
             options.disableOutputRemap = disableOutputRemap
+            options.rffInnerFraction = rffInnerFraction
+            options.rffOuterFraction = rffOuterFraction
             options.useAutoKeepPercent = useAutoKeep && !keepWasExplicit
             options.denoisePrePercent = denoisePrePercent
             options.denoisePostPercent = denoisePostPercent
