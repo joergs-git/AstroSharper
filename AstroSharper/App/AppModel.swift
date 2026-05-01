@@ -146,6 +146,15 @@ final class AppModel: ObservableObject {
     @Published var serPlaybackActive: Bool = false
     private var serPlaybackTimer: Timer?
 
+    /// Display-only auto-range stretch (AS!4-style "Auto Range 16-bit").
+    /// Default ON: bright SER captures (solar Ha, lunar at low gain) land
+    /// in the upper half of the 16-bit range with peaks near 1.0, so the
+    /// raw display reads as washed-out white. Auto-range linearly remaps
+    /// [p1, p99] → [0, 1] in the FRAGMENT SHADER ONLY — the underlying
+    /// texture and saved files are unchanged. Toggle OFF to see the bare
+    /// pixel values.
+    @Published var displayAutoRange: Bool = true
+
     // Preview HUD — translucent stats overlay shown on top of the preview.
     // `previewStats` is filled by PreviewCoordinator as data becomes
     // available (header → current frame → distribution).

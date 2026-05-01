@@ -15,6 +15,13 @@ struct DisplayUniforms {
     float2 panPx;       // pan offset in image pixels
     float  splitX;      // 0..1 — fraction from left showing "after"; outside: before
     uint   hasAfter;    // 0 = only show before
+    // Display-only auto-range (AS!4-style "Auto Range 16-bit"). Mirrors
+    // the percentile black / white the coordinator computed for the
+    // current beforeTex; remap is applied AT DISPLAY TIME ONLY so the
+    // saved file is never affected. autoRangeOn = 0 = identity.
+    float  autoBlack;
+    float  autoWhite;
+    uint   autoRangeOn;
 };
 
 struct DisplayVertexOut {
@@ -68,17 +75,25 @@ fragment float4 display_fragment(
 
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     float4 colBefore = before.sample(s, uv);
-    if (u.hasAfter == 0u) return colBefore;
-
-    float4 colAfter = after.sample(s, uv);
-    // Split by screen-space X.
-    bool showAfter = in.uv.x < u.splitX;
-    float4 col = showAfter ? colAfter : colBefore;
-
-    // Thin split line.
-    float edge = abs(in.uv.x - u.splitX);
-    if (edge < 0.001) {
-        col = float4(1, 1, 1, 1);
+    float4 col;
+    if (u.hasAfter == 0u) {
+        col = colBefore;
+    } else {
+        float4 colAfter = after.sample(s, uv);
+        bool showAfter = in.uv.x < u.splitX;
+        col = showAfter ? colAfter : colBefore;
+        // Thin split line.
+        float edge = abs(in.uv.x - u.splitX);
+        if (edge < 0.001) {
+            return float4(1, 1, 1, 1);
+        }
+    }
+    // Display-time auto-range: linearly remap [autoBlack, autoWhite] →
+    // [0, 1] before output. AS!4 calls this "Auto Range 16-bit (A)".
+    // Texture data is unchanged; only the on-screen pixels are stretched.
+    if (u.autoRangeOn != 0u) {
+        float range = max(1e-4, u.autoWhite - u.autoBlack);
+        col.rgb = clamp((col.rgb - u.autoBlack) / range, 0.0, 1.0);
     }
     return col;
 }

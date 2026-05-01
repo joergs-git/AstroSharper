@@ -369,12 +369,31 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         app.$showAfter
             .sink { [weak self] _ in self?.view?.needsDisplay = true }
             .store(in: &cancellables)
+        // displayAutoRange toggle: just trigger a redraw — the cached
+        // percentiles are reused, no recompute needed.
+        app.$displayAutoRange
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.view?.needsDisplay = true }
+            .store(in: &cancellables)
         // SER frame scrub — throttled to ~30 fps so dragging stays smooth
         // even on multi-thousand-frame SERs.
         app.$previewSerFrameIndex
             .removeDuplicates()
             .throttle(for: .milliseconds(33), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] _ in self?.loadCurrentSerFrame() }
+            .store(in: &cancellables)
+        // SER playback stopped → run the percentile recompute + pipeline
+        // on whichever frame the user landed on. During playback both are
+        // skipped (NAS reads cap at much lower fps than the timer wants),
+        // so the current beforeTex is unprocessed when the user pauses.
+        app.$serPlaybackActive
+            .removeDuplicates()
+            .sink { [weak self] active in
+                guard let self, !active, self.beforeTex != nil else { return }
+                self.refreshDisplayAutoRange()
+                self.view?.needsDisplay = true
+                self.reprocess()
+            }
             .store(in: &cancellables)
         // Playback: when the current playback frame index changes, swap the
         // source texture and re-run the pipeline.
@@ -697,6 +716,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                     self.app.previewStats.dimensions = dim
                 }
                 self.app.previewStats.currentSharpness = nil
+                self.refreshDisplayAutoRange()
                 self.view?.needsDisplay = true
                 if showLoading {
                     self.app.isLoadingPreview = false
@@ -910,8 +930,20 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 self.beforeTex = tex
                 self.app.previewStats.currentFrame = frameIndex + 1
                 self.app.previewStats.currentSharpness = nil
+                // SER playback path: skip the percentile recompute AND
+                // the full reprocess() pipeline. Each tick gets a fresh
+                // NAS frame; running Wiener / sharpen / tone-curve per
+                // frame at 18 fps blocks the timer cadence and drops
+                // visible frames. The auto-range stays at whatever was
+                // computed for the first frame — fine for playback since
+                // consecutive SER frames have near-identical histograms.
+                if !self.app.serPlaybackActive {
+                    self.refreshDisplayAutoRange()
+                }
                 self.view?.needsDisplay = true
-                self.reprocess()
+                if !self.app.serPlaybackActive {
+                    self.reprocess()
+                }
             }
         }
     }
@@ -1036,6 +1068,38 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         var panPx: SIMD2<Float>
         var splitX: Float
         var hasAfter: UInt32
+        var autoBlack: Float
+        var autoWhite: Float
+        var autoRangeOn: UInt32
+    }
+
+    // Cached percentiles for display-time auto-range. Recomputed whenever
+    // beforeTex changes (NOT every draw call). Identity until populated.
+    private var displayBlack: Float = 0
+    private var displayWhite: Float = 1
+
+    /// Recompute the display auto-range percentiles for the current
+    /// `beforeTex`. Cheap (~5 ms via the existing 256² downsample +
+    /// CPU sort path used by `applyOutputRemap`) but only worth doing
+    /// when the texture itself changes — calling per-draw would burn
+    /// CPU during pan/zoom for nothing. We sample p1 / p99 since the
+    /// extremes already get clipped at display, and a tighter window
+    /// (p2 / p98) starts crushing legitimate dim or bright detail.
+    func refreshDisplayAutoRange() {
+        guard let tex = beforeTex else {
+            displayBlack = 0
+            displayWhite = 1
+            return
+        }
+        if let pts = pipeline.computeLumaPercentiles(
+            input: tex, lowPercentile: 0.01, highPercentile: 0.99
+        ) {
+            displayBlack = pts.black
+            displayWhite = pts.white
+        } else {
+            displayBlack = 0
+            displayWhite = 1
+        }
     }
 
     func draw(in view: MTKView) {
@@ -1060,13 +1124,20 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         // Before/After toggle: pass splitX=1 (fully "after") when showAfter is on,
         // else 0 (fully "before"). The display shader already handles both paths.
         let split: Float = app.showAfter ? 1.0 : 0.0
+        // Auto-range stretch is identity when range is degenerate (constant
+        // texture) — guard at the uniform level so the shader can keep its
+        // hot path branchless.
+        let autoOn: UInt32 = (app.displayAutoRange && displayWhite > displayBlack + 1e-4) ? 1 : 0
         var uniforms = DisplayUniforms(
             texSize: SIMD2(tw, th),
             viewSize: SIMD2(vw, vh),
             zoom: zoomScale,
             panPx: panPx,
             splitX: split,
-            hasAfter: afterTex == nil ? 0 : 1
+            hasAfter: afterTex == nil ? 0 : 1,
+            autoBlack: displayBlack,
+            autoWhite: displayWhite,
+            autoRangeOn: autoOn
         )
 
         if let before = beforeTex {

@@ -142,6 +142,17 @@ private struct ToolbarView: View {
             .controlSize(.small)
             .help("Open the workflow guide in a movable, non-blocking window — keep it on screen while you work.")
 
+            // Display Auto-Range — AS!4-style "Auto Range 16-bit". Linearly
+            // remaps [p1, p99] → [0, 1] in the fragment shader so bright SER
+            // captures (solar Ha, lunar at low gain) don't display as
+            // washed-out white. Texture and saved files are unaffected.
+            Toggle(isOn: $app.displayAutoRange) {
+                Label("Auto", systemImage: app.displayAutoRange ? "circle.lefthalf.filled" : "circle")
+            }
+            .toggleStyle(.button)
+            .keyboardShortcut("a", modifiers: [])
+            .help("Auto-range display stretch (A): remap [p1, p99] to [0, 1] for the on-screen image only. Saved files are unaffected. Toggle off to see the bare pixel values.")
+
             // Before / After compare (B) — single, prominent.
             Toggle(isOn: $app.showAfter) {
                 Label(app.showAfter ? "After" : "Before", systemImage: app.showAfter ? "eye.fill" : "eye.slash")
