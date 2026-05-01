@@ -652,20 +652,22 @@ final class Pipeline {
                 return copyTexture(input, into: output)
             }
         } else if pts.white > 0.50 && pts.median >= 0.30 {
-            // Wide-range bright (solar Ha, lunar close-up, terrestrial-
-            // light surfaces). Median high → most pixels are mid-bright.
-            // White high → already filling most of the histogram. The
-            // user-picked stretch + γ=2.0 reveals contrast similar to
-            // AS!4 "Brightness pow" mode. γ=2.0 instead of the display's
-            // 2.5 leaves headroom for further Tone Curve adjustment.
-            // Verified on solar Ha SER per 2026-05-01 bracket (file 26).
-            NSLog("LuckyStack: subject-aware tone wide-bright mode (median=%.3f white=%.3f → stretch+γ=2.0)",
+            // Wide-range bright (solar Ha, lunar close-up, textured
+            // surfaces). Median high → most pixels are mid-bright.
+            // White high → already filling most of the histogram.
+            // User-picked file 26_stretch_g25 from /tmp/display-bracket/
+            // = pow((col − p1) · (1/(p99 − p1)), 2.5). Matches the live
+            // preview shader's auto path so the saved TIF and the
+            // on-screen image look the same in standard viewers
+            // (Preview.app / Photoshop apply an sRGB display chain on
+            // top, just like our shader's terminal pow(., 2.2) encode).
+            NSLog("LuckyStack: subject-aware tone wide-bright mode (median=%.3f white=%.3f → stretch+γ=2.5)",
                   pts.median, pts.white)
             blackPoint = pts.black
             let range = max(Float(0.005), pts.white - pts.black)
             scale = 1.0 / range
             whiteCap = 1.0
-            gamma = 2.0
+            gamma = 2.5
         } else if pts.white > 0.50 {
             // Bright peak + dark-dominated median: small planet on dark
             // sky (Jupiter / Saturn / Mars). User-picked γ=1.3 — pure
