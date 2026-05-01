@@ -210,16 +210,21 @@ enum Validate {
             return false
         }
         // outputBytes drifts ±2 % between builds (TIFF compression
-        // version-quirks); outputSharpness drifts ±5 % (variance-of-
-        // Laplacian on rgba16Float is sensitive to last-bit noise in
-        // the stack output). Both tolerances are wired in
-        // `sameLeaf(a:b:key:byteTolerantKeys:)` — F3 v1 used a single
-        // ±2 % bucket; v1.1 splits per-key for the noisier sharpness.
+        // version-quirks); the quality metrics ride last-bit noise in
+        // the rgba16Float accumulator and need a looser ±5 %.
+        // F3 v1 = outputBytes only; v1.1 added outputSharpness;
+        // v1.2 added FFT mid + high band fractions. All three quality
+        // axes share the same tolerance bucket — they're independent
+        // measurements but the noise floor scales similarly.
         let diff = diffJSON(
             produced, baseline,
             ignore: ["elapsedSeconds", "outputFile"],
             byteTolerantKeys: ["outputBytes"],
-            qualityTolerantKeys: ["outputSharpness"]
+            qualityTolerantKeys: [
+                "outputSharpness",
+                "outputFFTMidFraction",
+                "outputFFTHighFraction",
+            ]
         )
         if diff.isEmpty {
             if !quiet { print("  ✓ stack") }

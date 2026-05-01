@@ -2,9 +2,11 @@
   "inputFile" : "mars-2022-12-10-0254_3.ser",
   "keepPercents" : [
     {
-      "elapsedSeconds" : 10.061110973358154,
+      "elapsedSeconds" : 15.051254987716675,
       "keepPercent" : 25,
       "outputBytes" : 627450,
+      "outputFFTHighFraction" : 3.7867049689987022e-07,
+      "outputFFTMidFraction" : 7.2352014160527122e-05,
       "outputFile" : "biggsky__mars-2022-12-10-0254_3.ser.tif",
       "outputSharpness" : 3.5620854760054499e-05
     }

@@ -2,9 +2,11 @@
   "inputFile" : "17_23_09_.ser",
   "keepPercents" : [
     {
-      "elapsedSeconds" : 2.464663028717041,
+      "elapsedSeconds" : 2.6117550134658813,
       "keepPercent" : 25,
       "outputBytes" : 1476018,
+      "outputFFTHighFraction" : 0.0054462168133937632,
+      "outputFFTMidFraction" : 0.010649165838803449,
       "outputFile" : "sun__17_23_09_.ser.tif",
       "outputSharpness" : 0.0012932363897562027
     }

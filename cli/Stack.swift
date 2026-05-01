@@ -643,20 +643,24 @@ enum Stack {
                 let outputBytes = (
                     (try? FileManager.default.attributesOfItem(atPath: resultURL.path))?[.size] as? Int
                 ) ?? 0
-                // Quality metric: variance-of-Laplacian sharpness on the
-                // final stacked output. F3 v1 — gives the regression
-                // harness a number that quantifies image quality, not
-                // just behavioural identity. Failure to load comes back
-                // as NaN, which we serialise as null so downstream diff
-                // logic skips the field rather than crashing.
-                let sharpness: Double? = {
-                    guard let tex = try? ImageTexture.load(
-                        url: resultURL,
-                        device: MetalDevice.shared.device
-                    ) else { return nil }
+                // Quality metrics on the final stacked output. F3 v1
+                // shipped variance-of-Laplacian sharpness; v1.2 adds
+                // mid + high frequency-band energy fractions via
+                // FFTEnergy so the harness can detect spectral shifts
+                // (e.g. a regression that softens medium structure
+                // while preserving edge content). One texture load
+                // serves both metrics. Failures serialise as missing
+                // keys rather than crashing — downstream diff logic
+                // skips them.
+                let device = MetalDevice.shared.device
+                let metricsTex = try? ImageTexture.load(url: resultURL, device: device)
+                let sharpness: Double? = metricsTex.flatMap { tex in
                     let v = SharpnessProbe.shared.compute(texture: tex)
                     return v.isFinite ? Double(v) : nil
-                }()
+                }
+                let bands: FFTEnergy.Bands? = metricsTex.flatMap {
+                    FFTEnergy.compute(texture: $0, device: device)
+                }
                 var entry: [String: Any] = [
                     "keepPercent": plan.percent,
                     "outputFile": resultURL.lastPathComponent,
@@ -665,6 +669,10 @@ enum Stack {
                 ]
                 if let s = sharpness {
                     entry["outputSharpness"] = s
+                }
+                if let b = bands {
+                    entry["outputFFTMidFraction"]  = b.midFraction
+                    entry["outputFFTHighFraction"] = b.highFraction
                 }
                 perPercentMetrics.append(entry)
                 if !quiet {
