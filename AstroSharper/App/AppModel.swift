@@ -1251,6 +1251,11 @@ final class AppModel: ObservableObject {
         perItemOpts.sigmaThreshold = (luckyStack.mode == .scientific && luckyStack.sigmaClipEnabled)
             ? Float(luckyStack.sigmaClipThreshold)
             : nil
+        // Pre-stack calibration (D.1). Engine treats nil as "no
+        // calibration"; missing-on-disk / dimension-mismatched master
+        // frames are handled inside LuckyRunner with a logged drop.
+        perItemOpts.masterDarkURL = luckyStack.masterDarkURL
+        perItemOpts.masterFlatURL = luckyStack.masterFlatURL
 
         if luckyStack.bakeInProcessing {
             let lut: MTLTexture? = toneCurve.enabled
@@ -1938,6 +1943,19 @@ struct LuckyStackUIState {
     /// AS!4 / RegiStax default σ=2.5; we mirror that.
     var sigmaClipEnabled: Bool = false
     var sigmaClipThreshold: Double = 2.5
+
+    /// Pre-stack calibration master frames (Block D.1). Both optional;
+    /// nil = no calibration applied (engine bypasses the
+    /// `apply_calibration` kernel). Per-pixel formula is (light − dark)
+    /// / flatNorm, applied at decode time before quality grading +
+    /// alignment so the quality scores see calibrated frames.
+    /// Dimension mismatch with the source SER → engine logs + drops
+    /// the offending master rather than crashing. The pickers below
+    /// take pre-built master TIFFs (typical PixInsight / ASTAP
+    /// workflow); building masters from a folder of bias/dark/flat
+    /// shots is a v1+ helper that hasn't shipped yet.
+    var masterDarkURL: URL? = nil
+    var masterFlatURL: URL? = nil
 }
 
 enum LuckyStackNaming {

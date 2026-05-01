@@ -2,7 +2,9 @@
 // selected in the main file list — no separate file picker, single source of
 // truth. Output goes to the same `customOutputFolder` (or `<root>/_processed`
 // fallback) used by the normal sharpen pipeline.
+import AppKit   // NSOpenPanel for the calibration master-frame pickers
 import SwiftUI
+import UniformTypeIdentifiers   // UTType.tiff / .png / .jpeg for picker filtering
 
 struct LuckyStackSection: View {
     @EnvironmentObject private var app: AppModel
@@ -457,6 +459,40 @@ struct LuckyStackSection: View {
                     }
                 }
 
+                // D.1 — pre-stack calibration master frames (commit
+                // wired 2026-05-01). Both pickers accept a pre-built
+                // master TIFF; engine subtracts dark + divides by
+                // normalised flat at decode time, before quality
+                // grading + alignment. Folder-scan master derivation
+                // is a v1+ helper (current design assumes the
+                // PixInsight / ASTAP workflow where users pre-build
+                // their masters externally).
+                Divider()
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 4) {
+                        Text("Calibration")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        if app.luckyStack.masterDarkURL != nil
+                            || app.luckyStack.masterFlatURL != nil {
+                            Text("active")
+                                .font(.system(size: 9))
+                                .foregroundColor(.green)
+                        }
+                    }
+                    CalibrationMasterPicker(
+                        label: "Dark",
+                        url: $app.luckyStack.masterDarkURL,
+                        help: "Optional master dark TIFF. Subtracted from every frame before quality grading + alignment, so quality scores see the dark-corrected image. Build the master in PixInsight / ASTAP / Siril by averaging N dark frames at the same exposure + sensor temperature. Same dimensions as the source SER required — engine logs + drops a mismatched master without crashing."
+                    )
+                    CalibrationMasterPicker(
+                        label: "Flat",
+                        url: $app.luckyStack.masterFlatURL,
+                        help: "Optional master flat TIFF. Each frame is divided by the normalised flat to correct vignetting + dust shadows. Especially valuable for solar Hα where Newton ring patterns and uneven etalon illumination would otherwise survive into the stacked output. Same dimensions as the source SER required."
+                    )
+                }
+
                 Picker("Filename", selection: $app.luckyStack.filenameMode) {
                     ForEach(LuckyStackFilenameMode.allCases) { m in
                         Text(m.rawValue).tag(m)
@@ -675,6 +711,61 @@ private struct QueueRow: View {
             Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
         case .error:
             Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
+        }
+    }
+}
+
+/// File picker row for a calibration master frame (D.1). Compact
+/// label + Choose / filename button + clear button. Uses NSOpenPanel
+/// directly because the section needs to write to a `URL?` binding,
+/// which SwiftUI's `.fileImporter` doesn't bind cleanly to without
+/// a wrapping `Optional` adapter.
+private struct CalibrationMasterPicker: View {
+    let label: String
+    @Binding var url: URL?
+    let help: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 11))
+                .frame(width: 32, alignment: .leading)
+                .foregroundColor(.secondary)
+
+            Button {
+                let panel = NSOpenPanel()
+                panel.canChooseDirectories = false
+                panel.canChooseFiles = true
+                panel.allowsMultipleSelection = false
+                panel.allowedContentTypes = [.tiff, .png, .jpeg]
+                panel.prompt = "Use as \(label.lowercased())"
+                if panel.runModal() == .OK, let picked = panel.url {
+                    url = picked
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: url == nil ? "tray" : "tray.fill")
+                        .font(.system(size: 9))
+                    Text(url?.lastPathComponent ?? "Choose master \(label.lowercased())…")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .controlSize(.small)
+            .help(help)
+
+            if url != nil {
+                Button {
+                    url = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .help("Clear master \(label.lowercased())")
+            }
         }
     }
 }
