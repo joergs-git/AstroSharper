@@ -22,7 +22,9 @@
 //     toolchain version can shift it slightly)
 //
 // Exit codes: 0 all green; 1 drift detected; 64 usage error.
+import CoreGraphics
 import Foundation
+import ImageIO
 
 enum Validate {
     static func run(args: [String]) async -> Int32 {
@@ -199,7 +201,18 @@ enum Validate {
             cliStderr("  ✗ \(baselineKey) stack: --metrics output unreadable")
             return false
         }
-        let produced = sanitiseStackMetrics(producedRaw)
+        var produced = sanitiseStackMetrics(producedRaw)
+        // F3 v1.3 — RMSE vs an optional sibling reference image. The
+        // harness looks for `<basename>.reference.{png,tif,tiff}` next
+        // to the SER; absent → metric silently omitted (~half of our
+        // baselines have AS!3 references on disk today). When present,
+        // each per-keep entry gets a `referenceRMSE` field that the
+        // tolerance-bucket diff catches at ±5%.
+        if let refURL = findReferenceImage(for: ser) {
+            attachReferenceRMSE(
+                to: &produced, producedTIF: outputTif, referenceURL: refURL
+            )
+        }
 
         if regenerate {
             return writeJSON(produced, to: baselinePath, label: "\(baselineKey) stack", quiet: quiet)
@@ -224,6 +237,7 @@ enum Validate {
                 "outputSharpness",
                 "outputFFTMidFraction",
                 "outputFFTHighFraction",
+                "referenceRMSE",
             ]
         )
         if diff.isEmpty {
@@ -463,5 +477,106 @@ enum Validate {
           64 usage error / missing input
         """
         print(body)
+    }
+
+    // MARK: - F3 v1.3 — RMSE vs reference image
+
+    /// Look for a sibling reference image alongside the SER. Convention:
+    /// `<basename>.reference.{png,tif,tiff}` — same dir as the SER, same
+    /// basename minus extension, plus a `.reference` token. Returns nil
+    /// if none of the candidate paths exist.
+    private static func findReferenceImage(for serURL: URL) -> URL? {
+        let dir = serURL.deletingLastPathComponent()
+        let stem = serURL.deletingPathExtension().lastPathComponent
+        for ext in ["png", "tif", "tiff", "PNG", "TIF", "TIFF"] {
+            let candidate = dir
+                .appendingPathComponent("\(stem).reference.\(ext)")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    /// Attach `referenceRMSE` to every keepPercents entry in `produced`.
+    /// Both the produced TIF and the reference image are loaded as 8-bit
+    /// luma, the reference is resampled to the produced dimensions if
+    /// they differ, and the per-pixel RMSE is computed in [0, 1].
+    /// Missing-on-disk / decode failures silently skip the field rather
+    /// than raising — the metric is opportunistic, not required.
+    private static func attachReferenceRMSE(
+        to produced: inout [String: Any],
+        producedTIF: URL,
+        referenceURL: URL
+    ) {
+        guard let rmse = computeRMSE(produced: producedTIF, reference: referenceURL) else {
+            return
+        }
+        if var arr = produced["keepPercents"] as? [[String: Any]] {
+            for j in 0..<arr.count {
+                arr[j]["referenceRMSE"] = rmse
+            }
+            produced["keepPercents"] = arr
+        }
+    }
+
+    /// Per-pixel root-mean-square error between two images, computed on
+    /// 8-bit luma. Values normalised to [0, 1]. Reference is resampled
+    /// to the produced image's pixel dimensions when they differ —
+    /// AS!3's pre-shipped outputs are sometimes cropped or scaled
+    /// relative to ours and treating that as drift would just be
+    /// noise. Returns nil on decode / readback failure.
+    private static func computeRMSE(produced: URL, reference: URL) -> Double? {
+        guard let p = loadLumaBitmap(produced),
+              let dim = produced8Dimensions(produced)
+        else { return nil }
+        guard let r = loadLumaBitmap(reference, resizeTo: dim) else { return nil }
+        guard p.count == r.count, !p.isEmpty else { return nil }
+        var sumSq: Double = 0
+        for i in 0..<p.count {
+            let d = (Double(p[i]) - Double(r[i])) / 255.0
+            sumSq += d * d
+        }
+        return (sumSq / Double(p.count)).squareRoot()
+    }
+
+    private static func produced8Dimensions(_ url: URL) -> (Int, Int)? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Int,
+              let h = props[kCGImagePropertyPixelHeight] as? Int
+        else { return nil }
+        return (w, h)
+    }
+
+    /// Decode `url` to an 8-bit luma byte buffer. Optional `resizeTo`
+    /// resamples via CoreGraphics' default high-quality interpolation
+    /// before flattening to luma — used when the reference image and
+    /// the produced TIF differ in pixel dimensions.
+    private static func loadLumaBitmap(_ url: URL, resizeTo: (Int, Int)? = nil) -> [UInt8]? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil)
+        else { return nil }
+        let w: Int
+        let h: Int
+        if let target = resizeTo {
+            w = target.0; h = target.1
+        } else {
+            w = cg.width; h = cg.height
+        }
+        guard w > 0, h > 0 else { return nil }
+        var pixels = [UInt8](repeating: 0, count: w * h)
+        let cs = CGColorSpaceCreateDeviceGray()
+        guard let ctx = CGContext(
+            data: &pixels,
+            width: w, height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: w,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return pixels
     }
 }

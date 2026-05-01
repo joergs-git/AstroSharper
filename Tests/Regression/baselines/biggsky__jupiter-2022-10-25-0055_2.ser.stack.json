@@ -2,13 +2,14 @@
   "inputFile" : "jupiter-2022-10-25-0055_2.ser",
   "keepPercents" : [
     {
-      "elapsedSeconds" : 9.3816280364990234,
+      "elapsedSeconds" : 4.8279609680175781,
       "keepPercent" : 25,
       "outputBytes" : 2255842,
       "outputFFTHighFraction" : 1.1149836893652075e-06,
       "outputFFTMidFraction" : 0.00026546678518047653,
       "outputFile" : "biggsky__jupiter-2022-10-25-0055_2.ser.tif",
-      "outputSharpness" : 3.2724547054385766e-05
+      "outputSharpness" : 3.2724547054385766e-05,
+      "referenceRMSE" : 0.30917608108492117
     }
   ]
 }

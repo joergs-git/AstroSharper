@@ -2,7 +2,7 @@
   "inputFile" : "mond-00_06_53_.ser",
   "keepPercents" : [
     {
-      "elapsedSeconds" : 22.816991925239563,
+      "elapsedSeconds" : 6.2465469837188721,
       "keepPercent" : 25,
       "outputBytes" : 8489210,
       "outputFFTHighFraction" : 0.0019591697431091994,

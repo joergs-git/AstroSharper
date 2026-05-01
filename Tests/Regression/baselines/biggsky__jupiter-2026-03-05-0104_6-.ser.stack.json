@@ -2,7 +2,7 @@
   "inputFile" : "jupiter-2026-03-05-0104_6-.ser",
   "keepPercents" : [
     {
-      "elapsedSeconds" : 5.08725905418396,
+      "elapsedSeconds" : 5.0659259557723999,
       "keepPercent" : 25,
       "outputBytes" : 1649114,
       "outputFFTHighFraction" : 0.00082394683606677916,
