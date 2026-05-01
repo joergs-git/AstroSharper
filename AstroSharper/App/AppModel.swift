@@ -1256,6 +1256,11 @@ final class AppModel: ObservableObject {
         // frames are handled inside LuckyRunner with a logged drop.
         perItemOpts.masterDarkURL = luckyStack.masterDarkURL
         perItemOpts.masterFlatURL = luckyStack.masterFlatURL
+        // Drizzle reconstruction (B.6). scale=1 = off; engine routes
+        // straight to the standard accumulator. 2/3 invokes the
+        // drizzle splat path with the configured pixfrac.
+        perItemOpts.drizzleScale = luckyStack.drizzleScale
+        perItemOpts.drizzlePixfrac = Float(luckyStack.drizzlePixfrac)
 
         if luckyStack.bakeInProcessing {
             let lut: MTLTexture? = toneCurve.enabled
@@ -1956,6 +1961,21 @@ struct LuckyStackUIState {
     /// shots is a v1+ helper that hasn't shipped yet.
     var masterDarkURL: URL? = nil
     var masterFlatURL: URL? = nil
+
+    /// Drizzle reconstruction (Block B.6). `drizzleScale` 1 = off
+    /// (default — output at source resolution); 2 / 3 splat each input
+    /// pixel onto a 2× / 3× upsampled accumulator with sub-pixel
+    /// precision driven by the alignment shifts. Useful on
+    /// undersampled subjects (lunar / solar surface at long focal
+    /// length, or planetary captures where the seeing FWHM is below
+    /// 2.4 × pixel scale). `drizzlePixfrac` is the drop size as a
+    /// fraction of input pixel — BiggSky-documented sweet spot 0.7;
+    /// lower = sharper but more dropouts on sparse samples; higher =
+    /// smoother but blurrier. AA pre-filter (the BiggSky-warned grid
+    /// moiré protection) is NOT yet implemented — track via roadmap
+    /// B.6 follow-up.
+    var drizzleScale: Int = 1
+    var drizzlePixfrac: Double = 0.7
 }
 
 enum LuckyStackNaming {

@@ -297,6 +297,49 @@ struct LuckyStackSection: View {
                             .controlSize(.small)
                         }
                     }
+
+                    // Drizzle reconstruction (B.6). Scale 1 = off (no
+                    // upsample); 2 or 3 splats each input pixel onto an
+                    // upsampled accumulator with sub-pixel precision
+                    // driven by the alignment shifts. Useful on
+                    // undersampled subjects (FWHM < 2.4 × pixel scale)
+                    // — lunar / solar surface at long focal length, or
+                    // tight planetary captures. AA pre-filter is NOT
+                    // yet implemented (Drizzle.swift CPU + GPU paths
+                    // splat raw input pixels), so keep an eye out for
+                    // grid-moiré on very sparse alignment shifts.
+                    HStack(spacing: 4) {
+                        Text("Drizzle")
+                            .font(.system(size: 11))
+                        Spacer()
+                        Picker("", selection: $app.luckyStack.drizzleScale) {
+                            Text("Off").tag(1)
+                            Text("2×").tag(2)
+                            Text("3×").tag(3)
+                        }
+                        .pickerStyle(.segmented)
+                        .controlSize(.small)
+                        .frame(maxWidth: 160)
+                    }
+                    .help("Variable-pixel linear reconstruction (Fruchter & Hook). Splats each input pixel onto an upsampled accumulator (2× or 3×) using the alignment shifts as sub-pixel offsets. Useful on undersampled captures where seeing FWHM is below 2.4 × pixel scale. Keep at Off when source is already well-sampled — drizzle adds memory pressure without improving the result.")
+
+                    if app.luckyStack.drizzleScale > 1 {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text("Pixfrac").font(.caption)
+                                Spacer()
+                                Text(String(format: "%.2f", app.luckyStack.drizzlePixfrac))
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                            Slider(
+                                value: $app.luckyStack.drizzlePixfrac,
+                                in: 0.3...1.0, step: 0.05
+                            )
+                            .controlSize(.small)
+                        }
+                        .help("Drop size as a fraction of the input pixel. BiggSky default 0.7. Lower = sharper but more dropouts on sparse keep-% runs; higher = smoother but blurrier output.")
+                    }
                 }
 
                 // Per-channel stacking (Path B). Bayer-only — mono SER
