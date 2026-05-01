@@ -30,7 +30,7 @@ Every step runs on the GPU. The full pipeline — quality grading, alignment, lu
 - AutoPSF already measures the disc center + radius from the limb's line-spread function, so we use that geometry to build a **per-pixel radial mask**: full Wiener strength inside ~65 % of the disc radius, smoothly fading to zero just past the limb. No grid tiles, no manual ROI, no apodization tuning. Inner detail stays sharp; the outer rim of the disc gets a softer touch instead of a ringing artifact.
 - The fractions scale with the auto-detected disc, so the same one-click preset works at any focal length and pixel scale. Mars at 60 px and Jupiter at 600 px both get appropriately-scaled fade bands.
 - AutoPSF auto-bails on lunar / textured / cropped subjects (terrain interior breaks the limb-LSF assumption), so the same Smart auto button is safe on the Moon — you get the bare-stack quality preserved instead of an over-deconvolved blur.
-- **The result**: aggressive deconvolution that doesn't ring, on every planet, with no settings to tune. Empirical sweet spot is Wiener `SNR=200` paired with RFF — verified across Jupiter, Saturn and Mars on the BiggSky reference dataset.
+- **The result**: aggressive deconvolution that doesn't ring, on every planet, with no settings to tune. Empirical sweet spot is Wiener `SNR=100` paired with RFF — verified on Jupiter against the corrected sRGB display chain, and on Saturn / Mars against the BiggSky reference dataset.
 
 ### Stacking & alignment
 - **One-button lucky stack** with the Lightspeed / Balanced / Scientific quality modes. Multi-AP grid alignment for solar granulation and planetary detail.

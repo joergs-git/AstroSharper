@@ -242,11 +242,14 @@ enum Stack {
                 i += 1
             case "--smart-auto":
                 // Convenience preset — sets sensible Block C defaults:
-                //   auto-PSF ON, SNR=200 (aggressive Wiener — user
-                //                empirically picked SNR=200 over
-                //                gentler values; auto-bails on
-                //                textured subjects so lunar still
-                //                gets bare-quality output)
+                //   auto-PSF ON, SNR=100 (moderate Wiener — re-validated
+                //                2026-05-01 on the corrected sRGB display
+                //                via /tmp/snr-recheck/. Prior default 200
+                //                was an eye-tune for the under-encoded
+                //                pre-fix display; once the chain matched
+                //                Preview.app, the bracket pick dropped to
+                //                SNR=100. Auto-bails on textured subjects
+                //                so lunar still gets bare-quality output.)
                 //
                 // The radial deconv-fade always runs after AutoPSF
                 // succeeds (no opt-in needed — it just uses the
@@ -259,7 +262,7 @@ enum Stack {
                 // preset: the radial fade already handles the
                 // background-protection job tiled deconv was
                 // designed for, and denoise softens detail more
-                // than it cleans up artifacts on the SNR=200 path.
+                // than it cleans up artifacts on the moderate-SNR path.
                 // Both stay available as manual flags.
                 //
                 // Per-channel deliberately NOT set: its half-res
@@ -269,10 +272,10 @@ enum Stack {
                 // it can pass --per-channel explicitly.
                 //
                 // Individual flags after `--smart-auto` still
-                // override (e.g. `--smart-auto --auto-psf-snr 100`
-                // dials Wiener back from the preset's 200).
+                // override (e.g. `--smart-auto --auto-psf-snr 200`
+                // pushes Wiener back up from the preset's 100).
                 useAutoPSF = true
-                autoPSFSNR = 200
+                autoPSFSNR = 100
                 // Auto-derive keep-% from the quality distribution UNLESS
                 // the user passed --keep explicitly. Keep-% then becomes
                 // self-tuning across SERs of different lengths / quality

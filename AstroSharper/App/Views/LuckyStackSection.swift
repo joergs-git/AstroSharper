@@ -144,20 +144,22 @@ struct LuckyStackSection: View {
                 }
 
                 // Smart auto preset — sensible Block C defaults.
-                // Auto-PSF + Wiener at SNR=200 (aggressive, picked
-                // empirically). Radial fade after AutoPSF succeeds
-                // automatically kills Gibbs ringing at the disc limb.
-                // No tiled deconv, no denoise, no per-channel —
-                // those soften without proportional benefit on the
-                // SNR=200 path. Centered pill with a blue→purple
-                // gradient so the user notices it as a real action,
-                // not a tucked-away toggle.
+                // Auto-PSF + Wiener at SNR=100 (moderate, re-validated
+                // 2026-05-01 on the corrected sRGB display; prior 200
+                // was an eye-tune compensating for the broken display
+                // chain). Radial fade after AutoPSF succeeds kills
+                // Gibbs ringing at the disc limb automatically. No
+                // tiled deconv, no denoise, no per-channel — those
+                // soften without proportional benefit on the moderate-
+                // SNR path. Centered pill with a blue→purple gradient
+                // so the user notices it as a real action, not a
+                // tucked-away toggle.
                 HStack {
                     Spacer()
                     Button {
                         app.luckyStack.perChannelStacking = false
                         app.luckyStack.autoPSF = true
-                        app.luckyStack.autoPSFSNR = 200
+                        app.luckyStack.autoPSFSNR = 100
                         app.luckyStack.tiledDeconv = false
                         app.luckyStack.denoisePrePercent = 0
                         app.luckyStack.denoisePostPercent = 0
