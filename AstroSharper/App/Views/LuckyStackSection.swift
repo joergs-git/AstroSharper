@@ -194,7 +194,14 @@ struct LuckyStackSection: View {
                             set: { newOn in
                                 if newOn {
                                     if app.luckyStack.multiAP.grid == 0 {
-                                        app.luckyStack.multiAP = .grid(8, 16)
+                                        // 16×16 default (was 8×8). User bracket
+                                        // on solar Hα 2026-05-01 picked the
+                                        // finest grid as cleanest — finer cells
+                                        // mean adjacent per-AP shifts vary
+                                        // smoothly, hiding the cell-boundary
+                                        // ramps that 8×8 left visible after
+                                        // wavelet sharpening.
+                                        app.luckyStack.multiAP = .grid(16, 16)
                                     }
                                 } else {
                                     app.luckyStack.multiAP = .off

@@ -87,7 +87,13 @@ struct LuckyStackOptions {
     var meridianFlipped: Bool = false    // rotate every unpacked frame 180°
     /// Multi-AP local refinement (Scientific only).
     var useMultiAP: Bool = false
-    var multiAPGrid: Int = 8
+    /// 16 by default after the 2026-05-01 user bracket: on solar Hα the
+    /// 16×16 grid produced cleaner output than 8×8 because finer cells
+    /// give a smoother per-pixel shift gradient, hiding the cell-
+    /// boundary ramps that wavelet sharpening would otherwise amplify.
+    /// Range clamped to [4, 16] inside the runner. CLI override:
+    /// --multi-ap-grid N.
+    var multiAPGrid: Int = 16
     var multiAPSearch: Int = 8
     /// When set, the stacked output is post-processed through the standard
     /// pipeline (sharpen + wavelet + tone-curve) before being written.
