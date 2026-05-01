@@ -657,10 +657,12 @@ final class Pipeline {
             // White high → already filling most of the histogram.
             // User-picked file 26_stretch_g25 from /tmp/display-bracket/
             // = pow((col − p1) · (1/(p99 − p1)), 2.5). Matches the live
-            // preview shader's auto path so the saved TIF and the
-            // on-screen image look the same in standard viewers
-            // (Preview.app / Photoshop apply an sRGB display chain on
-            // top, just like our shader's terminal pow(., 2.2) encode).
+            // preview shader's auto path 1:1 — the baked TIF carries
+            // the same tone curve the user saw during stacking. With
+            // the swap chain tagged sRGB (PreviewView 2026-05-01) the
+            // shader is a true pass-through when Auto OFF, so opening
+            // the saved TIF in our app or any standard viewer renders
+            // those pre-baked bytes directly without further encoding.
             NSLog("LuckyStack: subject-aware tone wide-bright mode (median=%.3f white=%.3f → stretch+γ=2.5)",
                   pts.median, pts.white)
             blackPoint = pts.black
