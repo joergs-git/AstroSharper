@@ -129,6 +129,25 @@ struct LuckyStackOptions {
     /// keep slider.
     var twoStageKeepFraction: Double? = nil
 
+    /// Adaptive AP rejection (Block B.3). After two-stage per-AP
+    /// scoring, drop the bottom `rejectFraction` of AP cells by mean
+    /// LAPD score across all kept frames — those cells are background
+    /// sky / dead featureless regions where running per-AP correlation
+    /// just adds noise. Default 0.20 (PSS-style) drops the dimmest 20%
+    /// of cells; set 0 to disable. Active only when `useTwoStageQuality`
+    /// is on.
+    var adaptiveAPRejectFraction: Double = 0.20
+
+    /// Common-area auto-crop (Block F.2 / AS!4 parity). Compute max
+    /// |dx|, |dy| across the kept frames' alignment shifts; crop the
+    /// final accumulator to the region where every frame contributed
+    /// valid pixels. Edges of the saved file otherwise have variable
+    /// per-pixel coverage (some pixels accumulated from fewer frames
+    /// than others) which shows up as darker / noisier edges. Default
+    /// ON; turn OFF to keep the full-resolution edges with their
+    /// reduced-coverage caveat.
+    var cropToCommonArea: Bool = true
+
     /// Per-channel stacking (Path B). When true, OSC Bayer sources are
     /// split into R / G / B mono streams BEFORE alignment, each
     /// channel is aligned and stacked independently against its own
@@ -1170,7 +1189,66 @@ private final class LuckyRunner {
 
         _ = referenceIndex
         _ = outputSize
+
+        // Block F.2: common-area auto-crop. Max |dx|, |dy| across the
+        // kept set's alignment shifts measures the per-axis drift
+        // window — pixels within that border were covered by fewer
+        // frames than the centre and therefore contributed reduced-SNR
+        // / partially-blank values to the saved TIF. Cropping by ⌈max⌉
+        // px on each axis yields a fully-covered output. AS!4's
+        // "buffering and analysis" phase does the equivalent.
+        if options.cropToCommonArea && !referenceShifts.isEmpty {
+            return Self.cropToCommonArea(input: stacked, shifts: referenceShifts, device: device)
+        }
         return stacked
+    }
+
+    /// Crop `input` to the rectangle where every frame in `shifts`
+    /// contributed valid pixels. Margin = ⌈max |dx|⌉ horizontally,
+    /// ⌈max |dy|⌉ vertically. Returns `input` unchanged when shifts
+    /// are zero or the implied crop would over-shoot. Pixel format
+    /// preserved; allocation is private-storage to match the rest of
+    /// the lucky-stack output texture handling.
+    static func cropToCommonArea(
+        input: MTLTexture,
+        shifts: [Int: SIMD2<Float>],
+        device: MTLDevice
+    ) -> MTLTexture {
+        let dxs = shifts.values.map { abs($0.x) }
+        let dys = shifts.values.map { abs($0.y) }
+        let maxDx = Int(ceil(dxs.max() ?? 0))
+        let maxDy = Int(ceil(dys.max() ?? 0))
+        if maxDx == 0 && maxDy == 0 { return input }
+        let newW = input.width  - 2 * maxDx
+        let newH = input.height - 2 * maxDy
+        guard newW > 0, newH > 0 else { return input }
+
+        let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: input.pixelFormat,
+            width: newW, height: newH,
+            mipmapped: false
+        )
+        outDesc.storageMode = .private
+        outDesc.usage = [.shaderRead, .shaderWrite]
+        guard let output = device.makeTexture(descriptor: outDesc) else { return input }
+        let queue = MetalDevice.shared.commandQueue
+        guard let cmd = queue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else { return input }
+        blit.copy(
+            from: input,
+            sourceSlice: 0, sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: maxDx, y: maxDy, z: 0),
+            sourceSize: MTLSize(width: newW, height: newH, depth: 1),
+            to: output,
+            destinationSlice: 0, destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        )
+        blit.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        NSLog("Common-area crop: %dx%d → %dx%d (margin %d,%d px)",
+              input.width, input.height, newW, newH, maxDx, maxDy)
+        return output
     }
 
     // MARK: - Stage helpers
@@ -1730,8 +1808,43 @@ private final class LuckyRunner {
         let kSoft = Float(perAPKeepCount)
         let widthSoft = max(1.0, Float(frameCount) * 0.1)
 
+        // Adaptive AP rejection (Block B.3). Compute a single "average
+        // sharpness" score per AP cell by averaging perAPScores across
+        // all kept frames, then drop the bottom rejectFraction. Those
+        // cells are dim sky / featureless background — running per-AP
+        // correlation on them just adds noise to the accumulator. The
+        // bilinear blend in lucky_accumulate_per_ap_keep handles the
+        // gap: neighbouring kept APs' contribution covers the rejected
+        // cell's pixels via cosine feathering.
+        let rejectFraction = max(0.0, min(0.5, options.adaptiveAPRejectFraction))
+        var apRejected = [Bool](repeating: false, count: apCount)
+        if rejectFraction > 0 && apCount > 1 {
+            var meanScorePerAP = [Float](repeating: 0, count: apCount)
+            for ap in 0..<apCount {
+                var sum: Double = 0
+                for f in 0..<frameCount {
+                    sum += Double(perAPScores[f * apCount + ap])
+                }
+                meanScorePerAP[ap] = Float(sum / Double(frameCount))
+            }
+            let sortedAPs = (0..<apCount).sorted { meanScorePerAP[$0] < meanScorePerAP[$1] }
+            let toReject = Int((rejectFraction * Double(apCount)).rounded())
+            for k in 0..<toReject {
+                apRejected[sortedAPs[k]] = true
+            }
+            NSLog("Adaptive AP: rejected %d/%d cells (bottom %.0f%% by mean LAPD)",
+                  toReject, apCount, rejectFraction * 100)
+        }
+
         var keepMask = [Float](repeating: 0, count: apCount * frameCount)
         for ap in 0..<apCount {
+            if apRejected[ap] {
+                // Background cell — leave the slice all-zero so the
+                // accumulator's bilinear blend pulls in zero
+                // contribution from this AP and adjacent APs cover the
+                // pixel via their cosine feather.
+                continue
+            }
             // Gather frame scores for this AP (frame-major buffer).
             var frameAndScore: [(frameIdx: Int, score: Float)] = []
             frameAndScore.reserveCapacity(frameCount)

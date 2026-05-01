@@ -68,6 +68,10 @@ enum Stack {
         // Radial Fade Filter overrides — bracket-script use only.
         var rffInnerFraction: Double? = nil
         var rffOuterFraction: Double? = nil
+        // B.3 adaptive AP rejection fraction. nil = engine default 0.20.
+        var adaptiveAPRejectFraction: Double = 0.20
+        // F.2 common-area auto-crop. Default ON for AS!4 parity.
+        var cropToCommonArea = true
         var i = 0
         while i < args.count {
             let arg = args[i]
@@ -290,6 +294,23 @@ enum Stack {
                 }
                 autoPSFSNR = v
                 i += 2
+            case "--no-common-crop":
+                // F.2: keep the full-resolution edges with reduced-coverage
+                // caveat. Default crops to the fully-covered region.
+                cropToCommonArea = false
+                i += 1
+            case "--adaptive-ap-reject":
+                // B.3: drop the bottom fraction of AP cells by mean LAPD
+                // score in the two-stage path. 0 = disabled, 0.20 default,
+                // 0.5 max.
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v >= 0, v <= 0.5
+                else {
+                    cliStderr("stack: --adaptive-ap-reject requires a number in [0, 0.5] (default 0.20)")
+                    return 64
+                }
+                adaptiveAPRejectFraction = v
+                i += 2
             case "--rff-inner":
                 guard i + 1 < args.count, let v = Double(args[i + 1]),
                       v.isFinite, v >= 0, v <= 1.5
@@ -511,6 +532,8 @@ enum Stack {
             options.disableOutputRemap = disableOutputRemap
             options.rffInnerFraction = rffInnerFraction
             options.rffOuterFraction = rffOuterFraction
+            options.adaptiveAPRejectFraction = adaptiveAPRejectFraction
+            options.cropToCommonArea = cropToCommonArea
             options.useAutoKeepPercent = useAutoKeep && !keepWasExplicit
             options.denoisePrePercent = denoisePrePercent
             options.denoisePostPercent = denoisePostPercent
