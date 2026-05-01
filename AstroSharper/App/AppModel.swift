@@ -1812,13 +1812,13 @@ struct LuckyStackUIState {
     /// stack of a session.
     var bakeInProcessing: Bool = false
 
-    /// Stack-end auto-recovery (percentile stretch) toggle. Default OFF
-    /// since the bracket on lunar + jupiter (2026-04-30) confirmed that
-    /// every non-trivial whiteCap clamps the brightest 0.2% of pixels
-    /// into a flat plateau and destroys highlight detail. Users who
-    /// want washed-out-stack recovery can flip this ON; the engine
-    /// applies the same percentile remap that was previously always-on.
-    var autoRecoverDynamicRange: Bool = false
+    /// Stack-end subject-aware tone adjust. Default ON (2026-05-01)
+    /// after the gamma bracket: lunar / wide-range subjects pass
+    /// through unchanged, planetary / dark-dominated subjects get a
+    /// pure midtone-compression gamma 1.3 (no clamping → no detail
+    /// loss). User can flip OFF for bare accumulator output across
+    /// all subjects.
+    var autoRecoverDynamicRange: Bool = true
 
     /// Optional target tag used to fill the WinJUPOS `<obj>` field. Defaults
     /// to whatever is in the active preset's target if any.

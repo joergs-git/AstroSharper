@@ -601,53 +601,79 @@ final class Pipeline {
         outDesc.storageMode = .private
         let output = device.makeTexture(descriptor: outDesc)!
 
-        // Hard-disable path: copy through. Used by --no-stretch CLI flag and
-        // by the bracketing test runs in /tmp/brightness-comparison/.
         guard enabled else {
-            NSLog("LuckyStack: stack-end remap disabled (--no-stretch / enabled=false)")
+            NSLog("LuckyStack: subject-aware tone disabled")
             return copyTexture(input, into: output)
         }
 
-        // Sample the high-end at p99.8 (was p99). Wiener deconv concentrates
-        // restored power into the brightest 0.5–1% of pixels, so p99 is too
-        // permissive — values between p99 and p998 still drag the highlight
-        // ceiling toward 1.0 and produce the "looks slightly overexposed"
-        // failure mode users reported across all subject types.
+        // Subject-aware tone (2026-05-01). User bracket on lunar + jupiter
+        // confirmed:
+        //   lunar (wide-range, median ≥ 0.30): bare accumulator IS the right
+        //     output — gamma 1.0 / no offset preferred over every other
+        //     bracket value. Identity is correct.
+        //   jupiter (dark-dominated, median < 0.30): bare accumulator was
+        //     too bright; gamma 1.3 picked as the favourite. That's a pure
+        //     midtone compression, no clamping → no detail loss.
+        //
+        // Implementation: reuse the existing apply_auto_stretch kernel with
+        // blackPoint=0, scale=1, whiteCap=1, gamma=1.3 — i.e. just `pow(v, gamma)`
+        // per pixel. The kernel's whiteCap clamp at 1.0 leaves all in-range
+        // values untouched (only would-clamp negative-resulting overshoots,
+        // which gamma > 1 doesn't produce).
+        //
+        // Backwards-compat: `whiteCapOverride` from --white-cap CLI flag
+        // overrides the gamma-only path with the legacy hard-clamp stretch.
+        // Documented as "use only for the brightness bracket script."
         guard let pts = computeLumaPercentiles(input: input, lowPercentile: 0.01, highPercentile: 0.998) else {
             return copyTexture(input, into: output)
         }
 
-        // Two modes share the same kernel; only the params differ.
-        // - DARK (median < 0.30, e.g. planet on dark sky):
-        //     stretch [p1, p998] → [0, whiteCap]. This is the original
-        //     dynamic-range recovery for mean-stacked planet-on-sky output.
-        // - WIDE (median ≥ 0.30, e.g. lunar / solar / textured surfaces):
-        //     scale-only highlight compression. blackPoint=0 so shadows are
-        //     untouched (avoids the "unnatural over-contrast" failure mode
-        //     of the original always-stretch behaviour). Only fires when
-        //     the highlight ceiling actually exceeds whiteCap.
-        //
-        // Default whiteCap = 0.92 (was 0.97). User-override via CLI
-        // --white-cap N or LuckyStackOptions.outputWhiteCap. Lower values
-        // dim the saved file more aggressively — useful when Wiener
-        // overshoot on bright features still pushes them too close to
-        // pure white at the default.
-        let whiteCap: Float = whiteCapOverride ?? 0.92
         let blackPoint: Float
         let scale: Float
-        if pts.median < 0.30 {
-            NSLog("LuckyStack: stack-end remap dark mode (median=%.3f black=%.3f white=%.3f → [0, %.2f])",
-                  pts.median, pts.black, pts.white, whiteCap)
-            blackPoint = pts.black
-            scale = whiteCap / max(1e-4, pts.white - pts.black)
-        } else if pts.white > whiteCap {
-            NSLog("LuckyStack: stack-end highlight compress (wide, median=%.3f white=%.3f → %.2f)",
-                  pts.median, pts.white, whiteCap)
+        let whiteCap: Float
+        let gamma: Float
+
+        if let cap = whiteCapOverride {
+            // Legacy hard-clamp stretch (bracket-script only — destroys
+            // highlight detail, kept behind the explicit override for
+            // empirical regression testing).
+            whiteCap = cap
+            gamma = 1.0
+            if pts.median < 0.30 {
+                blackPoint = pts.black
+                scale = cap / max(1e-4, pts.white - pts.black)
+                NSLog("LuckyStack: legacy whiteCap stretch dark mode (cap=%.2f, median=%.3f)", cap, pts.median)
+            } else if pts.white > cap {
+                blackPoint = 0
+                scale = cap / pts.white
+                NSLog("LuckyStack: legacy whiteCap stretch wide highlight-compress (cap=%.2f)", cap)
+            } else {
+                NSLog("LuckyStack: legacy whiteCap stretch skipped (well-exposed)")
+                return copyTexture(input, into: output)
+            }
+        } else if pts.white > 0.50 {
+            // Highlight peak above 0.5 — bright planet on dark sky case.
+            // Empirical user pick: gamma 1.3 (no clamp, no scale — pure
+            // midtone darkening). Verified on jupiter (p998=0.717 → 0.654).
+            //
+            // Median alone was the wrong gate (2026-05-01 false positive):
+            // BiggSky lunar lands at median=0.245 (large dark-sky border)
+            // which would have triggered gamma 1.3 even though the lunar
+            // user pick was identity. Highlight-peak gate cleanly separates
+            // "tiny planet on dark sky" (peaks bright, want darken) from
+            // "lunar / solar disc filling most of frame" (peaks moderate,
+            // want identity).
+            NSLog("LuckyStack: subject-aware tone bright-peak mode (median=%.3f white=%.3f → gamma 1.3)",
+                  pts.median, pts.white)
             blackPoint = 0
-            scale = whiteCap / pts.white
+            scale = 1.0
+            whiteCap = 1.0
+            gamma = 1.3
         } else {
-            NSLog("LuckyStack: stack-end remap skipped (wide-range, well-exposed median=%.3f white=%.3f ≤ %.2f)",
-                  pts.median, pts.white, whiteCap)
+            // Highlight peak ≤ 0.5 — lunar / solar / textured subject.
+            // Bare accumulator is what the user wants.
+            NSLog("LuckyStack: subject-aware tone identity mode (median=%.3f white=%.3f → no change)",
+                  pts.median, pts.white)
             return copyTexture(input, into: output)
         }
 
@@ -662,7 +688,7 @@ final class Pipeline {
             blackPoint: blackPoint,
             scale: scale,
             whiteCap: whiteCap,
-            gamma: 1.0
+            gamma: gamma
         )
         enc.setBytes(&p, length: MemoryLayout<AutoStretchParamsCPU>.stride, index: 0)
         let (tgC, tgS) = dispatchThreadgroups(for: output, pso: stretchPSO)

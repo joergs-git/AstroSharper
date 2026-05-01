@@ -424,10 +424,10 @@ struct LuckyStackSection: View {
                     .controlSize(.small)
                     .help("ON: the saved TIFF is the stacked frame run through the active Sharpen + Tone Curve settings — matches what you see in the live preview. OFF (default): write the raw stacked mean and apply Sharpen later via 'Apply to Selection' on the OUTPUTS tab.")
 
-                Toggle("Auto-recover dynamic range", isOn: $app.luckyStack.autoRecoverDynamicRange)
+                Toggle("Auto-tone (subject-aware)", isOn: $app.luckyStack.autoRecoverDynamicRange)
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
-                    .help("OFF (default): write the bare accumulator output — preserves all highlight detail. ON: apply a percentile-based stretch to recover dynamic range on flat / washed-out stacks. The stretch clamps the brightest 0.2% of pixels which can destroy fine highlight detail on planetary / lunar — leave OFF unless your stack looks visibly washed-out.")
+                    .help("ON (default): apply a subject-aware tone adjust to the saved file. Lunar / solar / textured stacks (median ≥ 0.30) pass through unchanged. Planetary / dark-dominated stacks (median < 0.30) get gamma 1.3 — a pure midtone compression that pulls bright planet bodies down without clamping or destroying detail. OFF: write the bare accumulator output for every subject.")
 
                 LuckyRunButton(disabled: serCount == 0) {
                     app.runLuckyStackOnSelection()

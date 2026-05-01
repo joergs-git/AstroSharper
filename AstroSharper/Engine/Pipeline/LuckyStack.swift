@@ -202,17 +202,17 @@ struct LuckyStackOptions {
     /// subjects.
     var outputWhiteCap: Double? = nil
 
-    /// Disable the stack-end auto-recovery remap entirely.
+    /// Disable the subject-aware stack-end tone adjust.
     ///
-    /// Default TRUE (2026-04-30) — empirical bracket on lunar + jupiter
-    /// confirmed every non-trivial whiteCap (0.55..0.92) destroys
-    /// highlight detail by clamping the brightest 0.2% of pixels into a
-    /// single flat plateau at whiteCap. The bare accumulator (no
-    /// stretch) preserves all the detail and looks cleaner across all
-    /// subjects. Users who want washed-out-stack recovery can enable it
-    /// via the LuckyStackSection toggle or the (legacy) `--no-stretch`
-    /// CLI flag's negation.
-    var disableOutputRemap: Bool = true
+    /// Default FALSE (2026-05-01) — replaced the destructive whiteCap
+    /// clamp with a subject-aware gamma curve user-validated via
+    /// brightness bracket: lunar / wide-range subjects pass through
+    /// unchanged, planetary / dark-dominated subjects get gamma 1.3
+    /// (pure midtone compression, no clamping → no detail loss).
+    /// Setting this true skips the adjust entirely (= bare accumulator
+    /// for all subjects, which the user verified looks correct on
+    /// lunar but slightly bright on planetary).
+    var disableOutputRemap: Bool = false
 
     /// Dual-stage denoise around the auto-PSF + Wiener path (Block C.5).
     /// Pre-denoise (default 0 = off) wraps the input BEFORE PSF
