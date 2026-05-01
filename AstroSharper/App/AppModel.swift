@@ -1293,9 +1293,26 @@ final class AppModel: ObservableObject {
     // MARK: - Presets
 
     func applyPreset(_ preset: Preset) {
+        // Preserve user's session-sticky Sharpen/Stabilize/ToneCurve
+        // ENABLE flags. Built-in presets (Sun, Jupiter, etc.) often
+        // come with these enabled, but the user wants them to default
+        // OFF at app launch and to STAY at whatever they've set during
+        // the session — file changes (which trigger autoApplyDefaultPreset)
+        // shouldn't flip them back on. Default Bool is false at app
+        // launch, so the first applyPreset call leaves them off; if the
+        // user toggles enabled=true mid-session, that state survives
+        // subsequent file loads.
+        let userSharpenEnabled  = sharpen.enabled
+        let userStabilizeEnabled = stabilize.enabled
+        let userToneEnabled      = toneCurve.enabled
+
         sharpen = preset.sharpen
         stabilize = preset.stabilize
         toneCurve = preset.toneCurve
+
+        sharpen.enabled   = userSharpenEnabled
+        stabilize.enabled = userStabilizeEnabled
+        toneCurve.enabled = userToneEnabled
         luckyStack.mode = preset.luckyMode
         luckyStack.keepPercent = preset.luckyKeepPercent
         // Per-preset Multi-AP tuning. Grid==0 means the preset prefers the

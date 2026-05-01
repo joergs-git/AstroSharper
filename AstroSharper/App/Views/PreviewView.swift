@@ -1051,6 +1051,14 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             )
             DispatchQueue.main.async {
                 self.afterTex = result
+                // Recompute display auto-range against the JUST-PRODUCED
+                // afterTex so the stretch+gamma parameters reflect what
+                // the shader will actually display. Without this, the
+                // shader uses parameters tuned to beforeTex (raw frame)
+                // while drawing the sharpened/toned afterTex, which can
+                // clip highlights to white and produce the "flat" look
+                // user reported on their solar Ha SER.
+                self.refreshDisplayAutoRange()
                 self.inFlight = false
                 self.app.processingInFlight = false
                 self.app.activePreviewStage = nil
@@ -1101,6 +1109,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     private var displayBlack: Float = 0.0    // = p1 of the luma histogram
     private var displayScale: Float = 1.0    // = 1 / max(0.005, p99 − p1)
     private var displayGamma: Float = 2.5    // user-bracket pick — fixed for now
+    private var lastUniformLogToken: String = ""    // for de-duped log spam
 
     /// Recompute auto-range params for the current `beforeTex`. Cheap
     /// (~5 ms via the existing 256² downsample + sort). Same formula
@@ -1119,7 +1128,15 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     ///       (lunar gets darker than user wants if Auto is on by default
     ///       on lunar — they can dial Brightness up or toggle Auto off)
     func refreshDisplayAutoRange() {
-        guard let tex = beforeTex else {
+        // Sample the texture the SHADER will actually display, not the
+        // raw frame: when the pipeline runs sharpen / tone curve it
+        // writes into `afterTex`, which can hold values quite different
+        // from `beforeTex` (sharpening lifts highlights, tone curve
+        // remaps midtones). Computing percentiles on `beforeTex` while
+        // the shader reads `afterTex` produces the "flat / clipped"
+        // failure mode the user saw — the stretch parameters were
+        // tuned for the wrong texture.
+        guard let tex = afterTex ?? beforeTex else {
             displayBlack = 0; displayScale = 1; return
         }
         if let pts = pipeline.computeLumaPercentiles(
@@ -1128,7 +1145,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             displayBlack = max(0, pts.black)
             let range = max(Float(0.005), pts.white - pts.black)
             displayScale = 1.0 / range
+            NSLog("Display auto-range: p1=%.4f median=%.4f p99=%.4f → black=%.4f scale=%.3f gamma=%.2f (source=%@)",
+                  pts.black, pts.median, pts.white, displayBlack, displayScale, displayGamma,
+                  afterTex != nil ? "afterTex" : "beforeTex")
         } else {
+            NSLog("Display auto-range: percentile compute returned nil — using identity")
             displayBlack = 0
             displayScale = 1.0
         }
@@ -1158,6 +1179,9 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         let split: Float = app.showAfter ? 1.0 : 0.0
         let autoOn = app.displayAutoRange
         let user: Float = Float(max(0.1, app.displayGain))
+        let bk: Float = autoOn ? displayBlack : 0
+        let sc: Float = autoOn ? displayScale : 1
+        let gm: Float = autoOn ? displayGamma : 1
         var uniforms = DisplayUniforms(
             texSize: SIMD2(tw, th),
             viewSize: SIMD2(vw, vh),
@@ -1165,12 +1189,21 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             panPx: panPx,
             splitX: split,
             hasAfter: afterTex == nil ? 0 : 1,
-            autoBlack: autoOn ? displayBlack : 0,
-            autoScale: autoOn ? displayScale : 1,
-            autoGamma: autoOn ? displayGamma : 1,
+            autoBlack: bk,
+            autoScale: sc,
+            autoGamma: gm,
             displayGain: user,
             autoRangeOn: autoOn ? 1 : 0
         )
+        // One-shot diagnostic: log the exact uniforms whenever they
+        // CHANGE. Frequent draws don't spam the log because the values
+        // are stable between texture loads + slider drags.
+        let token = "\(autoOn ? 1 : 0)|\(bk)|\(sc)|\(gm)|\(user)"
+        if token != lastUniformLogToken {
+            lastUniformLogToken = token
+            NSLog("Display uniforms: autoOn=%d black=%.4f scale=%.3f gamma=%.2f userGain=%.2f",
+                  autoOn ? 1 : 0, bk, sc, gm, user)
+        }
 
         if let before = beforeTex {
             enc.setFragmentTexture(before, index: 0)
