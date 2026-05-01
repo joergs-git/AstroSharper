@@ -61,20 +61,93 @@ enum Analyze {
             return 1
         }
 
-        do {
-            let reader = try SerReader(url: url)
-            if emitJSON {
-                emit(json: reader)
-            } else {
-                emit(text: reader)
+        // Dispatch by extension. FITS routes to the FITS-specific emit
+        // since its metadata vocabulary (BITPIX / NAXIS / DATE-OBS /
+        // EXPTIME) doesn't map cleanly onto SER's. The frame probe is
+        // SER-only and produces a usage error elsewhere.
+        let ext = url.pathExtension.lowercased()
+        switch ext {
+        case "fits", "fit":
+            do {
+                let reader = try FitsFrameReader(url: url)
+                if emitJSON {
+                    emit(jsonFits: reader)
+                } else {
+                    emit(textFits: reader)
+                }
+                if probeFrame != nil {
+                    cliStderr("analyze: --probe-frame is not supported for FITS (single-frame format)")
+                    return 64
+                }
+                return 0
+            } catch {
+                cliStderr("analyze: failed to open '\(url.path)' as FITS: \(error)")
+                return 1
             }
-            if let probeIdx = probeFrame {
-                return runFrameProbe(reader: reader, frameIndex: probeIdx)
+        default:
+            do {
+                let reader = try SerReader(url: url)
+                if emitJSON {
+                    emit(json: reader)
+                } else {
+                    emit(text: reader)
+                }
+                if let probeIdx = probeFrame {
+                    return runFrameProbe(reader: reader, frameIndex: probeIdx)
+                }
+                return 0
+            } catch {
+                cliStderr("analyze: failed to open '\(url.path)': \(error)")
+                return 1
             }
-            return 0
-        } catch {
-            cliStderr("analyze: failed to open '\(url.path)': \(error)")
-            return 1
+        }
+    }
+
+    // MARK: - FITS emit
+
+    private static func emit(textFits reader: FitsFrameReader) {
+        let bytes = (try? FileManager.default.attributesOfItem(atPath: reader.url.path)[.size] as? Int) ?? 0
+        let totalGB = Double(bytes) / 1_000_000_000.0
+        print("file        : \(reader.url.lastPathComponent)")
+        print("format      : FITS (BITPIX=-32, NAXIS=2)")
+        print("dimensions  : \(reader.imageWidth) x \(reader.imageHeight)")
+        print("pixel depth : 32-bit float")
+        if let date = reader.captureDate {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            print("captured UT : \(formatter.string(from: date))")
+        } else {
+            print("captured UT : (DATE-OBS not present in header)")
+        }
+        print("total bytes : \(bytes.formatted()) (\(String(format: "%.3f", totalGB)) GB)")
+    }
+
+    private static func emit(jsonFits reader: FitsFrameReader) {
+        let bytes = (try? FileManager.default.attributesOfItem(atPath: reader.url.path)[.size] as? Int) ?? 0
+        var payload: [String: Any] = [
+            "filename": reader.url.lastPathComponent,
+            "format": "fits",
+            "imageWidth": reader.imageWidth,
+            "imageHeight": reader.imageHeight,
+            "frameCount": 1,
+            "pixelDepth": 32,
+            "colorID": "mono",
+            "colorIsMono": true,
+            "colorIsBayer": false,
+            "colorIsRGB": false,
+            "totalBytes": bytes,
+        ]
+        if let date = reader.captureDate {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            payload["captureDateUTC"] = formatter.string(from: date)
+        }
+        if let data = try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        ),
+           let s = String(data: data, encoding: .utf8) {
+            print(s)
         }
     }
 

@@ -64,6 +64,56 @@ protocol SourceReader: AnyObject {
     func loadFrame(at index: Int, device: MTLDevice) throws -> MTLTexture
 }
 
+/// Errors that surface when the factory can't open a URL.
+enum SourceReaderOpenError: Error, LocalizedError {
+    case unsupportedExtension(String)
+    case openFailed(String, Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedExtension(let ext):
+            return "SourceReader: unsupported extension '.\(ext)'"
+        case .openFailed(let kind, let underlying):
+            return "SourceReader: \(kind) open failed — \(underlying)"
+        }
+    }
+}
+
+extension SourceReader where Self == SerReader {
+    /// Format-agnostic factory — dispatches by file extension to the
+    /// matching concrete reader. Use when the calling code only needs
+    /// the universal `SourceReader` API. Format-specific fast paths
+    /// (raw byte access for SER's accumulator loop, AVFoundation
+    /// hooks for AVI) still want a direct construction.
+    ///
+    /// Supported extensions:
+    /// - `.ser` → `SerReader`
+    /// - `.avi`, `.mov`, `.mp4`, `.m4v` → `AviReader`
+    /// - `.fits`, `.fit` → `FitsFrameReader`
+    static func open(url: URL) throws -> SourceReader {
+        try SourceReaderFactory.open(url: url)
+    }
+}
+
+enum SourceReaderFactory {
+    static func open(url: URL) throws -> SourceReader {
+        let ext = url.pathExtension.lowercased()
+        switch ext {
+        case "ser":
+            do { return try SerReader(url: url) }
+            catch { throw SourceReaderOpenError.openFailed("SER", error) }
+        case "avi", "mov", "mp4", "m4v":
+            do { return try AviReader(url: url) }
+            catch { throw SourceReaderOpenError.openFailed("AVI", error) }
+        case "fits", "fit":
+            do { return try FitsFrameReader(url: url) }
+            catch { throw SourceReaderOpenError.openFailed("FITS", error) }
+        default:
+            throw SourceReaderOpenError.unsupportedExtension(ext)
+        }
+    }
+}
+
 // MARK: - SerReader conformance
 
 extension SerReader: SourceReader {

@@ -22,7 +22,21 @@ enum ImageTextureError: Error {
 enum ImageTexture {
     /// Load an image into an rgba16Float texture. Grayscale sources are
     /// broadcast to R, G, B (alpha = 1). Colour sources use device RGB.
+    /// FITS files (`.fits` / `.fit`) skip the CGImageSource path entirely
+    /// and delegate to `FitsFrameReader.loadFrame` since CoreGraphics
+    /// doesn't grok FITS — without this branch the preview would fail
+    /// with `cannotOpen` on every astronomical file from PixInsight /
+    /// Siril.
     static func load(url: URL, device: MTLDevice) throws -> MTLTexture {
+        let ext = url.pathExtension.lowercased()
+        if ext == "fits" || ext == "fit" {
+            do {
+                let reader = try FitsFrameReader(url: url)
+                return try reader.loadFrame(at: 0, device: device)
+            } catch {
+                throw ImageTextureError.cannotDecode(url)
+            }
+        }
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else {
             throw ImageTextureError.cannotOpen(url)
         }

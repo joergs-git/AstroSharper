@@ -92,9 +92,11 @@ struct FileCatalog {
         "tif", "tiff", "png", "jpg", "jpeg",
         "ser",
         "avi",
+        "fits", "fit",
     ]
     static let serExtension = "ser"
     static let aviExtension = "avi"
+    static let fitsExtensions: Set<String> = ["fits", "fit"]
 
     mutating func load(from folder: URL) {
         rootURL = folder
@@ -163,6 +165,13 @@ struct FileCatalog {
         if ext == aviExtension {
             if let reader = try? AviReader(url: url) {
                 return (reader.imageWidth, reader.imageHeight)
+            }
+            return nil
+        }
+        if fitsExtensions.contains(ext) {
+            // Cheap header-only peek; the full pixel buffer isn't read here.
+            if let dims = FitsReader.readDimensions(url) {
+                return (dims.0, dims.1)
             }
             return nil
         }
