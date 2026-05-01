@@ -1214,6 +1214,22 @@ final class AppModel: ObservableObject {
         perItemOpts.perChannelStacking = luckyStack.perChannelStacking
         perItemOpts.useAutoPSF = luckyStack.autoPSF
         perItemOpts.autoPSFSNR = luckyStack.autoPSFSNR
+        // RFF user setting → per-run options. Auto = pass nil so the
+        // engine's σ-aware formula computes the fractions per disc
+        // geometry. Manual = pass the user's slider values. Off = pass
+        // the sentinel value 0 to the disable flag the engine reads.
+        perItemOpts.disableRFF = (luckyStack.rffMode == .off)
+        switch luckyStack.rffMode {
+        case .auto:
+            perItemOpts.rffInnerFraction = nil
+            perItemOpts.rffOuterFraction = nil
+        case .manual:
+            perItemOpts.rffInnerFraction = luckyStack.rffInnerFraction
+            perItemOpts.rffOuterFraction = luckyStack.rffOuterFraction
+        case .off:
+            perItemOpts.rffInnerFraction = nil
+            perItemOpts.rffOuterFraction = nil
+        }
         perItemOpts.denoisePrePercent = luckyStack.denoisePrePercent
         perItemOpts.denoisePostPercent = luckyStack.denoisePostPercent
         perItemOpts.useTiledDeconv = luckyStack.tiledDeconv
@@ -1872,6 +1888,16 @@ struct LuckyStackUIState {
     /// 30 = aggressive (rings on bright planets), 100 = soft (gentle
     /// on noisy data).
     var autoPSFSNR: Double = 50
+
+    /// Radial Fade Filter (RFF) settings — Auto / Manual / Off. Default
+    /// Auto uses the σ-aware formula. Manual exposes inner / outer
+    /// sliders. Off skips the fade entirely (Wiener output used
+    /// directly — useful for solar Hα where the auto fade looks
+    /// strange against the chromosphere edge per 2026-05-01 user
+    /// feedback).
+    var rffMode: RFFMode = .auto
+    var rffInnerFraction: Double = 0.85
+    var rffOuterFraction: Double = 1.05
 
     /// Dual-stage denoise around the auto-PSF + Wiener path (Block C.5).
     /// 0..100. Pre-denoise wraps the input before PSF estimation +

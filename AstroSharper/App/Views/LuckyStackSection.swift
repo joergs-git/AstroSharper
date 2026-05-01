@@ -331,6 +331,56 @@ struct LuckyStackSection: View {
                         .controlSize(.small)
                     }
 
+                    // Radial Fade Filter (RFF). Auto = σ-aware formula.
+                    // Manual = expose inner / outer sliders. Off = skip the
+                    // fade entirely (raw Wiener output) — for solar Hα
+                    // where the auto fade looks strange against the
+                    // chromosphere edge.
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Radial Fade").font(.caption)
+                            Spacer()
+                            Picker("", selection: $app.luckyStack.rffMode) {
+                                ForEach(RFFMode.allCases) { mode in
+                                    Text(mode.rawValue).tag(mode)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 180)
+                            .controlSize(.small)
+                            .labelsHidden()
+                        }
+                        if app.luckyStack.rffMode == .manual {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    Text("RFF Inner").font(.caption2)
+                                    Spacer()
+                                    Text(String(format: "%.2f", app.luckyStack.rffInnerFraction))
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                }
+                                Slider(
+                                    value: $app.luckyStack.rffInnerFraction,
+                                    in: 0.5...1.5, step: 0.05
+                                )
+                                .controlSize(.small)
+                                HStack {
+                                    Text("RFF Outer").font(.caption2)
+                                    Spacer()
+                                    Text(String(format: "%.2f", app.luckyStack.rffOuterFraction))
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                }
+                                Slider(
+                                    value: $app.luckyStack.rffOuterFraction,
+                                    in: 1.0...2.0, step: 0.05
+                                )
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                    .help("Radial Fade Filter blends Wiener-deconv output with the bare stack near the disc limb to suppress Gibbs ringing. Auto picks per-disc fractions from σ/r. Manual exposes the inner / outer fractions. Off skips the fade — useful when the auto behaviour looks wrong on certain limb shapes (solar Hα chromosphere).")
+
                     // Block C.5 dual-stage denoise — visible only when
                     // auto-PSF is on, since the engine ignores these
                     // values otherwise.

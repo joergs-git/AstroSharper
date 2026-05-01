@@ -20,6 +20,19 @@ import Foundation
 import Metal
 import MetalPerformanceShaders
 
+/// Radial Fade Filter mode for the auto-PSF + Wiener post-pass.
+/// Auto = σ-aware formula (planet-radius dependent, the 2026-05-01
+/// default). Manual = user-tuned inner / outer fractions. Off = no
+/// fade, raw Wiener output blends straight (reveals more limb detail
+/// on subjects where the auto fade is too aggressive — solar Hα
+/// limb the canonical user-reported case).
+enum RFFMode: String, CaseIterable, Identifiable, Codable {
+    case auto = "Auto"
+    case manual = "Manual"
+    case off = "Off"
+    var id: String { rawValue }
+}
+
 enum LuckyStackMode: String, CaseIterable, Identifiable, Codable {
     case lightspeed = "Lightspeed"
     case scientific = "Scientific"
@@ -234,6 +247,14 @@ struct LuckyStackOptions {
     /// script /tmp/rff-bracket/.
     var rffInnerFraction: Double? = nil
     var rffOuterFraction: Double? = nil
+
+    /// Skip the radial-fade blend entirely, using the bare Wiener
+    /// output directly. Set by the GUI's "RFF: Off" mode for subjects
+    /// where the auto fade looks wrong (solar Hα limb is the canonical
+    /// case from 2026-05-01). When on, the AutoPSF post-pass still
+    /// runs Wiener — only the radial fade blend with the pre-deconv
+    /// is skipped.
+    var disableRFF: Bool = false
 
     /// White-cap override for `Pipeline.applyOutputRemap`. nil = use the
     /// pipeline's built-in default (0.92). Lower values dim the saved
@@ -756,42 +777,54 @@ enum LuckyStack {
                             // the formula. Self-tuning per disc geometry: large
                             // planetary disc → tight RFF, sharp limb. Small disc
                             // → wide RFF, no dark-ring artifact.
-                            let sigma = Float(psf.sigma)
-                            let radius = max(Float(1), Float(psf.discRadius))
-                            let ratio = sigma / radius
-                            let formulaInner = max(Float(0.65),
-                                                   min(Float(1.0),
-                                                       Float(1.0) - Float(15.0) * max(Float(0), ratio - Float(0.025))))
-                            let formulaOuter = max(Float(1.05), formulaInner + Float(0.10))
-                            let rffInner = options.rffInnerFraction.map { Float($0) } ?? formulaInner
-                            let rffOuter = options.rffOuterFraction.map { Float($0) } ?? formulaOuter
-                            NSLog("RFF: σ=%.2f r=%.0f σ/r=%.3f → inner=%.2f outer=%.2f",
-                                  sigma, radius, ratio, rffInner, rffOuter)
-                            if let radial = Self.radialDeconvBlend(
-                                pre: final,
-                                deconv: deconvTex,
-                                center: psf.discCenter,
-                                discRadius: psf.discRadius,
-                                innerFraction: rffInner,
-                                outerFraction: rffOuter,
-                                device: device
-                            ) {
-                                final = radial
-                            } else if options.useTiledDeconv {
-                                if let blended = Self.tiledDeconvBlend(
+                            // RFF Off (user GUI setting): skip the radial fade
+                            // entirely; the bare Wiener output stands in for
+                            // the blend. Useful where the auto fade looks wrong
+                            // — solar Hα chromosphere edge per 2026-05-01
+                            // user feedback.
+                            if options.disableRFF {
+                                NSLog("RFF: disabled by user (Off mode) — using bare Wiener output")
+                                final = deconvTex
+                                // Skip the rest of the radial / tiled blend block.
+                                // Continue to denoise via the post-stage check below.
+                            } else {
+                                let sigma = Float(psf.sigma)
+                                let radius = max(Float(1), Float(psf.discRadius))
+                                let ratio = sigma / radius
+                                let formulaInner = max(Float(0.65),
+                                                       min(Float(1.0),
+                                                           Float(1.0) - Float(15.0) * max(Float(0), ratio - Float(0.025))))
+                                let formulaOuter = max(Float(1.05), formulaInner + Float(0.10))
+                                let rffInner = options.rffInnerFraction.map { Float($0) } ?? formulaInner
+                                let rffOuter = options.rffOuterFraction.map { Float($0) } ?? formulaOuter
+                                NSLog("RFF: σ=%.2f r=%.0f σ/r=%.3f → inner=%.2f outer=%.2f",
+                                      sigma, radius, ratio, rffInner, rffOuter)
+                                if let radial = Self.radialDeconvBlend(
                                     pre: final,
                                     deconv: deconvTex,
-                                    apGrid: options.tiledDeconvAPGrid,
-                                    pipeline: pipeline,
+                                    center: psf.discCenter,
+                                    discRadius: psf.discRadius,
+                                    innerFraction: rffInner,
+                                    outerFraction: rffOuter,
                                     device: device
                                 ) {
-                                    final = blended
+                                    final = radial
+                                } else if options.useTiledDeconv {
+                                    if let blended = Self.tiledDeconvBlend(
+                                        pre: final,
+                                        deconv: deconvTex,
+                                        apGrid: options.tiledDeconvAPGrid,
+                                        pipeline: pipeline,
+                                        device: device
+                                    ) {
+                                        final = blended
+                                    } else {
+                                        final = deconvTex
+                                    }
                                 } else {
                                     final = deconvTex
                                 }
-                            } else {
-                                final = deconvTex
-                            }
+                            }   // end RFF-on branch (else of disableRFF)
                         }
 
                         // Stage 3: post-denoise (Block C.5 second half).
@@ -1846,7 +1879,15 @@ private final class LuckyRunner {
         keepFractionPerAP: Double,
         progress: @escaping (LuckyStackProgress) -> Void
     ) async throws -> MTLTexture {
-        let safeGrid = max(1, apGrid)
+        // Clamp upper end too. Beyond 16×16 the per-AP × per-frame
+        // keepMask buffer + per-AP variance buffer scale O(grid² ·
+        // frameCount); 20×20 + 10k frames already crosses 16 MB and
+        // pushes Metal's threadgroup-dispatch envelope on older Apple
+        // Silicon (the 2026-04-24 lessons.md "Multi-AP grid >12×12 may
+        // exceed threadgroup memory" caveat). Cap at 16×16 = 256 cells
+        // — proven safe across the BiggSky test set + the 2026-05-01
+        // user-reported crash on excessive grid was exactly this path.
+        let safeGrid = max(2, min(16, apGrid))
         let apCount = safeGrid * safeGrid
         let frameCount = indices.count
         guard frameCount > 0 else {
