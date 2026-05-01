@@ -689,13 +689,36 @@ enum LuckyStack {
                             // option for subjects where the radial
                             // assumption doesn't fit (multi-feature
                             // solar surface, future use cases).
+                            // σ-aware RFF defaults (2026-05-01) fit to user
+                            // picks across 3 disc sizes:
+                            //   mars  r=58  σ=2.90 σ/r=5.0% → inner 0.65 (A)
+                            //   saturn r=103 σ=3.36 σ/r=3.3% → inner 0.90 (B)
+                            //   jupiter r=173 σ=3.47 σ/r=2.0% → inner 1.00 (C)
+                            // Linear fit with knee at σ/r=2.5%:
+                            //   inner = clamp(1 - 15·max(0, σ/r - 0.025), 0.65, 1.0)
+                            //   outer = max(1.05, inner + 0.10)
+                            // CLI overrides (--rff-inner / --rff-outer) bypass
+                            // the formula. Self-tuning per disc geometry: large
+                            // planetary disc → tight RFF, sharp limb. Small disc
+                            // → wide RFF, no dark-ring artifact.
+                            let sigma = Float(psf.sigma)
+                            let radius = max(Float(1), Float(psf.discRadius))
+                            let ratio = sigma / radius
+                            let formulaInner = max(Float(0.65),
+                                                   min(Float(1.0),
+                                                       Float(1.0) - Float(15.0) * max(Float(0), ratio - Float(0.025))))
+                            let formulaOuter = max(Float(1.05), formulaInner + Float(0.10))
+                            let rffInner = options.rffInnerFraction.map { Float($0) } ?? formulaInner
+                            let rffOuter = options.rffOuterFraction.map { Float($0) } ?? formulaOuter
+                            NSLog("RFF: σ=%.2f r=%.0f σ/r=%.3f → inner=%.2f outer=%.2f",
+                                  sigma, radius, ratio, rffInner, rffOuter)
                             if let radial = Self.radialDeconvBlend(
                                 pre: final,
                                 deconv: deconvTex,
                                 center: psf.discCenter,
                                 discRadius: psf.discRadius,
-                                innerFraction: options.rffInnerFraction.map { Float($0) } ?? 0.65,
-                                outerFraction: options.rffOuterFraction.map { Float($0) } ?? 1.05,
+                                innerFraction: rffInner,
+                                outerFraction: rffOuter,
                                 device: device
                             ) {
                                 final = radial
