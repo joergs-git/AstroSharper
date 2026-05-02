@@ -89,6 +89,42 @@ After running Stabilize from Inputs:
 
 You can stabilize again from the Memory tab — AstroSharper reuses the current memory textures (no re-load from disk), so prior sharpening is preserved. A pre-flight confirm asks before re-aligning over edited frames.
 
+## Sharpening pipeline order (STEP 1 → 2 → 3)
+
+Three labelled STEPs in the Settings panel, applied in that visual top-to-bottom order:
+
+```
+STEP 1: SHARPEN
+   ┌─ Deconvolution ─┐    ┌─ Boost ─┐
+   │ Off / Wiener    │ +  │ Off /   │ + (orthogonal)  Noise Reduction
+   │  / Lucy-R.      │    │ Unsharp │
+   │  + Pre-gamma    │    │  / Wavelet │
+   └─────────────────┘    └─────────┘
+
+STEP 2: COLOUR & LEVELS
+   ┌─ Auto White Balance (gray-world)
+   └─ Atmospheric Chromatic Dispersion Correction
+
+STEP 3: TONE CURVE
+   ┌─ Histogram editor + B-spline curve
+   ├─ Brightness / Contrast / Saturation
+   └─ Highlights / Shadows
+```
+
+Two key rules the dual-picker enforces:
+
+1. **One method per family.** Deconvolution (Wiener / LR) and Boost (Unsharp / Wavelet) are independent picks — you can stack one of each (classic pro pipeline) but not two of the same kind (Wiener+LR or Unsharp+Wavelet both compound artifacts).
+2. **Engine reorders correctly.** Auto WB + ACDC actually run *before* sharpening internally (otherwise channel imbalance becomes coloured halos) — the step labels are written in workflow order, not pipeline order.
+
+Recommended starting points:
+
+- **Smart-auto stack output** (Wiener already baked in by Lucky Stack): Deconv = Off, Boost = Wavelet, NR low.
+- **Bare-stack output** (`--no-stretch` or `disableOutputRemap = true`): Deconv = Wiener with Pre-gamma 1.0, Boost = Wavelet.
+- **Solar Hα prominences**: Deconv = Wiener (σ ≈ 1.5, SNR 100), Boost = Wavelet with the inner bands lifted, NR off.
+- **Photon-noisy planetary** (Saturn, Mars at low altitude): Deconv = Lucy-Richardson (15 iter), Boost = Wavelet, NR on.
+
+Full reference: [`docs/wiki/Sharpening.md`](wiki/Sharpening.md).
+
 ## Reference frame: how to pick well
 
 The single most impactful tweak. The reference is what every other frame is shifted to match — pick a poor reference and the whole session is jittery.

@@ -41,8 +41,8 @@ struct HowToView: View {
                     )
                     StepCard(
                         number: 3,
-                        title: "Sharpen + tone",
-                        detail: "The output TIFF lands in OUTPUTS automatically. The Sharpening section combines Wavelet (à-trous, Registax-style), optional Wiener or Lucy-Richardson deconvolution, and an Unsharp Mask. The Tone Curve panel includes a histogram + auto-stretch; click anywhere to add a control point, drag to shape, right-click to remove."
+                        title: "Sharpen + tone (in this order)",
+                        detail: "The output TIFF lands in OUTPUTS automatically, then three labelled steps shape it: STEP 1: SHARPEN — pick ONE Deconvolution method (Wiener / Lucy-Richardson) AND/OR ONE Boost method (Unsharp / Wavelet à-trous). Pro pipeline pairs one deconv + one boost; the picker prevents Wiener+LR or Unsharp+Wavelet (same-category stacking compounds artifacts). STEP 2: COLOUR & LEVELS — Auto White Balance + Atmospheric Chromatic Dispersion Correction for OSC. STEP 3: TONE CURVE — histogram editor with click-to-add control points + B/C / saturation / shadows / highlights."
                     )
                     StepCard(
                         number: 4,
@@ -68,6 +68,39 @@ struct HowToView: View {
 
                     Divider().padding(.vertical, 4)
 
+                    Text("Sharpening — what stacks well, what doesn't")
+                        .font(.system(size: 14, weight: .heavy))
+                    Text("Two distinct families of \"sharpening\". Stack one from each, never two of the same kind:")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    BulletRow(icon: "arrow.uturn.backward", color: .blue,
+                              text: "DECONVOLUTION (Wiener / Lucy-Richardson) — inverts the blur using a PSF model. Recovers detail actually lost to atmosphere/optics.")
+                    BulletRow(icon: "speaker.wave.3.fill", color: .purple,
+                              text: "BOOST (Unsharp Mask / Wavelet à-trous) — amplifies existing high-frequency content. No PSF model; just contrast at a chosen scale.")
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Combinations the picker enforces:")
+                            .font(.system(size: 12, weight: .semibold))
+                            .padding(.top, 4)
+                        BulletRow(icon: "checkmark.circle.fill", color: .green,
+                                  text: "Deconv + Boost (e.g. Wiener + Wavelet) — classic PixInsight / RegiStax pro pipeline. Different operations, different frequencies.")
+                        BulletRow(icon: "checkmark.circle.fill", color: .green,
+                                  text: "Just Boost (e.g. Off + Wavelet) — typical post-stack flow when Lucky Stack already baked deconv via --smart-auto.")
+                        BulletRow(icon: "xmark.octagon.fill", color: .red,
+                                  text: "Wiener + Lucy-Richardson — two deconvolutions stacked → severe ringing.")
+                        BulletRow(icon: "xmark.octagon.fill", color: .red,
+                                  text: "Unsharp Mask + Wavelet — two boosts stacked → compounded halos for the same gain you'd get tuning ONE harder.")
+                    }
+                    Text("Pre-gamma (linearisation) appears under the Deconvolution picker when a method is selected — match the gamma your capture program applied. Same role as WaveSharp's PreGamma loader knob.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+
+                    Divider().padding(.vertical, 4)
+
                     Button {
                         NSWorkspace.shared.open(AppLinks.github.appendingPathComponent("wiki"))
                     } label: {
@@ -88,7 +121,7 @@ struct HowToView: View {
                 .padding(.vertical, 16)
             }
         }
-        .frame(width: 640, height: 620)
+        .frame(width: 640, height: 820)
     }
 }
 

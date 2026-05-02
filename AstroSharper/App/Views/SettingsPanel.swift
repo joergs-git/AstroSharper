@@ -28,45 +28,64 @@ struct SettingsPanel: View {
 
 // MARK: - Sharpening
 
-/// Mutually-exclusive sharpening method selector. Pro astrophotography
-/// best practice is to use ONE method per pipeline run — stacking
-/// multiple sharpeners (Wiener + Wavelet + Unsharp) compounds halos
-/// and ringing artifacts faster than it recovers detail. The picker
-/// enforces this; the underlying SharpenSettings booleans get cleared
-/// for the unselected methods on every change.
-enum SharpenMethod: String, CaseIterable, Identifiable {
-    case off       = "Off"
-    case unsharp   = "Unsharp Mask"
-    case wavelet   = "Wavelet (à-trous)"
-    case wiener    = "Wiener Deconvolution"
-    case lr        = "Lucy-Richardson Deconvolution"
+/// Deconvolution method selector. Mutually exclusive within the
+/// deconvolution category (you can't stack Wiener + Lucy-Richardson —
+/// two deconvolutions compound ringing). Pairs with `BoostMethod`
+/// below: pro practice is "deconv (this) + boost (next)" → one of
+/// each, never two of the same kind.
+enum DeconvMethod: String, CaseIterable, Identifiable {
+    case off    = "Off"
+    case wiener = "Wiener"
+    case lr     = "Lucy-Richardson"
     var id: String { rawValue }
-    /// True when this method is a linear-forward-model deconvolution —
-    /// uses captureGamma (Pre-gamma) to linearise the input first.
-    var isDeconvolution: Bool { self == .wiener || self == .lr }
+}
+
+/// Boost (multi-scale enhancement) method selector. Mutually exclusive
+/// within the boost category — Unsharp + Wavelet stacked just compound
+/// halos for the same gain you'd get tuning ONE harder. Independently
+/// pickable from `DeconvMethod`: deconv recovers detail blurred away,
+/// boost amplifies the detail that survived.
+enum BoostMethod: String, CaseIterable, Identifiable {
+    case off     = "Off"
+    case unsharp = "Unsharp Mask"
+    case wavelet = "Wavelet (à-trous)"
+    var id: String { rawValue }
 }
 
 struct SharpeningSection: View {
     @EnvironmentObject private var app: AppModel
 
-    /// Adapter binding mapping the four mutually-exclusive booleans on
-    /// `SharpenSettings` to a single `SharpenMethod`. Reads the first
-    /// true flag in priority order; writes clear ALL flags then set
-    /// only the chosen one. Off = all flags false.
-    private var methodBinding: Binding<SharpenMethod> {
+    /// Adapter binding mapping the two deconvolution booleans on
+    /// `SharpenSettings` to a single `DeconvMethod`. Wiener / LR are
+    /// mutually exclusive; the Boost methods (unsharp / wavelet) are
+    /// independent and live in their own picker.
+    private var deconvBinding: Binding<DeconvMethod> {
+        Binding(
+            get: {
+                if app.sharpen.wienerEnabled { return .wiener }
+                if app.sharpen.lrEnabled     { return .lr }
+                return .off
+            },
+            set: { method in
+                app.sharpen.wienerEnabled = (method == .wiener)
+                app.sharpen.lrEnabled     = (method == .lr)
+            }
+        )
+    }
+
+    /// Adapter binding for the boost picker. Same XOR pattern as
+    /// `deconvBinding` — Unsharp / Wavelet can't both be on, but
+    /// either can stack with a deconvolution choice.
+    private var boostBinding: Binding<BoostMethod> {
         Binding(
             get: {
                 if app.sharpen.unsharpEnabled { return .unsharp }
                 if app.sharpen.waveletEnabled { return .wavelet }
-                if app.sharpen.wienerEnabled  { return .wiener }
-                if app.sharpen.lrEnabled      { return .lr }
                 return .off
             },
             set: { method in
                 app.sharpen.unsharpEnabled = (method == .unsharp)
                 app.sharpen.waveletEnabled = (method == .wavelet)
-                app.sharpen.wienerEnabled  = (method == .wiener)
-                app.sharpen.lrEnabled      = (method == .lr)
             }
         )
     }
@@ -78,34 +97,46 @@ struct SharpeningSection: View {
             isOn: $app.sharpen.enabled,
             highlight: app.activePreviewStage == .sharpening
         ) {
-            // Mutually-exclusive method picker. Replaces the previous
-            // four-toggle layout so users can't accidentally stack
-            // multiple sharpeners (compounded halos + ringing).
+            // Two-axis picker: deconvolution category + boost category.
+            // Pro pipeline can stack ONE deconv + ONE boost (different
+            // operations targeting different frequency content); the
+            // pickers prevent the *bad* combinations: Wiener + LR
+            // (double deconv → ringing) and Unsharp + Wavelet (double
+            // boost → compounded halos).
+            //
+            // Example legitimate combinations:
+            //   • Wiener + Wavelet  → classic PixInsight / RegiStax pro pipeline
+            //   • Lucy-Richardson + Unsharp → finishing pass on a noisy stack
+            //   • Off + Wavelet  → the typical post-stack flow when Lucky
+            //     Stack already baked in deconv via --smart-auto
+            //   • Off + Off  → pass-through (use only the bake)
+
+            // ── Deconvolution picker ─────────────────────────────────
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text("Method")
+                    Text("Deconvolution")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.secondary)
                     Spacer()
                 }
-                Picker("", selection: methodBinding) {
-                    ForEach(SharpenMethod.allCases) { m in
+                Picker("", selection: deconvBinding) {
+                    ForEach(DeconvMethod.allCases) { m in
                         Text(m.rawValue).tag(m)
                     }
                 }
                 .pickerStyle(.menu)
                 .controlSize(.small)
-                .help("Pick ONE sharpening method per pipeline run. Pro astrophotography best practice: stacking multiple sharpeners (Wiener + Wavelet + Unsharp) compounds halos and ringing artifacts faster than it recovers detail. Off = pass-through (use the deconvolution baked in by the Lucky Stack pipeline).")
+                .help("Inverts the blur using a PSF model — recovers detail actually lost to atmosphere/optics. Pick ONE: Wiener (linear, fast, MSE-optimal) or Lucy-Richardson (iterative, non-negative, better on photon-noise-dominated sources). Off = no post-stack deconv (smart-auto Lucky Stack already baked one in via AutoPSF + Wiener).")
             }
 
             // Pre-gamma (captureGamma) — applied to the input before
             // any deconvolution, so the algorithm sees roughly-linear
             // data even when the source TIFF was saved through a
-            // SharpCap / FireCapture display gamma. Only meaningful for
-            // the deconv methods (Wiener / Lucy-Richardson); WaveSharp
-            // exposes the same knob as "PreGamma" in its File Actions
-            // tab and recommends it for any non-linear source.
-            if methodBinding.wrappedValue.isDeconvolution {
+            // SharpCap / FireCapture display gamma. Only meaningful
+            // when a deconv method is picked; WaveSharp exposes the
+            // same knob as "PreGamma" in its File Actions tab and
+            // recommends it for any non-linear source.
+            if deconvBinding.wrappedValue != .off {
                 LabeledSlider(
                     label: "Pre-gamma",
                     value: $app.sharpen.captureGamma,
@@ -115,17 +146,56 @@ struct SharpeningSection: View {
                 .help("Linearises a non-linear camera output BEFORE deconvolution so the algorithm's linear-forward-model assumption holds. 1.0 = data is already linear (no correction). 2.0 ≈ SharpCap/ZWO default display gamma. Match the gamma your capture program applied at save. Same role as WaveSharp's 'PreGamma' loader option.")
             }
 
+            // Per-deconv-method controls.
+            if deconvBinding.wrappedValue == .wiener {
+                LabeledSlider(label: "Wiener PSF σ", value: $app.sharpen.wienerSigma, range: 0.3...6, format: "%.2f px")
+                LabeledSlider(label: "Wiener SNR", value: $app.sharpen.wienerSNR, range: 5...500, format: "%.0f")
+                Text("Linear MSE-optimal deconvolution. Best for theoretical-PSF (well-known optics). Lower SNR = more regularization, less ringing.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if deconvBinding.wrappedValue == .lr {
+                LabeledSlider(
+                    label: "Iterations",
+                    value: Binding(
+                        get: { Double(app.sharpen.lrIterations) },
+                        set: { app.sharpen.lrIterations = Int($0) }
+                    ),
+                    range: 1...200, format: "%.0f"
+                )
+                LabeledSlider(label: "PSF σ", value: $app.sharpen.lrSigma, range: 0.3...8, format: "%.2f px")
+                Text("Iterative non-negative deconvolution. Better than Wiener on photon-noise-dominated sources but ringing grows with iteration count — start low (10–25), only push higher if the bands clearly aren't recovering.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Divider().padding(.vertical, 4)
 
-            // Per-method controls only render when that method is
-            // selected. Cleaner than the old `.disabled(!enabled)`
-            // ghost-row layout and makes the panel notably shorter
-            // for the typical user who only uses one method.
-            if methodBinding.wrappedValue == .unsharp {
+            // ── Boost picker ────────────────────────────────────────
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Boost")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                Picker("", selection: boostBinding) {
+                    ForEach(BoostMethod.allCases) { m in
+                        Text(m.rawValue).tag(m)
+                    }
+                }
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .help("Amplifies existing high-frequency detail (no PSF model). Pick ONE: Unsharp Mask (single-scale, fastest) or Wavelet à-trous (multi-scale, RegiStax-style — independent control per spatial band). Pairs nicely with a deconv choice above; pro pipeline is 'deconv recovers blurred-away detail, boost amplifies what survives'.")
+            }
+
+            // Per-boost-method controls.
+            if boostBinding.wrappedValue == .unsharp {
                 LabeledSlider(label: "Radius (σ)", value: $app.sharpen.radius, range: 0.2...15, format: "%.2f px")
                 LabeledSlider(label: "Amount", value: $app.sharpen.amount, range: 0...8, format: "%.2f")
                 Toggle("Adaptive (dim areas less)", isOn: $app.sharpen.adaptive)
-            } else if methodBinding.wrappedValue == .wavelet {
+            } else if boostBinding.wrappedValue == .wavelet {
                 ForEach(0..<app.sharpen.waveletScales.count, id: \.self) { idx in
                     LabeledSlider(
                         label: "Scale \(idx + 1) (\(Int(pow(2.0, Double(idx)))) px)",
@@ -195,36 +265,15 @@ struct SharpeningSection: View {
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if methodBinding.wrappedValue == .wiener {
-                LabeledSlider(label: "Wiener PSF σ", value: $app.sharpen.wienerSigma, range: 0.3...6, format: "%.2f px")
-                LabeledSlider(label: "Wiener SNR", value: $app.sharpen.wienerSNR, range: 5...500, format: "%.0f")
-                Text("Linear MSE-optimal deconvolution. Best for theoretical-PSF (well-known optics). Lower SNR = more regularization, less ringing.")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if methodBinding.wrappedValue == .lr {
-                LabeledSlider(
-                    label: "Iterations",
-                    value: Binding(
-                        get: { Double(app.sharpen.lrIterations) },
-                        set: { app.sharpen.lrIterations = Int($0) }
-                    ),
-                    range: 1...200, format: "%.0f"
-                )
-                LabeledSlider(label: "PSF σ", value: $app.sharpen.lrSigma, range: 0.3...8, format: "%.2f px")
-                Text("Iterative non-negative deconvolution. Better than Wiener on photon-noise-dominated sources but ringing grows with iteration count — start low (10–25), only push higher if the bands clearly aren't recovering.")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Divider().padding(.vertical, 4)
 
             // Noise reduction — final stage, applied AFTER all sharpening
             // and before the tone curve. Edge-preserving bilateral filter.
-            // Stays as an INDEPENDENT toggle (not part of the XOR picker)
-            // because it's a separate operation, not a sharpening method
-            // — pairs with whichever sharpening method the user picked.
+            // Independent of the deconv / boost pickers since it's an
+            // orthogonal operation that pairs with any sharpening choice
+            // (or none).
             Toggle("Noise Reduction (final stage)", isOn: $app.sharpen.nrEnabled)
             LabeledSlider(label: "Spatial σ", value: $app.sharpen.nrSpatial, range: 0.3...4, format: "%.2f px")
                 .disabled(!app.sharpen.nrEnabled)

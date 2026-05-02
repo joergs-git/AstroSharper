@@ -93,6 +93,36 @@ Coming. Watch the repo for the announcement. Or open a thread on cloudynights or
 
 A deeper walk-through lives in [`docs/WORKFLOW.md`](docs/WORKFLOW.md), and the in-app **How AstroSharper works** window (Help menu) has the same content as a movable, non-blocking guide.
 
+## Sharpening pipeline order
+
+The post-stack workflow is three labelled STEPs in the settings panel — order matters because it's physically enforced by the math, not just convention:
+
+```
+STEP 1: SHARPEN   →   STEP 2: COLOUR & LEVELS   →   STEP 3: TONE CURVE
+```
+
+**STEP 1 has two independent pickers** because there are two distinct families of "sharpening":
+
+| Family | Methods (pick one) | What it does |
+|---|---|---|
+| **Deconvolution** | Wiener · Lucy-Richardson | *Inverts* the blur using a PSF model — recovers detail actually lost to atmosphere/optics |
+| **Boost** | Unsharp Mask · Wavelet (à-trous) | *Amplifies* existing high-frequency content — no PSF model, just contrast at a chosen scale |
+
+You can stack **one method from each family** — that's the classic PixInsight / RegiStax pipeline. You can NOT stack two from the same family, and the pickers prevent it:
+
+| Combination | Verdict |
+|---|---|
+| Wiener + Wavelet | ✅ classic pro pipeline (different operations on different frequencies) |
+| Off + Wavelet | ✅ typical post-stack flow when Lucky Stack `--smart-auto` already baked Wiener in |
+| Wiener + Lucy-Richardson | ❌ two deconvolutions stacked → severe ringing |
+| Unsharp Mask + Wavelet | ❌ two boosts stacked → compounded halos for the same gain you'd get tuning ONE harder |
+
+**Pre-gamma** appears under the Deconvolution picker when a method is selected. Match it to the gamma your capture program applied (≈ 2.0 for SharpCap / FireCapture defaults; 1.0 for already-linear sources). Same role as WaveSharp's `PreGamma` loader option — linearises the input so the deconvolution's linear-forward-model assumption holds.
+
+**Why STEP 2 (Colour) before STEP 3 (Tone):** Auto White Balance + Atmospheric Chromatic Dispersion Correction must run before the tone curve so non-linear curves don't break the per-channel statistics. The engine applies them in this order regardless of which sliders you've touched; the section labels match the order so you don't get surprised.
+
+Full reference: [`docs/wiki/Sharpening.md`](docs/wiki/Sharpening.md).
+
 ## Architecture in one paragraph
 
 SwiftUI on top, `MTKView` preview, `MPSGraph` and hand-written Metal compute kernels underneath. Every texture is `rgba16Float` end-to-end. SER frames are memory-mapped, Bayer demosaic happens on the GPU. Phase correlation uses Accelerate's vDSP 2D FFT in parallel; lucky-stack quality grading is a Laplacian-variance compute kernel; sharpening is an à-trous wavelet decomposition with Wiener / Lucy-Richardson available as alternatives. Output is 16-bit float TIFF (or 8-bit PNG / JPEG) via ImageIO. Full breakdown in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
