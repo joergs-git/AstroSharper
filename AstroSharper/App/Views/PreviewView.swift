@@ -235,6 +235,15 @@ private struct MetalPreviewRepresentable: NSViewRepresentable {
         // like Preview.app / Photoshop drawing the same TIFF.
         if let layer = view.layer as? CAMetalLayer {
             layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+            // Live-resize perf (macOS 15+ regression observed 2026-05-02):
+            // sRGB colorspace + the default `wantsExtendedDynamicRangeContent
+            // = false` makes the compositor schedule a colour-space-
+            // conversion pass on every present. During live resize the
+            // CSC path serialises against the redraw and tanks fps. Opt
+            // in to EDR content so the compositor skips CSC and presents
+            // the texture's bytes directly. We're not actually emitting
+            // EDR values, but allowing it puts us on the fast path.
+            layer.wantsExtendedDynamicRangeContent = true
         }
         // Drive on demand. Continuous 60 fps was redundant — the display
         // shader only changes when textures or zoom/pan do, and free-running
