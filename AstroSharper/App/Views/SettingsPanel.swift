@@ -28,31 +28,104 @@ struct SettingsPanel: View {
 
 // MARK: - Sharpening
 
+/// Mutually-exclusive sharpening method selector. Pro astrophotography
+/// best practice is to use ONE method per pipeline run — stacking
+/// multiple sharpeners (Wiener + Wavelet + Unsharp) compounds halos
+/// and ringing artifacts faster than it recovers detail. The picker
+/// enforces this; the underlying SharpenSettings booleans get cleared
+/// for the unselected methods on every change.
+enum SharpenMethod: String, CaseIterable, Identifiable {
+    case off       = "Off"
+    case unsharp   = "Unsharp Mask"
+    case wavelet   = "Wavelet (à-trous)"
+    case wiener    = "Wiener Deconvolution"
+    case lr        = "Lucy-Richardson Deconvolution"
+    var id: String { rawValue }
+    /// True when this method is a linear-forward-model deconvolution —
+    /// uses captureGamma (Pre-gamma) to linearise the input first.
+    var isDeconvolution: Bool { self == .wiener || self == .lr }
+}
+
 struct SharpeningSection: View {
     @EnvironmentObject private var app: AppModel
 
+    /// Adapter binding mapping the four mutually-exclusive booleans on
+    /// `SharpenSettings` to a single `SharpenMethod`. Reads the first
+    /// true flag in priority order; writes clear ALL flags then set
+    /// only the chosen one. Off = all flags false.
+    private var methodBinding: Binding<SharpenMethod> {
+        Binding(
+            get: {
+                if app.sharpen.unsharpEnabled { return .unsharp }
+                if app.sharpen.waveletEnabled { return .wavelet }
+                if app.sharpen.wienerEnabled  { return .wiener }
+                if app.sharpen.lrEnabled      { return .lr }
+                return .off
+            },
+            set: { method in
+                app.sharpen.unsharpEnabled = (method == .unsharp)
+                app.sharpen.waveletEnabled = (method == .wavelet)
+                app.sharpen.wienerEnabled  = (method == .wiener)
+                app.sharpen.lrEnabled      = (method == .lr)
+            }
+        )
+    }
+
     var body: some View {
         SectionContainer(
-            title: "Sharpening",
+            title: "STEP 1: SHARPEN",
             icon: "wand.and.stars",
             isOn: $app.sharpen.enabled,
             highlight: app.activePreviewStage == .sharpening
         ) {
-            // Slider ranges bumped 1.5–2× the previous limits so the
-            // strong sharpening typical for jupiter / saturn fits inside
-            // the slider without forcing the user to type values manually.
-            Toggle("Unsharp Mask", isOn: $app.sharpen.unsharpEnabled)
-            LabeledSlider(label: "Radius (σ)", value: $app.sharpen.radius, range: 0.2...15, format: "%.2f px")
-                .disabled(!app.sharpen.unsharpEnabled)
-            LabeledSlider(label: "Amount", value: $app.sharpen.amount, range: 0...8, format: "%.2f")
-                .disabled(!app.sharpen.unsharpEnabled)
-            Toggle("Adaptive (dim areas less)", isOn: $app.sharpen.adaptive)
-                .disabled(!app.sharpen.unsharpEnabled)
+            // Mutually-exclusive method picker. Replaces the previous
+            // four-toggle layout so users can't accidentally stack
+            // multiple sharpeners (compounded halos + ringing).
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Method")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                Picker("", selection: methodBinding) {
+                    ForEach(SharpenMethod.allCases) { m in
+                        Text(m.rawValue).tag(m)
+                    }
+                }
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .help("Pick ONE sharpening method per pipeline run. Pro astrophotography best practice: stacking multiple sharpeners (Wiener + Wavelet + Unsharp) compounds halos and ringing artifacts faster than it recovers detail. Off = pass-through (use the deconvolution baked in by the Lucky Stack pipeline).")
+            }
+
+            // Pre-gamma (captureGamma) — applied to the input before
+            // any deconvolution, so the algorithm sees roughly-linear
+            // data even when the source TIFF was saved through a
+            // SharpCap / FireCapture display gamma. Only meaningful for
+            // the deconv methods (Wiener / Lucy-Richardson); WaveSharp
+            // exposes the same knob as "PreGamma" in its File Actions
+            // tab and recommends it for any non-linear source.
+            if methodBinding.wrappedValue.isDeconvolution {
+                LabeledSlider(
+                    label: "Pre-gamma",
+                    value: $app.sharpen.captureGamma,
+                    range: 0.5...2.5,
+                    format: "%.2f"
+                )
+                .help("Linearises a non-linear camera output BEFORE deconvolution so the algorithm's linear-forward-model assumption holds. 1.0 = data is already linear (no correction). 2.0 ≈ SharpCap/ZWO default display gamma. Match the gamma your capture program applied at save. Same role as WaveSharp's 'PreGamma' loader option.")
+            }
 
             Divider().padding(.vertical, 4)
 
-            Toggle("Wavelet Sharpen (à-trous)", isOn: $app.sharpen.waveletEnabled)
-            if app.sharpen.waveletEnabled {
+            // Per-method controls only render when that method is
+            // selected. Cleaner than the old `.disabled(!enabled)`
+            // ghost-row layout and makes the panel notably shorter
+            // for the typical user who only uses one method.
+            if methodBinding.wrappedValue == .unsharp {
+                LabeledSlider(label: "Radius (σ)", value: $app.sharpen.radius, range: 0.2...15, format: "%.2f px")
+                LabeledSlider(label: "Amount", value: $app.sharpen.amount, range: 0...8, format: "%.2f")
+                Toggle("Adaptive (dim areas less)", isOn: $app.sharpen.adaptive)
+            } else if methodBinding.wrappedValue == .wavelet {
                 ForEach(0..<app.sharpen.waveletScales.count, id: \.self) { idx in
                     LabeledSlider(
                         label: "Scale \(idx + 1) (\(Int(pow(2.0, Double(idx)))) px)",
@@ -122,40 +195,36 @@ struct SharpeningSection: View {
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if methodBinding.wrappedValue == .wiener {
+                LabeledSlider(label: "Wiener PSF σ", value: $app.sharpen.wienerSigma, range: 0.3...6, format: "%.2f px")
+                LabeledSlider(label: "Wiener SNR", value: $app.sharpen.wienerSNR, range: 5...500, format: "%.0f")
+                Text("Linear MSE-optimal deconvolution. Best for theoretical-PSF (well-known optics). Lower SNR = more regularization, less ringing.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if methodBinding.wrappedValue == .lr {
+                LabeledSlider(
+                    label: "Iterations",
+                    value: Binding(
+                        get: { Double(app.sharpen.lrIterations) },
+                        set: { app.sharpen.lrIterations = Int($0) }
+                    ),
+                    range: 1...200, format: "%.0f"
+                )
+                LabeledSlider(label: "PSF σ", value: $app.sharpen.lrSigma, range: 0.3...8, format: "%.2f px")
+                Text("Iterative non-negative deconvolution. Better than Wiener on photon-noise-dominated sources but ringing grows with iteration count — start low (10–25), only push higher if the bands clearly aren't recovering.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
-            Divider().padding(.vertical, 4)
-
-            Toggle("Wiener Deconvolution", isOn: $app.sharpen.wienerEnabled)
-            LabeledSlider(label: "Wiener PSF σ", value: $app.sharpen.wienerSigma, range: 0.3...6, format: "%.2f px")
-                .disabled(!app.sharpen.wienerEnabled)
-            LabeledSlider(label: "Wiener SNR", value: $app.sharpen.wienerSNR, range: 5...500, format: "%.0f")
-                .disabled(!app.sharpen.wienerEnabled)
-            Text("Linear MSE-optimal deconvolution. Best for theoretical-PSF (well-known optics). Lower SNR = more regularization, less ringing.")
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .opacity(app.sharpen.wienerEnabled ? 1 : 0.5)
-
-            Divider().padding(.vertical, 4)
-
-            Toggle("Lucy-Richardson Deconvolution", isOn: $app.sharpen.lrEnabled)
-            LabeledSlider(
-                label: "Iterations",
-                value: Binding(
-                    get: { Double(app.sharpen.lrIterations) },
-                    set: { app.sharpen.lrIterations = Int($0) }
-                ),
-                range: 1...200, format: "%.0f"
-            )
-            .disabled(!app.sharpen.lrEnabled)
-            LabeledSlider(label: "PSF σ", value: $app.sharpen.lrSigma, range: 0.3...8, format: "%.2f px")
-                .disabled(!app.sharpen.lrEnabled)
 
             Divider().padding(.vertical, 4)
 
             // Noise reduction — final stage, applied AFTER all sharpening
             // and before the tone curve. Edge-preserving bilateral filter.
+            // Stays as an INDEPENDENT toggle (not part of the XOR picker)
+            // because it's a separate operation, not a sharpening method
+            // — pairs with whichever sharpening method the user picked.
             Toggle("Noise Reduction (final stage)", isOn: $app.sharpen.nrEnabled)
             LabeledSlider(label: "Spatial σ", value: $app.sharpen.nrSpatial, range: 0.3...4, format: "%.2f px")
                 .disabled(!app.sharpen.nrEnabled)
@@ -370,7 +439,7 @@ struct ToneCurveSection: View {
                 HStack(spacing: 6) {
                     Image(systemName: "slider.horizontal.below.rectangle")
                         .foregroundColor(.accentColor)
-                    Text("Colour & Levels")
+                    Text("STEP 2: COLOUR & LEVELS")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(.primary)
                 }
@@ -395,7 +464,7 @@ struct ToneCurveSection: View {
             )
 
             SectionContainer(
-                title: "Tone Curve",
+                title: "STEP 3: TONE CURVE",
                 icon: "waveform.path.ecg",
                 isOn: $app.toneCurve.enabled,
                 highlight: app.activePreviewStage == .toneCurve
