@@ -242,6 +242,15 @@ private struct MetalPreviewRepresentable: NSViewRepresentable {
         // to drag-resize. Every mutation site already calls needsDisplay = true.
         view.enableSetNeedsDisplay = true
         view.isPaused = true
+        // Live-resize perf: default `autoResizeDrawable = true` makes
+        // MTKView reallocate the drawable's IOSurface on every pixel-step
+        // of a live window resize. With ZoomableMTKView's overrides
+        // (`viewDidEndLiveResize` / `setFrameSize`) we resync drawable
+        // size only at the end of the resize and let CoreAnimation
+        // stretch the previous drawable in the meantime — same trade-
+        // off Preview.app makes for live-resize responsiveness on
+        // big images.
+        view.autoResizeDrawable = false
         view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         view.delegate = context.coordinator
         view.coordinator = context.coordinator
@@ -1281,6 +1290,43 @@ final class ZoomableMTKView: MTKView {
         guard view.width > 0, view.height > 0,
               texSize.width > 0, texSize.height > 0 else { return 0 }
         return min(view.width / texSize.width, view.height / texSize.height)
+    }
+
+    // MARK: - Resize handling (paired with `autoResizeDrawable = false`)
+
+    /// Live resize finished — sync drawable size to the new bounds at
+    /// native scale, then redraw at full fidelity. CoreAnimation will
+    /// have been scaling the stale drawable during the drag; this is
+    /// the snap-back-to-crisp moment.
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        syncDrawableSizeToBounds()
+        needsDisplay = true
+    }
+
+    /// Programmatic / non-live size changes (initial layout, full-
+    /// screen toggle, multi-monitor move) still need an immediate
+    /// drawable-size sync — only LIVE resize is what we're trying to
+    /// throttle. `inLiveResize` distinguishes the two.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if !inLiveResize {
+            syncDrawableSizeToBounds()
+        }
+    }
+
+    /// Backing-scale-aware drawable size from the current bounds.
+    /// Skips no-op writes so we don't churn the IOSurface when the
+    /// computed size is already current.
+    private func syncDrawableSizeToBounds() {
+        let scale = window?.backingScaleFactor ?? 1
+        let target = CGSize(
+            width:  max(1, bounds.width  * scale),
+            height: max(1, bounds.height * scale)
+        )
+        if drawableSize != target {
+            drawableSize = target
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
