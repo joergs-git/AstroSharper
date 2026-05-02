@@ -48,6 +48,16 @@ struct SerScrubBar: View {
             .disabled(!usable || app.previewSerFrameIndex <= 0)
             .keyboardShortcut(.leftArrow, modifiers: [])
 
+            // PERFORMANCE: do NOT pass `step:` here. SwiftUI maps a
+            // discrete-step Slider to NSSlider with numberOfTickMarks
+            // == range/step + 1, and AppKit then renders every tick on
+            // every layout pass via -[NSSliderTickMarks drawRect:].
+            // For a 5000-frame SER that's 5000 tick marks redrawing on
+            // every window resize tick — confirmed via `sample` profile
+            // 2026-05-02 (resize was 161/4058 main-thread samples in
+            // tick-mark draw alone). The Int conversion in `set:` is
+            // sufficient to snap the value to whole frames; no visual
+            // ticks are needed.
             Slider(
                 value: Binding(
                     get: {
@@ -56,8 +66,7 @@ struct SerScrubBar: View {
                     },
                     set: { app.previewSerFrameIndex = Int($0) }
                 ),
-                in: 0...safeUpper,
-                step: 1
+                in: 0...safeUpper
             )
             .controlSize(.small)
             .disabled(!usable)
