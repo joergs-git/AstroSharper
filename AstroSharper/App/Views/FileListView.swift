@@ -43,6 +43,40 @@ struct FileListView: View {
         filteredFiles.filter { ids.contains($0.id) }.map(\.url)
     }
 
+    /// Currently-active preset's target — drives the per-row mini-chip
+    /// in the thumbnail column. nil when no preset is active (which is
+    /// also the state where Run Lucky Stack refuses to start).
+    private var activePresetTarget: PresetTarget? {
+        guard let id = app.presets.activeID else { return nil }
+        return app.presets.preset(withID: id)?.target
+    }
+
+    /// Compact violet chip (32×32) showing the active preset's target.
+    /// Same palette as the headline-bar TargetPickerRow chips so the
+    /// "this row will be processed as Sun" link is visually obvious.
+    private static let listChipViolet     = Color(red: 0.55, green: 0.34, blue: 0.92)
+    private static let listChipVioletDeep = Color(red: 0.40, green: 0.20, blue: 0.78)
+    @ViewBuilder
+    private func targetMiniChip(_ target: PresetTarget) -> some View {
+        VStack(spacing: 0) {
+            Image(systemName: target.icon)
+                .font(.system(size: 13, weight: .semibold))
+            Text(target.rawValue)
+                .font(.system(size: 7, weight: .semibold, design: .rounded))
+                .lineLimit(1)
+        }
+        .foregroundColor(.white)
+        .frame(width: 40, height: 32)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(LinearGradient(
+                    colors: [Self.listChipViolet, Self.listChipVioletDeep],
+                    startPoint: .top, endPoint: .bottom
+                ))
+        )
+        .help("Will be processed as the \(target.rawValue) preset.")
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             searchBar
@@ -121,13 +155,20 @@ struct FileListView: View {
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 32, height: 32)
                         .cornerRadius(2)
+                } else if file.isSER, let target = activePresetTarget {
+                    // No real thumbnail available (SER captures don't
+                    // carry one). Show the active preset's target as
+                    // a violet mini-chip so the user can see at a
+                    // glance which target this row will be processed
+                    // as. Mirrors the headline-bar picker styling.
+                    targetMiniChip(target)
                 } else {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(Color.secondary.opacity(0.15))
                         .frame(width: 32, height: 32)
                 }
             }
-            .width(40)
+            .width(56)
 
             TableColumn("Name", value: \.name) { (file: FileEntry) in
                 HStack(spacing: 4) {

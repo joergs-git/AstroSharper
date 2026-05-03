@@ -27,3 +27,6 @@ TESTIMAGES/
 Packages/
 Package.resolved
 .swiftpm/
+
+# Supabase CLI cache (auto-created by `supabase` invocations)
+supabase/.temp/

@@ -83,6 +83,17 @@ final class AppModel: ObservableObject {
     // Job status for batch runs
     @Published var jobStatus: JobStatus = .idle
 
+    /// Pending community-share prompt — set after a stack lands when
+    /// the user hasn't disabled community sharing globally. The
+    /// SwiftUI layer observes this and presents the alert with
+    /// Yes / No / Always-Off buttons. Cleared on response.
+    @Published var pendingCommunityShare: PendingCommunityShare? = nil
+    /// Re-published opt-out flag so SwiftUI re-renders the bottom-bar
+    /// icons when the user toggles them. The actual storage lives in
+    /// UserDefaults (TelemetryClient.userDisabled / CommunityShare.userDisabled).
+    @Published var telemetryEnabled: Bool = !TelemetryClient.userDisabled
+    @Published var communityShareEnabled: Bool = !CommunityShare.userDisabled
+
     // Output folder model — split into two so the auto-derived folder can
     // track the currently-opened root, while the user's explicit Choose stays
     // sticky across folder switches.
@@ -1122,6 +1133,19 @@ final class AppModel: ObservableObject {
     }
 
     func runLuckyStackOnSelection() {
+        // MANDATORY target selection (2026-05-03). Either a built-in or
+        // user preset is active (covers the auto-detect-from-filename
+        // path AND any explicit chip click) OR the run is blocked
+        // with a clear error pointing the user at the picker chips.
+        // Rationale: AutoAP / AutoPSF + the per-target Wiener defaults
+        // all key off the active preset's target; running without one
+        // means falling back to generic defaults that never match the
+        // data well.
+        guard presets.activeID != nil else {
+            jobStatus = .error("Pick a target first — click one of the planet / Sun / Moon chips at the top of the window.")
+            return
+        }
+
         let targets = batchTargetIDs
         let selectedSers = catalog.files.filter { targets.contains($0.id) && $0.isSER }
         let selectedAvi  = catalog.files.filter { targets.contains($0.id) && $0.isAVI }
@@ -1214,10 +1238,29 @@ final class AppModel: ObservableObject {
         perItemOpts.keepCount = item.absoluteCount
         perItemOpts.useMultiAP = (luckyStack.mode == .scientific) && luckyStack.multiAP.enabled
         perItemOpts.multiAPGrid = luckyStack.multiAP.grid
-        perItemOpts.multiAPSearch = max(4, min(16, luckyStack.multiAP.patchHalf))
+        // The GUI's `patchHalf` slider always meant "the SAD correlation
+        // patch radius" by its label; until 2026-05-02 it was wired into
+        // `multiAPSearch` (the search radius) AND the actual correlation
+        // patchHalf was hardcoded to 8 in the kernel call. Now both are
+        // properly threaded: the slider drives `multiAPPatchHalf`; the
+        // search radius is derived from it (patchHalf / 2 + 2, capped at 16).
+        perItemOpts.multiAPPatchHalf = max(4, min(48, luckyStack.multiAP.patchHalf))
+        perItemOpts.multiAPSearch = max(4, min(16, perItemOpts.multiAPPatchHalf / 2 + 2))
+        // AutoAP — default-on (`.fast`). Flips to `.off` when the user
+        // touched the multi-AP grid / patch sliders, recorded by the
+        // GUI as `multiAP.userOverride`. CLI `--multi-ap-grid N` flips
+        // it the same way. AutoNuke ON forces .fast regardless of any
+        // manual override flag — the master toggle wins.
+        perItemOpts.autoAP = (luckyStack.autoNuke || !luckyStack.multiAP.userOverride)
+            ? .fast : .off
         perItemOpts.perChannelStacking = luckyStack.perChannelStacking
-        perItemOpts.useAutoPSF = luckyStack.autoPSF
-        perItemOpts.autoPSFSNR = luckyStack.autoPSFSNR
+        // AutoNuke ON forces these to the engine-decides values
+        // regardless of what the (greyed-out) UI controls hold. This
+        // is the "single source of truth for auto" the user asked
+        // for: one toggle, no surprise interactions with stale
+        // checkbox states.
+        perItemOpts.useAutoPSF = luckyStack.autoNuke ? true : luckyStack.autoPSF
+        perItemOpts.autoPSFSNR = luckyStack.autoNuke ? 100 : luckyStack.autoPSFSNR
         // RFF user setting → per-run options. Auto = pass nil so the
         // engine's σ-aware formula computes the fractions per disc
         // geometry. Manual = pass the user's slider values. Off = pass
@@ -1238,7 +1281,7 @@ final class AppModel: ObservableObject {
         perItemOpts.denoisePostPercent = luckyStack.denoisePostPercent
         perItemOpts.useTiledDeconv = luckyStack.tiledDeconv
         perItemOpts.tiledDeconvAPGrid = luckyStack.tiledDeconvAPGrid
-        perItemOpts.useAutoKeepPercent = luckyStack.autoKeepPercent
+        perItemOpts.useAutoKeepPercent = luckyStack.autoNuke ? true : luckyStack.autoKeepPercent
         // Stack-end remap: GUI toggle drives the engine flag. Default OFF
         // in luckyStack.autoRecoverDynamicRange — bare accumulator
         // preserves highlight detail, which the bracket on 2026-04-30
@@ -1274,6 +1317,57 @@ final class AppModel: ObservableObject {
             )
         }
 
+        // Diagnostic: log the effective saved-file pipeline before
+        // running. Mirrors the GUI summary line so log + UI agree.
+        // Surfaces every path that could modify the saved TIFF beyond
+        // the bare accumulator — debugging the "I deselected
+        // everything but it still looks sharpened" failure mode.
+        var firing: [String] = []
+        if perItemOpts.useMultiAP { firing.append("multi-AP") }
+        if perItemOpts.useAutoPSF { firing.append("auto-PSF") }
+        if perItemOpts.useTiledDeconv && perItemOpts.useAutoPSF { firing.append("tiled-deconv") }
+        if perItemOpts.denoisePrePercent > 0 { firing.append("denoise-pre") }
+        if perItemOpts.denoisePostPercent > 0 { firing.append("denoise-post") }
+        if perItemOpts.bakeIn != nil {
+            let parts = [
+                sharpen.enabled ? "sharpen" : nil,
+                toneCurve.enabled ? "tone" : nil
+            ].compactMap { $0 }
+            firing.append("bake-in(" + (parts.isEmpty ? "nothing" : parts.joined(separator: "+")) + ")")
+        }
+        if !perItemOpts.disableOutputRemap && luckyStack.autoRecoverDynamicRange {
+            firing.append("auto-tone")
+        }
+        let pipelineSummary = firing.isEmpty ? "bare accumulator" : firing.joined(separator: " → ")
+        NSLog("LuckyStack pipeline: %@ (file=%@, autoNuke=%@)",
+              pipelineSummary,
+              item.url.lastPathComponent,
+              luckyStack.autoNuke ? "ON" : "off")
+
+        // Telemetry — captured at start so we can compute elapsed
+        // when the runner reports `.finished`. The SER header is
+        // a sub-millisecond mmap read; doing it here lets us send
+        // dimensions + frameCount without threading them through
+        // the engine's progress callback.
+        //
+        // Target source-of-truth (2026-05-03): the ACTIVE PRESET's
+        // target, not the filename keyword detect. After the
+        // mandatory-target gate in `runLuckyStackOnSelection`, the
+        // user has either auto-applied a preset (filename matched)
+        // or explicitly clicked a chip — both paths set
+        // `presets.activeID`. So this string reflects the user's
+        // actual intent rather than a re-derivation that might miss
+        // cases like `img_1234.ser`.
+        let stackStart = Date()
+        let serHeader = try? SerReader(url: item.url).header
+        let activeTarget: String? = presets.activeID
+            .flatMap { presets.preset(withID: $0) }?.target.rawValue
+            ?? PresetAutoDetect.detect(in: [
+                item.url.lastPathComponent,
+                item.url.deletingLastPathComponent().lastPathComponent
+            ])?.rawValue
+        let autoNukeAtStart = luckyStack.autoNuke
+
         LuckyStack.run(
             sourceURL: item.url,
             outputURL: outURL,
@@ -1305,6 +1399,35 @@ final class AppModel: ObservableObject {
                 self.luckyStack.queue[nextIdx].progress = 1.0
                 self.luckyStack.queue[nextIdx].outputURL = url
                 self.luckyStack.queue[nextIdx].statusText = "done"
+                // Telemetry: fire once per finished stack. No-op when
+                // user opted out via the status-bar toggle.
+                let elapsed = Date().timeIntervalSince(stackStart)
+                TelemetryClient.recordStackCompleted(
+                    target: activeTarget,
+                    frameCount: serHeader?.frameCount ?? 0,
+                    imageWidth: serHeader?.imageWidth ?? 0,
+                    imageHeight: serHeader?.imageHeight ?? 0,
+                    autoPSFSigma: nil,   // engine-internal, wired in next iteration
+                    autoAPGrid: perItemOpts.multiAPGrid,
+                    autoAPPatch: perItemOpts.multiAPPatchHalf,
+                    shiftSigma: nil,     // engine-internal, wired in next iteration
+                    elapsedSec: elapsed,
+                    autoNuke: autoNukeAtStart
+                )
+                // Community share prompt (default ON via status bar). Asks
+                // the user if they want to upload a thumbnail for the
+                // community feed. Suppressed when user disabled community
+                // share globally via the bottom-bar icon.
+                // `serHeader?.frameCount` from the source SER (captured
+                // at stack-start above) — passed through so the metadata
+                // row shows real numbers rather than `0` (the previous
+                // re-read-from-output-TIFF path always returned 0).
+                self.maybePromptCommunityShare(
+                    stackedURL: url,
+                    target: activeTarget,
+                    frameCount: serHeader?.frameCount ?? 0,
+                    elapsedSec: elapsed
+                )
                 // ALWAYS flip to Outputs after a stack lands so the user
                 // sees their result without manual navigation. registerOutput
                 // appends the file to the catalog (active or stashed); we
@@ -1354,7 +1477,62 @@ final class AppModel: ObservableObject {
             luckyStack.multiAP = .off
         }
         luckyStack.variants = preset.luckyVariants
+        // Apply the full lucky-stack tuning block (autoNuke + auto-PSF
+        // bundle, denoise, drizzle, RFF, bake-in, auto-tone) when the
+        // preset carries one. Old presets (saved before 2026-05-02)
+        // have luckyDetails = nil — leave the corresponding GUI
+        // fields at their session-current values so loading an old
+        // preset doesn't silently flip auto-features the user didn't
+        // ask for.
+        if let d = preset.luckyDetails {
+            luckyStack.autoNuke = d.autoNuke
+            luckyStack.autoPSF = d.autoPSF
+            luckyStack.autoPSFSNR = d.autoPSFSNR
+            luckyStack.autoKeepPercent = d.autoKeepPercent
+            luckyStack.perChannelStacking = d.perChannelStacking
+            luckyStack.denoisePrePercent = d.denoisePrePercent
+            luckyStack.denoisePostPercent = d.denoisePostPercent
+            luckyStack.tiledDeconv = d.tiledDeconv
+            luckyStack.tiledDeconvAPGrid = d.tiledDeconvAPGrid
+            luckyStack.sigmaClipEnabled = d.sigmaClipEnabled
+            luckyStack.sigmaClipThreshold = d.sigmaClipThreshold
+            luckyStack.drizzleScale = d.drizzleScale
+            luckyStack.drizzlePixfrac = d.drizzlePixfrac
+            luckyStack.drizzleAASigma = d.drizzleAASigma
+            luckyStack.bakeInProcessing = d.bakeInProcessing
+            luckyStack.autoRecoverDynamicRange = d.autoRecoverDynamicRange
+            luckyStack.rffMode = d.rffMode
+            luckyStack.rffInnerFraction = d.rffInnerFraction
+            luckyStack.rffOuterFraction = d.rffOuterFraction
+        }
         presets.activeID = preset.id
+    }
+
+    /// Build a `LuckyPresetDetails` snapshot of the current GUI state.
+    /// Used by save / update to make presets reproducible — every
+    /// toggle / slider in the Lucky Stack section round-trips.
+    private func currentLuckyDetails() -> LuckyPresetDetails {
+        var d = LuckyPresetDetails()
+        d.autoNuke = luckyStack.autoNuke
+        d.autoPSF = luckyStack.autoPSF
+        d.autoPSFSNR = luckyStack.autoPSFSNR
+        d.autoKeepPercent = luckyStack.autoKeepPercent
+        d.perChannelStacking = luckyStack.perChannelStacking
+        d.denoisePrePercent = luckyStack.denoisePrePercent
+        d.denoisePostPercent = luckyStack.denoisePostPercent
+        d.tiledDeconv = luckyStack.tiledDeconv
+        d.tiledDeconvAPGrid = luckyStack.tiledDeconvAPGrid
+        d.sigmaClipEnabled = luckyStack.sigmaClipEnabled
+        d.sigmaClipThreshold = luckyStack.sigmaClipThreshold
+        d.drizzleScale = luckyStack.drizzleScale
+        d.drizzlePixfrac = luckyStack.drizzlePixfrac
+        d.drizzleAASigma = luckyStack.drizzleAASigma
+        d.bakeInProcessing = luckyStack.bakeInProcessing
+        d.autoRecoverDynamicRange = luckyStack.autoRecoverDynamicRange
+        d.rffMode = luckyStack.rffMode
+        d.rffInnerFraction = luckyStack.rffInnerFraction
+        d.rffOuterFraction = luckyStack.rffOuterFraction
+        return d
     }
 
     /// Snapshot the current settings into a new user preset.
@@ -1371,7 +1549,8 @@ final class AppModel: ObservableObject {
             luckyKeepPercent: luckyStack.keepPercent,
             luckyMultiAPGrid: luckyStack.multiAP.grid,
             luckyMultiAPPatchHalf: luckyStack.multiAP.patchHalf,
-            luckyVariants: luckyStack.variants
+            luckyVariants: luckyStack.variants,
+            luckyDetails: currentLuckyDetails()
         )
         presets.save(p)
     }
@@ -1390,7 +1569,46 @@ final class AppModel: ObservableObject {
         updated.luckyMultiAPGrid = luckyStack.multiAP.grid
         updated.luckyMultiAPPatchHalf = luckyStack.multiAP.patchHalf
         updated.luckyVariants = luckyStack.variants
+        updated.luckyDetails = currentLuckyDetails()
         presets.save(updated)
+    }
+
+    // MARK: - Telemetry / community share helpers
+
+    /// Conditionally enqueue a community-share prompt after a stack
+    /// completes. No-op when the user has globally disabled
+    /// community share via the bottom-bar icon. The SwiftUI layer
+    /// observes `pendingCommunityShare` and presents the alert.
+    /// `frameCount` should be the SOURCE SER's frame count (captured
+    /// at stack-start) — re-reading the output TIFF as a SER would
+    /// always return 0.
+    fileprivate func maybePromptCommunityShare(
+        stackedURL: URL,
+        target: String?,
+        frameCount: Int,
+        elapsedSec: Double
+    ) {
+        guard CommunityShare.shouldPromptAfterStack else { return }
+        guard pendingCommunityShare == nil else { return }   // don't queue multiple
+        pendingCommunityShare = PendingCommunityShare(
+            stackedURL: stackedURL,
+            target: target,
+            frameCount: frameCount,
+            elapsedSec: elapsedSec
+        )
+    }
+
+    /// Bottom-bar telemetry toggle. Updates the persistent opt-out
+    /// flag AND the published mirror so SwiftUI re-renders the icon.
+    func setTelemetryEnabled(_ enabled: Bool) {
+        TelemetryClient.userDisabled = !enabled
+        telemetryEnabled = enabled
+    }
+
+    /// Bottom-bar community-share toggle. Same pattern.
+    func setCommunityShareEnabled(_ enabled: Bool) {
+        CommunityShare.userDisabled = !enabled
+        communityShareEnabled = enabled
     }
 
     // MARK: - Per-section apply actions
@@ -1411,50 +1629,6 @@ final class AppModel: ObservableObject {
     func runToneOnActiveSection() {
         runMixedAction(name: "tone", suffix: "_tone",
                        includeSharpen: false, includeTone: true)
-    }
-
-    /// "Apply ALL Stuff" — single-button pipeline that picks the right path
-    /// based on the active section and which sections are enabled. Lucky
-    /// Stack inherently breaks the chain (it consumes a whole SER and
-    /// produces a single stacked frame), so if it's enabled and SER files
-    /// are present in the selection we run *only* lucky-stack — its bake-in
-    /// option already pulls sharpen / tone-curve into the stacked output.
-    /// Otherwise:
-    ///   - In Memory: apply sharpen + tone in-place to memory frames.
-    ///   - In Inputs: run the regular file batch (stabilize → sharpen →
-    ///     tone) which writes straight to the outputs folder.
-    func applyAllStuff() {
-        guard case .idle = jobStatus else { return }
-        let targets = batchTargetIDs
-        let serSelected = catalog.files.contains { targets.contains($0.id) && $0.isSER }
-
-        // Lucky Stack route — auto-engages whenever SER files are present in
-        // the selection. SER is the lucky-imaging input format, so this is
-        // what the user expects; non-SER input falls through to the regular
-        // file pipeline (stabilize / sharpen / tone).
-        if serSelected {
-            runLuckyStackOnSelection()
-            return
-        }
-
-        if displayedSection == .memory {
-            // Run both sharpen and tone in-place on memory frames. If
-            // neither is enabled there's nothing to do — surface a helpful
-            // status message instead of silently no-oping.
-            if !sharpen.enabled && !toneCurve.enabled {
-                jobStatus = .error("Nothing to apply — enable Sharpening or Tone Curve first.")
-                return
-            }
-            applyToMemoryFrames(opName: "all",
-                                includeSharpen: sharpen.enabled,
-                                includeTone: toneCurve.enabled)
-            return
-        }
-
-        // Inputs / Outputs section — the file-level pipeline. applyToSelection
-        // already honours each section's `enabled` flag so we can hand it the
-        // current settings unchanged.
-        applyToSelection()
     }
 
     private func runMixedAction(
@@ -1834,16 +2008,23 @@ struct LuckyStackItem: Identifiable {
 struct LuckyMultiAPConfig: Codable, Equatable {
     var grid: Int = 0
     var patchHalf: Int = 8
+    /// Set to true when the user manually drags the grid / patch
+    /// sliders — flips AutoAP to `.off` so the manual pick stands.
+    /// Default false means AutoAP fires on every stack run; touching
+    /// either slider opts out for the rest of the session (the
+    /// preset-apply path resets this to false).
+    var userOverride: Bool = false
     var enabled: Bool { grid > 0 }
 
-    static let off = LuckyMultiAPConfig(grid: 0, patchHalf: 8)
+    static let off = LuckyMultiAPConfig(grid: 0, patchHalf: 8, userOverride: false)
     static func grid(_ n: Int, _ patchHalf: Int = 8) -> LuckyMultiAPConfig {
-        LuckyMultiAPConfig(grid: n, patchHalf: patchHalf)
+        LuckyMultiAPConfig(grid: n, patchHalf: patchHalf, userOverride: false)
     }
 
     var label: String {
         if !enabled { return "Off" }
-        return "\(grid)×\(grid) (patch \(patchHalf * 2))"
+        let suffix = userOverride ? "" : " · AUTO"
+        return "\(grid)×\(grid) (patch \(patchHalf * 2))\(suffix)"
     }
 }
 
@@ -1865,6 +2046,21 @@ struct LuckyStackUIState {
     var filenameMode: LuckyStackFilenameMode = .sharpcap
     var multiAP: LuckyMultiAPConfig = .off
     var variants: LuckyStackVariants = LuckyStackVariants()
+
+    /// AutoNuke master toggle (2026-05-02). When ON, the engine
+    /// picks every "auto" feature simultaneously and the manual
+    /// controls below are disabled / greyed out:
+    ///   - autoPSF              → forced ON
+    ///   - autoKeepPercent      → forced ON
+    ///   - multi-AP geometry    → AutoAP picks (ignores user override)
+    ///   - multi-AP yes/no      → AutoAP gate decides per fixture
+    ///   - tiled deconv grid    → AutoAP picks
+    /// When OFF, no implicit auto behaviour: every checkbox / slider
+    /// in the section is honoured exactly as the user set it. This is
+    /// the single source of truth for "let it decide" vs "I'll
+    /// configure" — replaces the old Smart-auto button which only
+    /// nudged a few flags one-shot and left manual controls active.
+    var autoNuke: Bool = false
     /// When ON, the stacked texture is run through the standard sharpen +
     /// tone pipeline before being written to disk. Default OFF: a freshly
     /// stacked image should land "raw" so the user can decide which post-
@@ -1873,13 +2069,13 @@ struct LuckyStackUIState {
     /// stack of a session.
     var bakeInProcessing: Bool = false
 
-    /// Stack-end subject-aware tone adjust. Default ON (2026-05-01)
-    /// after the gamma bracket: lunar / wide-range subjects pass
-    /// through unchanged, planetary / dark-dominated subjects get a
-    /// pure midtone-compression gamma 1.3 (no clamping → no detail
-    /// loss). User can flip OFF for bare accumulator output across
-    /// all subjects.
-    var autoRecoverDynamicRange: Bool = true
+    /// Stack-end subject-aware tone adjust. Default OFF (2026-05-02
+    /// per user feedback): the bare accumulator preserves highlight
+    /// detail and the user prefers it. ON applies the subject-aware
+    /// gamma 1.3 to dark-dominated subjects (planetary) for midtone
+    /// compression without clamping; lunar / wide-range pass through
+    /// unchanged.
+    var autoRecoverDynamicRange: Bool = false
 
     /// Optional target tag used to fill the WinJUPOS `<obj>` field. Defaults
     /// to whatever is in the active preset's target if any.
@@ -2027,4 +2223,18 @@ enum JobStatus: Equatable {
     case error(String)
 
     var isIdle: Bool { if case .idle = self { return true } else { return false } }
+}
+
+/// In-flight community-share prompt payload — populated when a stack
+/// finishes and community share is enabled. The SwiftUI alert reads
+/// these fields to render the prompt and route the response.
+struct PendingCommunityShare: Identifiable, Equatable {
+    let id = UUID()
+    let stackedURL: URL
+    let target: String?
+    let frameCount: Int
+    /// Wall-clock time the stack took on this machine. Surfaced in
+    /// the community feed window's "duration" column so other users
+    /// can compare their hardware.
+    let elapsedSec: Double
 }

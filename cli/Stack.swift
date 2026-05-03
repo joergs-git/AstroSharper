@@ -33,6 +33,12 @@ enum Stack {
         var mode: LuckyStackMode = .lightspeed
         var useMultiAP = false
         var multiAPGrid = 8
+        // AutoAP — empirical AP-grid + patchHalf + drop-list selection
+        // from the reference frame. Default `.fast` (CPU-side preflight).
+        // Explicit `--multi-ap-grid N` flips this to `.off` so the
+        // user's manual pick stands. CLI override: `--auto-ap off|fast|deep`.
+        var autoAP: AutoAPMode = .fast
+        var autoAPExplicit = false   // user-set with --auto-ap (locks the value)
         // `--sharpen` enables the unsharp + wavelet bundle. Deconv flags
         // are independent: --wiener-sigma / --lr-sigma can fire on their
         // own without unsharp / wavelet getting enabled.
@@ -196,6 +202,29 @@ enum Stack {
                 multiAPGrid = v
                 useMultiAP = true
                 if mode == .lightspeed { mode = .scientific }
+                // Explicit grid pick → flip AutoAP off so the user's
+                // manual value isn't overwritten by the auto picker.
+                // `--auto-ap fast` after this re-enables auto.
+                if !autoAPExplicit { autoAP = .off }
+                i += 2
+            case "--auto-ap":
+                // Mode selector: off | fast (default) | deep. `deep`
+                // adds the cell-shear refinement pass; reserved for
+                // long SERs (>5000 frames) where the extra ~50 ms
+                // amortises across the frame count.
+                guard i + 1 < args.count else {
+                    cliStderr("stack: --auto-ap requires off | fast | deep")
+                    return 64
+                }
+                switch args[i + 1].lowercased() {
+                case "off":  autoAP = .off
+                case "fast": autoAP = .fast
+                case "deep": autoAP = .deep
+                default:
+                    cliStderr("stack: --auto-ap '\(args[i + 1])' not recognised (use off | fast | deep)")
+                    return 64
+                }
+                autoAPExplicit = true
                 i += 2
             case "--sharpen":
                 // Enable post-stack sharpen baked into the output TIFF.
@@ -600,6 +629,7 @@ enum Stack {
             options.mode = mode
             options.useMultiAP = useMultiAP
             options.multiAPGrid = multiAPGrid
+            options.autoAP = autoAP
             // Bake-in fires when ANY post-stack sharpening flag was passed:
             // --sharpen (unsharp + wavelet bundle), --wiener-sigma (Wiener
             // deconv on its own), or --lr-sigma (Lucy-Richardson on its

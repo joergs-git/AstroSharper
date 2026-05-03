@@ -10,5 +10,14 @@
     <true/>
     <key>com.apple.developer.ubiquity-kvstore-identifier</key>
     <string>$(TeamIdentifierPrefix)$(CFBundleIdentifier)</string>
+    <!-- Required for outbound HTTP from inside the sandbox. Without
+         this the sandbox blocks /private/var/run/mDNSResponder so even
+         DNS resolution fails (URLSession returns -1003
+         "ServiceNotRunning"). Needed by TelemetryClient + CommunityShare
+         POSTs to the shared Supabase project, and by any future feature
+         that talks to a remote endpoint (App Store review URL opens
+         externally, doesn't need this; in-app fetches do). -->
+    <key>com.apple.security.network.client</key>
+    <true/>
 </dict>
 </plist>

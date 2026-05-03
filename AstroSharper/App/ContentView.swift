@@ -97,23 +97,6 @@ private struct ToolbarView: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            // "Apply ALL Stuff" — single hero entry point. Picks lucky-stack,
-            // memory in-place, or file-batch depending on context (see
-            // AppModel.applyAllStuff).
-            Button { app.applyAllStuff() } label: {
-                Label("Apply ALL Stuff", systemImage: "wand.and.stars")
-                    .labelStyle(.titleAndIcon)
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .tint(AppPalette.accent)
-            .keyboardShortcut("a", modifiers: [.command, .shift])
-            .disabled(!app.canApply)
-            .help("Run every enabled operation on the current selection (⇧⌘A). Lucky Stack short-circuits the chain because it consumes whole SER files.")
-
-            Divider().frame(height: 18)
-
             PresetMenu()
 
             Divider().frame(height: 18)

@@ -32,6 +32,16 @@ enum Validate {
         var regenerate = false
         var quiet = false
         var filter: String?
+        // AutoAP sweep mode — for each fixture, runs stack twice
+        // (multi-AP off vs multi-AP + AutoAP fast) and prints the
+        // LAPD-sharpness ratio + wall-clock ratio. Pure measurement
+        // tool: doesn't touch baselines, doesn't gate exit code on
+        // quality (some fixtures benefit, some don't, the sweep just
+        // surfaces the picture). Pass criteria from the plan:
+        //   - auto LAPD ≥ baseline LAPD − 2% on every fixture
+        //   - auto LAPD ≥ baseline LAPD + 5% on at least 4 / 7
+        //   - auto wall-clock ≤ 1.3 × baseline
+        var autoAPSweep = false
 
         var i = 0
         while i < args.count {
@@ -49,6 +59,9 @@ enum Validate {
                 }
                 filter = args[i + 1]
                 i += 2
+            case "--auto-ap-sweep":
+                autoAPSweep = true
+                i += 1
             case "--help", "-h":
                 printUsage()
                 return 0
@@ -109,6 +122,13 @@ enum Validate {
         try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
+        if autoAPSweep {
+            return await runAutoAPSweep(
+                cli: cli, serFiles: serFiles, root: testimagesURL,
+                tmpDir: tmpDir, quiet: quiet
+            )
+        }
+
         for ser in serFiles {
             let baselineKey = baselineKey(for: ser, root: testimagesURL)
             if !quiet {
@@ -144,6 +164,193 @@ enum Validate {
             print("(--regenerate: baselines rewritten; re-run without the flag to verify)")
         }
         return fails == 0 ? 0 : 1
+    }
+
+    // MARK: - AutoAP sweep
+
+    /// Runs each SER fixture through `stack --smart-auto --keep 25` in
+    /// two configurations:
+    ///   1. "baseline" — no multi-AP, current default behaviour
+    ///   2. "auto"     — multi-AP on with AutoAP `.fast` (the new
+    ///                   default-on path)
+    /// Captures `outputSharpness` (variance-of-Laplacian) + wall-clock
+    /// from each run and prints a per-fixture comparison + summary
+    /// against the plan's pass criteria. Does NOT write or read
+    /// baselines — this is a measurement tool, not a regression check.
+    private static func runAutoAPSweep(
+        cli: String, serFiles: [URL], root: URL,
+        tmpDir: URL, quiet: Bool
+    ) async -> Int32 {
+        struct Row {
+            let key: String
+            let baselineLAPD: Double?      // multi-AP off
+            let presetLAPD: Double?        // multi-AP on, prior preset geometry
+            let autoLAPD: Double?          // multi-AP on, AutoAP fast
+            let baselineWall: Double
+            let autoWall: Double
+        }
+        var rows: [Row] = []
+
+        for ser in serFiles {
+            let key = baselineKey(for: ser, root: root)
+            if !quiet { print("→ \(key)") }
+
+            // Run 1: baseline (no multi-AP, AutoAP off)
+            let outBaseline = tmpDir.appendingPathComponent("\(key).baseline.tif")
+            let metricsBaseline = tmpDir.appendingPathComponent("\(key).baseline.json")
+            let baselineStart = Date()
+            _ = runProcess(executable: cli, args: [
+                "stack", ser.path, outBaseline.path,
+                "--smart-auto", "--keep", "25",
+                "--auto-ap", "off",
+                "--quiet", "--metrics", metricsBaseline.path
+            ])
+            let baselineWall = Date().timeIntervalSince(baselineStart)
+            let baselineLAPD = readSharpness(metricsBaseline)
+
+            // Run 2: multi-AP on with prior preset geometry (no AutoAP)
+            // — pins multi-ap-grid to 10 (mid-range of historical
+            // preset values) so we measure AutoAP's geometry win
+            // separately from the multi-AP-itself effect.
+            let outPreset = tmpDir.appendingPathComponent("\(key).preset.tif")
+            let metricsPreset = tmpDir.appendingPathComponent("\(key).preset.json")
+            _ = runProcess(executable: cli, args: [
+                "stack", ser.path, outPreset.path,
+                "--smart-auto", "--keep", "25",
+                "--multi-ap", "--multi-ap-grid", "10",
+                "--auto-ap", "off",
+                "--quiet", "--metrics", metricsPreset.path
+            ])
+            let presetLAPD = readSharpness(metricsPreset)
+
+            // Run 3: AutoAP fast + multi-AP on
+            let outAuto = tmpDir.appendingPathComponent("\(key).auto.tif")
+            let metricsAuto = tmpDir.appendingPathComponent("\(key).auto.json")
+            let autoStart = Date()
+            _ = runProcess(executable: cli, args: [
+                "stack", ser.path, outAuto.path,
+                "--smart-auto", "--keep", "25",
+                "--multi-ap",
+                "--auto-ap", "fast",
+                "--quiet", "--metrics", metricsAuto.path
+            ])
+            let autoWall = Date().timeIntervalSince(autoStart)
+            let autoLAPD = readSharpness(metricsAuto)
+
+            rows.append(Row(
+                key: key,
+                baselineLAPD: baselineLAPD,
+                presetLAPD: presetLAPD,
+                autoLAPD: autoLAPD,
+                baselineWall: baselineWall,
+                autoWall: autoWall
+            ))
+        }
+
+        // Print summary table.
+        // String(format:) with %s on Swift String is undefined and
+        // crashes; format numerics with String(format:) and pad the
+        // strings via String repetition.
+        print("")
+        print("AutoAP sweep — three-way per fixture:")
+        print("  base = multi-AP off ; preset = multi-AP on with grid 10×10 ; auto = multi-AP on with AutoAP")
+        print("  " + padRight("fixture", 44) + " "
+              + padLeft("base LAPD", 10) + " "
+              + padLeft("preset", 10) + " "
+              + padLeft("auto", 10) + " "
+              + padLeft("Δvs base", 9) + " "
+              + padLeft("Δvs preset", 11) + " "
+              + padLeft("auto s", 7))
+        var fixturesAutoBeatsPreset = 0
+        var fixturesAutoBeatsBase = 0
+        var totalBaselineWall: Double = 0
+        var totalAutoWall: Double = 0
+        for r in rows {
+            let baseStr = r.baselineLAPD.map { String(format: "%.3e", $0) } ?? "—"
+            let presetStr = r.presetLAPD.map { String(format: "%.3e", $0) } ?? "—"
+            let autoStr = r.autoLAPD.map { String(format: "%.3e", $0) } ?? "—"
+            let dBaseStr: String
+            if let b = r.baselineLAPD, let a = r.autoLAPD, b > 0 {
+                let d = (a - b) / b * 100
+                dBaseStr = String(format: "%+6.1f%%", d)
+                if d > 0 { fixturesAutoBeatsBase += 1 }
+            } else {
+                dBaseStr = "—"
+            }
+            let dPresetStr: String
+            if let p = r.presetLAPD, let a = r.autoLAPD, p > 0 {
+                let d = (a - p) / p * 100
+                dPresetStr = String(format: "%+6.1f%%", d)
+                if d > 0 { fixturesAutoBeatsPreset += 1 }
+            } else {
+                dPresetStr = "—"
+            }
+            totalBaselineWall += r.baselineWall
+            totalAutoWall += r.autoWall
+            let autoWallStr = String(format: "%6.2f", r.autoWall)
+            print("  " + padRight(r.key, 44) + " "
+                  + padLeft(baseStr, 10) + " "
+                  + padLeft(presetStr, 10) + " "
+                  + padLeft(autoStr, 10) + " "
+                  + padLeft(dBaseStr, 9) + " "
+                  + padLeft(dPresetStr, 11) + " "
+                  + padLeft(autoWallStr, 7))
+        }
+
+        // Pass criteria — restated for the three-way sweep:
+        //   (a) AutoAP geometry ≥ preset geometry on EVERY fixture
+        //       (the user's "manual change should make it worse" bar:
+        //        the hand-tuned preset 10×10 is the "manual" choice
+        //        AutoAP must beat).
+        //   (b) Multi-AP + AutoAP ≥ multi-AP off on at least half
+        //       the fixtures (multi-AP itself only helps on data
+        //       with measurable atmospheric shear; it's expected
+        //       to lose on already-clean captures).
+        //   (c) AutoAP wall-clock overhead ≤ 1.3× the no-multi-AP
+        //       baseline.
+        print("")
+        print("Pass criteria:")
+        let critA = fixturesAutoBeatsPreset == rows.count
+        let critB = fixturesAutoBeatsBase * 2 >= rows.count
+        let wallRatio = totalBaselineWall > 0 ? totalAutoWall / totalBaselineWall : 1.0
+        let critC = wallRatio <= 1.3
+        let critAStr = critA
+            ? "✓ AutoAP beats preset on \(rows.count)/\(rows.count)"
+            : "✗ AutoAP beats preset on \(fixturesAutoBeatsPreset)/\(rows.count)"
+        let critBStr = critB
+            ? "✓ multi-AP+auto helps on \(fixturesAutoBeatsBase)/\(rows.count)"
+            : "✗ multi-AP+auto helps on \(fixturesAutoBeatsBase)/\(rows.count)"
+        let wallRatioStr = String(format: "%.2fx", wallRatio)
+        print("  (a) AutoAP geometry beats preset    : " + critAStr)
+        print("  (b) multi-AP+auto helps ≥ ½ fixtures: " + critBStr)
+        print("  (c) wall-clock ratio ≤ 1.3×          : " + (critC ? "✓" : "✗") + " (" + wallRatioStr + ")")
+
+        let passed = critA && critB && critC
+        print("")
+        print("AutoAP sweep: \(passed ? "PASS" : "FAIL")")
+        return passed ? 0 : 1
+    }
+
+    private static func padLeft(_ s: String, _ n: Int) -> String {
+        let pad = max(0, n - s.count)
+        return String(repeating: " ", count: pad) + s
+    }
+    private static func padRight(_ s: String, _ n: Int) -> String {
+        let pad = max(0, n - s.count)
+        return s + String(repeating: " ", count: pad)
+    }
+
+    private static func readSharpness(_ url: URL) -> Double? {
+        guard let raw = readJSONObject(url) else { return nil }
+        // Multi-keep metrics nest the sharpness value inside
+        // `keepPercents[N].outputSharpness`; for single-keep there's
+        // exactly one entry. Pull the first.
+        if let arr = raw["keepPercents"] as? [[String: Any]],
+           let first = arr.first,
+           let s = (first["outputSharpness"] as? NSNumber)?.doubleValue {
+            return s
+        }
+        return nil
     }
 
     // MARK: - Per-file runners
@@ -465,11 +672,17 @@ enum Validate {
         Tests/Regression/baselines/.
 
         OPTIONS:
-          --regenerate   Rewrite baselines instead of diffing. Use after
-                         intentional calibration changes.
-          --filter <s>   Only run files whose path contains <s>.
-          --quiet        Suppress per-file PASS lines; only print drift
-                         and the summary.
+          --regenerate     Rewrite baselines instead of diffing. Use after
+                           intentional calibration changes.
+          --filter <s>     Only run files whose path contains <s>.
+          --quiet          Suppress per-file PASS lines; only print drift
+                           and the summary.
+          --auto-ap-sweep  Run an A/B comparison: stack each fixture once
+                           with multi-AP off, once with multi-AP + AutoAP
+                           fast. Prints LAPD-sharpness delta + wall-clock
+                           ratio per fixture. Pass criteria: every fixture
+                           within −2% of baseline, ≥ +5% on ≥ 4/N, total
+                           wall-clock ≤ 1.3× baseline.
 
         EXIT CODES:
           0  all baselines match

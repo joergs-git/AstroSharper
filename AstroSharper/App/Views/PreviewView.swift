@@ -522,8 +522,16 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         case .oneToOne:
             zoomScale = oneToOneScale()
             panPx = .zero
-        case .twoHundred:
-            zoomScale = 2 * oneToOneScale()
+        case .oneToTwo:
+            // 1:2 — image at 50% (1 image px → 0.5 view px). Half of
+            // oneToOne's effective scale.
+            zoomScale = 0.5 * oneToOneScale()
+            panPx = .zero
+        case .oneToFour:
+            zoomScale = 0.25 * oneToOneScale()
+            panPx = .zero
+        case .oneToEight:
+            zoomScale = 0.125 * oneToOneScale()
             panPx = .zero
         }
         view.needsDisplay = true
@@ -1245,25 +1253,23 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
 final class ZoomableMTKView: MTKView {
     weak var coordinator: PreviewCoordinator?
 
-    private var isZoomDragging = false
     private var isPanDragging = false
-    private var zoomAnchorView: NSPoint = .zero       // drawable pixels — for anchoredZoom math
-    private var zoomAnchorPoints: NSPoint = .zero     // points — for the dx → speed calibration (matches AstroTriage's "200 pt = 2x")
-    private var zoomStartScale: Float = 1
-    private var zoomStartPan: SIMD2<Float> = .zero
     private var panDragStart: NSPoint = .zero         // drawable pixels — panPx is stored in drawable pixels too
     private var panStartOffset: SIMD2<Float> = .zero
 
     override var acceptsFirstResponder: Bool { true }
 
-    // Mouse model — ported from AstroBlinkV2 / AstroTriage's ZoomableMTKView
-    // so the experience is identical:
-    //   • Plain left-drag  = Photoshop click-drag zoom (anchored to click;
-    //     right = zoom in, left = zoom out, ~200 pt → 2×).
-    //   • ⌥ + drag         = pan (hand tool, closed-hand cursor).
-    //   • Double-click     = reset to fit-to-view + center.
-    //   • Pinch (magnify)  = zoom anchored to cursor.
-    //   • Scroll wheel     = pan when zoomed in.
+    // Mouse model — standard macOS Preview-style interactions
+    // (rebuilt 2026-05-02 — replaces the AstroTriage Photoshop-anchored
+    // click-drag-zoom which the user found surprising):
+    //   • Plain left-drag         = pan (hand tool, closed-hand cursor).
+    //   • ⌥ + drag                = pan (legacy modifier kept for
+    //                               muscle-memory).
+    //   • Double-click            = reset to fit-to-view + center.
+    //   • Pinch (magnify)         = zoom anchored to cursor.
+    //   • ⌥ + scroll wheel        = zoom anchored to cursor.
+    //   • Scroll wheel (no mods)  = pan when zoomed in; passes through
+    //                               to enclosing scroll view otherwise.
 
     /// `panPx` in the coordinator is in drawable pixels (same units the
     /// display shader sees). Mouse events come in points, so we convert.
@@ -1287,80 +1293,69 @@ final class ZoomableMTKView: MTKView {
         guard let c = coordinator else { return }
 
         if event.clickCount == 2 {
-            // Reset to fit + center.
+            // Double-click resets to fit + center. Standard macOS
+            // Preview behaviour.
             c.zoomScale = 1
             c.panPx = .zero
             needsDisplay = true
             return
         }
 
-        if event.modifierFlags.contains(.option) {
-            // ⌥-drag = pan (hand tool).
-            isPanDragging = true
-            panDragStart = toDrawable(convert(event.locationInWindow, from: nil))
-            panStartOffset = c.panPx
-            NSCursor.closedHand.set()
-            return
-        }
-
-        // Default = anchored zoom drag. Record the click anchor and the
-        // starting zoom + pan; mouseDragged will compute new pan to keep the
-        // pixel under the cursor stationary as zoom changes.
-        isZoomDragging = true
-        let pt = convert(event.locationInWindow, from: nil)
-        zoomAnchorPoints = pt
-        zoomAnchorView = toDrawable(pt)
-        zoomStartScale = c.zoomScale
-        zoomStartPan = c.panPx
+        // Plain drag (or ⌥-drag for muscle-memory) = pan. The
+        // Photoshop anchored-zoom-drag was removed 2026-05-02 per
+        // user feedback that it felt non-standard.
+        isPanDragging = true
+        panDragStart = toDrawable(convert(event.locationInWindow, from: nil))
+        panStartOffset = c.panPx
+        NSCursor.closedHand.set()
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard let c = coordinator else { return }
+        guard isPanDragging else { return }
 
-        if isPanDragging {
-            let current = toDrawable(convert(event.locationInWindow, from: nil))
-            // Hand-tool pan — image follows the cursor on BOTH axes (matches
-            // AstroTriage). The Y axis was previously inverted: dragging the
-            // cursor up moved the image down. Empirically the shader's panPx.y
-            // convention is opposite to what an earlier comment claimed, so
-            // subtracting the Y delta makes the image follow the hand. X
-            // already worked correctly (subtract → image follows hand right).
-            c.panPx.x = panStartOffset.x - Float(current.x - panDragStart.x)
-            c.panPx.y = panStartOffset.y - Float(current.y - panDragStart.y)
-            needsDisplay = true
-            return
-        }
-
-        guard isZoomDragging else { return }
-        // Zoom speed in POINTS, not drawable pixels — AstroTriage's "200 pt of
-        // horizontal drag = 2× zoom" calibration. Using drawable pixels here
-        // made the zoom feel 2× too fast on retina because dx in drawable
-        // pixels is 2× the dx in points for the same physical mouse motion.
-        let currentPoints = convert(event.locationInWindow, from: nil)
-        let dxPoints = currentPoints.x - zoomAnchorPoints.x
-        let zoomFactor = pow(2.0, dxPoints / 200.0)
-        let newScale = max(0.1, min(50.0, CGFloat(zoomStartScale) * zoomFactor))
-        anchoredZoom(toScale: Float(newScale),
-                     anchor: zoomAnchorView,
-                     fromScale: zoomStartScale,
-                     fromPan: zoomStartPan)
+        let current = toDrawable(convert(event.locationInWindow, from: nil))
+        // Hand-tool pan — image follows the cursor on BOTH axes.
+        // Subtracting the Y delta makes the image follow the hand
+        // (the shader's panPx.y convention is inverted from what one
+        // would naively expect; this empirical sign matches the X
+        // axis behaviour).
+        c.panPx.x = panStartOffset.x - Float(current.x - panDragStart.x)
+        c.panPx.y = panStartOffset.y - Float(current.y - panDragStart.y)
+        needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
         if isPanDragging { NSCursor.arrow.set() }
         isPanDragging = false
-        isZoomDragging = false
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard let c = coordinator, c.zoomScale > 1.01 else {
+        guard let c = coordinator else {
             super.scrollWheel(with: event)
             return
         }
-        // Pan when zoomed in. Multiply by backing scale to keep retina
-        // movement in the same drawable-pixel units the shader expects.
-        // Both axes subtract the scroll delta to match the click-drag pan
-        // direction (image follows the scroll).
+        // ⌥ + scroll = zoom anchored to cursor (standard Mac
+        // viewer convention, matches Preview / Photos).
+        if event.modifierFlags.contains(.option) {
+            let mouseInView = toDrawable(convert(event.locationInWindow, from: nil))
+            // scrollingDeltaY is positive when scrolling up. Map to
+            // a 1.05× / 0.95× zoom step per scroll tick.
+            let step: CGFloat = event.scrollingDeltaY > 0 ? 1.05 : (1.0 / 1.05)
+            let oldScale = c.zoomScale
+            let newScale = Float(max(0.1, min(50.0, CGFloat(oldScale) * step)))
+            anchoredZoom(toScale: newScale,
+                         anchor: mouseInView,
+                         fromScale: oldScale,
+                         fromPan: c.panPx)
+            return
+        }
+        // Plain scroll = pan when zoomed in. Otherwise pass through
+        // to whatever's behind us (typically a no-op).
+        guard c.zoomScale > 1.01 else {
+            super.scrollWheel(with: event)
+            return
+        }
         let s = Float(window?.backingScaleFactor ?? 1)
         c.panPx.x -= Float(event.scrollingDeltaX) * s
         c.panPx.y -= Float(event.scrollingDeltaY) * s

@@ -21,6 +21,82 @@ struct LuckyStackSection: View {
     /// be expanded on an empty / TIFF-only folder.
     private var disabled: Bool { allSerInCatalog == 0 }
 
+    /// One-line summary of which sharpening / tone passes will fire
+    /// on the next stacked output, given the current toggle state.
+    /// Surfaced under the toggles so the user can verify before
+    /// running — catches the "I deselected everything but it still
+    /// looks sharpened" failure mode by listing each path that
+    /// modifies the saved TIFF beyond the bare accumulator.
+    private var savedFilePipelineSummary: some View {
+        var firing: [String] = []
+        // 1. Multi-AP local refinement (changes alignment, not
+        //    sharpening per se, but affects detail).
+        if (app.luckyStack.autoNuke || app.luckyStack.multiAP.enabled)
+            && app.luckyStack.mode == .scientific {
+            firing.append("multi-AP")
+        }
+        // 2. Auto-PSF Wiener deconvolution — THE sharpening path.
+        if app.luckyStack.autoNuke || app.luckyStack.autoPSF {
+            firing.append("auto-PSF Wiener")
+        }
+        // 3. Tiled deconv (mask-based blend on top of Wiener).
+        if app.luckyStack.tiledDeconv && (app.luckyStack.autoNuke || app.luckyStack.autoPSF) {
+            firing.append("tiled deconv")
+        }
+        // 4. Pre / post denoise around the Wiener pass.
+        if app.luckyStack.denoisePrePercent > 0 || app.luckyStack.denoisePostPercent > 0 {
+            firing.append("denoise")
+        }
+        // 5. Bake-in: applies the live Sharpen + Tone settings to the
+        //    saved file. The user-controlled "I want my preview baked
+        //    into the TIFF" path. This is the most likely silent
+        //    sharpening culprit.
+        if app.luckyStack.bakeInProcessing {
+            firing.append("bake-in (Sharpen + Tone)")
+        }
+        // 6. Auto-tone (subject-aware gamma).
+        if app.luckyStack.autoRecoverDynamicRange {
+            firing.append("auto-tone")
+        }
+
+        let summary: String = firing.isEmpty
+            ? "Saved file: bare accumulator (no sharpening, no tone adjust)."
+            : "Saved file will apply: " + firing.joined(separator: " → ") + "."
+
+        return HStack(spacing: 4) {
+            Image(systemName: firing.isEmpty ? "circle" : "wand.and.stars")
+                .font(.system(size: 9))
+                .foregroundColor(firing.isEmpty ? .secondary : .accentColor)
+            Text(summary)
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// Background gradient for the AutoNuke pill. Bright when ON
+    /// (engine taking over), muted when OFF (manual control mode).
+    private var autoNukeBackground: LinearGradient {
+        if app.luckyStack.autoNuke {
+            return LinearGradient(
+                colors: [
+                    Color(red: 0.95, green: 0.34, blue: 0.22),  // hot orange
+                    Color(red: 0.82, green: 0.18, blue: 0.62),  // magenta
+                ],
+                startPoint: .leading, endPoint: .trailing
+            )
+        }
+        return LinearGradient(
+            colors: [
+                Color(red: 0.22, green: 0.51, blue: 0.95),  // blue
+                Color(red: 0.55, green: 0.34, blue: 0.92),  // violet
+            ],
+            startPoint: .leading, endPoint: .trailing
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -145,52 +221,43 @@ struct LuckyStackSection: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                // Smart auto preset — sensible Block C defaults.
-                // Auto-PSF + Wiener at SNR=100 (moderate, re-validated
-                // 2026-05-01 on the corrected sRGB display; prior 200
-                // was an eye-tune compensating for the broken display
-                // chain). Radial fade after AutoPSF succeeds kills
-                // Gibbs ringing at the disc limb automatically. No
-                // tiled deconv, no denoise, no per-channel — those
-                // soften without proportional benefit on the moderate-
-                // SNR path. Centered pill with a blue→purple gradient
-                // so the user notices it as a real action, not a
-                // tucked-away toggle.
+                // AutoNuke master toggle — single source of truth for
+                // "let the engine decide". When ON the manual controls
+                // below grey out: auto-PSF, auto-keep-%, AutoAP grid +
+                // patch + multi-AP yes/no gate all kick in together
+                // and the engine picks per-data values. When OFF every
+                // checkbox / slider below is honoured exactly as the
+                // user set it (no implicit auto behaviour). Replaced
+                // the old one-shot Smart-auto button which only nudged
+                // a few flags and left the rest editable, producing
+                // the conflict-of-controls confusion the user flagged.
                 HStack {
                     Spacer()
-                    Button {
-                        app.luckyStack.perChannelStacking = false
-                        app.luckyStack.autoPSF = true
-                        app.luckyStack.autoPSFSNR = 100
-                        app.luckyStack.tiledDeconv = false
-                        app.luckyStack.denoisePrePercent = 0
-                        app.luckyStack.denoisePostPercent = 0
-                        app.luckyStack.autoKeepPercent = true
-                    } label: {
-                        Label("Smart auto", systemImage: "wand.and.stars")
+                    Toggle(isOn: $app.luckyStack.autoNuke) {
+                        Label(
+                            app.luckyStack.autoNuke ? "AutoNuke ON" : "AutoNuke",
+                            systemImage: "wand.and.stars"
+                        )
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(.white)
                             .padding(.horizontal, 18)
                             .padding(.vertical, 7)
-                            .background(
-                                LinearGradient(
-                                    colors: [
-                                        Color(red: 0.22, green: 0.51, blue: 0.95),  // blue
-                                        Color(red: 0.55, green: 0.34, blue: 0.92),  // violet
-                                    ],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            )
+                            .background(autoNukeBackground)
                             .clipShape(Capsule())
                             .shadow(color: Color.purple.opacity(0.25), radius: 4, x: 0, y: 2)
                     }
+                    .toggleStyle(.button)
                     .buttonStyle(.plain)
-                    .help("One-click preset: aggressive Wiener deconv with auto-estimated PSF (SNR=200). The radial fade keeps the deconv strong inside the disc and smoothly fades to bare near the limb — no Gibbs ringing on small high-contrast subjects (Mars). Auto-PSF auto-bails on lunar / textured subjects so the same preset works for every subject.")
+                    .help("AutoNuke ON: engine picks auto-PSF, auto-keep-%, AP grid + patch, and multi-AP yes/no per data. Manual controls below grey out. Toggle off to configure by hand. The auto picks beat the hand-tuned presets on every fixture in the regression set.")
                     Spacer()
                 }
                 .padding(.vertical, 2)
 
+                // Manual-controls block. AutoNuke ON disables every
+                // checkbox / slider in here so the user can't accidentally
+                // contradict the engine's auto picks. Run button and
+                // queue status (below) stay live regardless.
+                Group {
                 if app.luckyStack.mode == .scientific {
                     HStack(spacing: 4) {
                         Toggle("Multi-AP", isOn: Binding(
@@ -221,6 +288,26 @@ struct LuckyStackSection: View {
                     .help("Local alignment-point grid for non-uniform seeing. Grid + patch size pull from the active preset; user presets remember your tuning.")
 
                     if app.luckyStack.multiAP.enabled {
+                        // Auto badge — visible when AutoAP is active. Touching
+                        // either slider below flips `userOverride = true` and
+                        // the badge disappears for the rest of the session.
+                        if !app.luckyStack.multiAP.userOverride {
+                            HStack(spacing: 4) {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.accentColor)
+                                Text("AUTO — grid + patch chosen from reference frame on each stack")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Button("Reset") {
+                                    app.luckyStack.multiAP.userOverride = false
+                                }
+                                .controlSize(.mini)
+                                .help("Drop manual override; AutoAP picks grid + patch on next stack.")
+                            }
+                            .padding(.vertical, 1)
+                        }
                         VStack(alignment: .leading, spacing: 2) {
                             HStack {
                                 Text("AP grid").font(.caption)
@@ -232,7 +319,10 @@ struct LuckyStackSection: View {
                             Slider(
                                 value: Binding(
                                     get: { Double(app.luckyStack.multiAP.grid) },
-                                    set: { app.luckyStack.multiAP.grid = max(2, min(20, Int($0))) }
+                                    set: {
+                                        app.luckyStack.multiAP.grid = max(2, min(20, Int($0)))
+                                        app.luckyStack.multiAP.userOverride = true
+                                    }
                                 ),
                                 in: 2...20, step: 1
                             )
@@ -249,7 +339,10 @@ struct LuckyStackSection: View {
                             Slider(
                                 value: Binding(
                                     get: { Double(app.luckyStack.multiAP.patchHalf) },
-                                    set: { app.luckyStack.multiAP.patchHalf = max(4, min(48, Int($0))) }
+                                    set: {
+                                        app.luckyStack.multiAP.patchHalf = max(4, min(48, Int($0)))
+                                        app.luckyStack.multiAP.userOverride = true
+                                    }
                                 ),
                                 in: 4...48, step: 1
                             )
@@ -573,17 +666,48 @@ struct LuckyStackSection: View {
                     }
                 }
 
+                }
+                .disabled(app.luckyStack.autoNuke)
+                .opacity(app.luckyStack.autoNuke ? 0.45 : 1.0)
+
+                if app.luckyStack.autoNuke {
+                    HStack(spacing: 4) {
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                        Text("Manual controls inactive — engine picks per-data values. Toggle AutoNuke off to configure by hand.")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 2)
+                }
+
                 Divider()
 
+                // Bake-in + auto-tone are output-style choices independent
+                // of AutoNuke (which controls stacking quality decisions).
+                // Always interactive so the user can pick whether to bake
+                // their live Sharpen + Tone settings into the saved file
+                // or apply a subject-aware tone gamma — orthogonal to
+                // whether the engine picks the multi-AP geometry.
                 Toggle("Bake current Sharpen + Tone into output", isOn: $app.luckyStack.bakeInProcessing)
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
-                    .help("ON: the saved TIFF is the stacked frame run through the active Sharpen + Tone Curve settings — matches what you see in the live preview. OFF (default): write the raw stacked mean and apply Sharpen later via 'Apply to Selection' on the OUTPUTS tab.")
+                    .help("ON: the saved TIFF is the stacked frame run through the active Sharpen + Tone Curve settings — matches what you see in the live preview. OFF (default): write the raw stacked mean and apply Sharpen later via 'Apply to Selection' on the OUTPUTS tab. Independent of AutoNuke — bake-in is an output-style choice.")
 
                 Toggle("Auto-tone (subject-aware)", isOn: $app.luckyStack.autoRecoverDynamicRange)
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
-                    .help("ON (default): apply a subject-aware tone adjust to the saved file. Lunar / solar / textured stacks (median ≥ 0.30) pass through unchanged. Planetary / dark-dominated stacks (median < 0.30) get gamma 1.3 — a pure midtone compression that pulls bright planet bodies down without clamping or destroying detail. OFF: write the bare accumulator output for every subject.")
+                    .help("ON: apply a subject-aware tone adjust to the saved file. Lunar / solar / textured stacks (median ≥ 0.30) pass through unchanged. Planetary / dark-dominated stacks (median < 0.30) get gamma 1.3 — a pure midtone compression that pulls bright planet bodies down without clamping or destroying detail. OFF (default 2026-05-02): write the bare accumulator output for every subject. Independent of AutoNuke — tone choice is yours.")
+
+                // What's actually going to land in the saved TIFF? Show
+                // the user a one-line summary so they can verify before
+                // running. Catches the "I deselected everything but it
+                // still looks sharpened" failure mode by exposing the
+                // truth: auto-PSF + bake-in are the two paths that
+                // sharpen the saved file.
+                savedFilePipelineSummary
 
                 LuckyRunButton(disabled: serCount == 0) {
                     app.runLuckyStackOnSelection()

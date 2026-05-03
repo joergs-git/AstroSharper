@@ -4,6 +4,38 @@
 // PresetManager.
 import Foundation
 
+/// Full lucky-stack tuning block stored alongside the live-preview
+/// Sharpen / Tone settings on a preset. Optional in `Preset` so old
+/// presets (saved before 2026-05-02) decode cleanly with this absent;
+/// new saves always populate it. Captures every toggle / slider in
+/// the Lucky Stack section that materially affects output:
+///   - autoNuke + auto* flags (the engine-decides bundle)
+///   - manual sharpening / deconv path (auto-PSF, denoise, tiled)
+///   - accumulator path (drizzle, sigma-clip, per-channel)
+///   - radial fade filter (RFF)
+///   - output-style choices (bake-in, auto-tone)
+struct LuckyPresetDetails: Codable, Equatable {
+    var autoNuke: Bool = false
+    var autoPSF: Bool = false
+    var autoPSFSNR: Double = 50
+    var autoKeepPercent: Bool = false
+    var perChannelStacking: Bool = false
+    var denoisePrePercent: Int = 0
+    var denoisePostPercent: Int = 0
+    var tiledDeconv: Bool = false
+    var tiledDeconvAPGrid: Int = 8
+    var sigmaClipEnabled: Bool = false
+    var sigmaClipThreshold: Double = 2.5
+    var drizzleScale: Int = 1
+    var drizzlePixfrac: Double = 0.7
+    var drizzleAASigma: Double = 0.7
+    var bakeInProcessing: Bool = false
+    var autoRecoverDynamicRange: Bool = false
+    var rffMode: RFFMode = .auto
+    var rffInnerFraction: Double = 0.85
+    var rffOuterFraction: Double = 1.05
+}
+
 /// Keywords used by the auto-detector. We match on lowercased substrings of
 /// each file's path so e.g. "/Sun/2026-04/cap.ser" or "Jupiter_001.ser" both
 /// route to the right target without the user picking anything.
@@ -83,11 +115,28 @@ struct Preset: Codable, Identifiable, Equatable {
     var luckyMode: LuckyStackMode
     var luckyKeepPercent: Int
     /// Multi-AP grid edge length: 0 = off, otherwise N → N×N AP grid.
+    /// Hint only as of 2026-05-02: AutoAP runs on every stack and
+    /// resolves the actual grid from the reference frame's content +
+    /// detected disc geometry. This value is consumed by AutoAP as
+    /// the prior / fallback when AutoPSF bails (lunar / textured /
+    /// cropped subjects). User can still override via the GUI sliders
+    /// or `--multi-ap-grid N` — both flip AutoAP into the manual
+    /// path so this value is honoured unchanged.
     var luckyMultiAPGrid: Int = 0
-    /// Patch radius for AP correlation (px). 8 → 16×16 patch.
+    /// Patch radius for AP correlation (px). 8 → 16×16 patch. Same
+    /// "hint only" semantics as `luckyMultiAPGrid` — AutoAP picks the
+    /// effective patchHalf from AutoPSF σ when available; this
+    /// preset value is consumed only as the fallback prior.
     var luckyMultiAPPatchHalf: Int = 8
     /// Optional extra-stack variants. Empty by default.
     var luckyVariants: LuckyStackVariants = LuckyStackVariants()
+    /// Full lucky-stack tuning block (autoNuke, auto-PSF, denoise,
+    /// tiled deconv, sigma-clip, drizzle, RFF, bake-in, auto-tone).
+    /// Optional for backwards-compatible decoding of presets saved
+    /// before 2026-05-02 — new saves always populate it. nil on a
+    /// loaded preset → applyPreset leaves the corresponding GUI
+    /// fields at their session-current values.
+    var luckyDetails: LuckyPresetDetails? = nil
 
     init(
         id: UUID = UUID(),
@@ -102,7 +151,8 @@ struct Preset: Codable, Identifiable, Equatable {
         luckyKeepPercent: Int = 25,
         luckyMultiAPGrid: Int = 0,
         luckyMultiAPPatchHalf: Int = 8,
-        luckyVariants: LuckyStackVariants = LuckyStackVariants()
+        luckyVariants: LuckyStackVariants = LuckyStackVariants(),
+        luckyDetails: LuckyPresetDetails? = nil
     ) {
         let now = Date()
         self.id = id
@@ -120,6 +170,7 @@ struct Preset: Codable, Identifiable, Equatable {
         self.luckyMultiAPGrid = luckyMultiAPGrid
         self.luckyMultiAPPatchHalf = luckyMultiAPPatchHalf
         self.luckyVariants = luckyVariants
+        self.luckyDetails = luckyDetails
     }
 }
 

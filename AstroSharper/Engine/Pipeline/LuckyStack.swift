@@ -94,7 +94,32 @@ struct LuckyStackOptions {
     /// Range clamped to [4, 16] inside the runner. CLI override:
     /// --multi-ap-grid N.
     var multiAPGrid: Int = 16
+    /// SAD search radius in pixels. Independent of `multiAPPatchHalf`.
     var multiAPSearch: Int = 8
+    /// SAD correlation patch half-width in pixels (so 8 → 16×16 patch).
+    /// Was hardcoded to 8 in the GPU kernel call until 2026-05-02 — the
+    /// AutoAP refactor surfaced this as a wiring bug: the GUI exposed
+    /// a "patch size" slider that was actually routed into the search
+    /// radius, while the real correlation patch stayed pinned at 8 px.
+    /// AutoAP picks this from the AutoPSF σ (≈ σ × 3) when available.
+    var multiAPPatchHalf: Int = 8
+
+    /// AutoAP — automatic AP-grid + patchHalf + drop-list selection
+    /// (Block B.3 + C.4 + isoplanatic-patch heuristic). Default `.fast`
+    /// runs the closed-form preflight (CPU-side, ~50 ms) before the
+    /// main accumulation. `.deep` adds a cell-shear refinement pass.
+    /// `.off` skips entirely — used as the "manual override" path:
+    /// when the user passes `--multi-ap-grid N` on the CLI or drags
+    /// the GUI slider, the caller flips this to `.off` so the manual
+    /// pick stands.
+    var autoAP: AutoAPMode = .fast
+
+    /// AP cell indices (row-major over `multiAPGrid × multiAPGrid`)
+    /// that the runner should skip during per-AP correlation +
+    /// accumulation. Populated by AutoAP from luminance + LAPD
+    /// scoring of the reference frame. Empty = all cells active
+    /// (current behaviour).
+    var autoAPDropList: Set<Int> = []
     /// When set, the stacked output is post-processed through the standard
     /// pipeline (sharpen + wavelet + tone-curve) before being written.
     var bakeIn: LuckyStackBakeIn? = nil
@@ -913,7 +938,11 @@ enum LuckyStack {
 private final class LuckyRunner {
     let reader: SerReader
     let pipeline: Pipeline
-    let options: LuckyStackOptions
+    /// Mutable so AutoAP can resolve grid / patchHalf / drop-list mid-run
+    /// (after the reference frame is built). Fields read by allocation
+    /// code in `init` are NOT changed by AutoAP — only the per-frame
+    /// kernel-dispatch fields that re-read `options` each frame.
+    var options: LuckyStackOptions
 
     let device: MTLDevice
     let queue: MTLCommandQueue
@@ -1329,6 +1358,21 @@ private final class LuckyRunner {
             let refTex = try await loadAndUnpack(frameIndex: referenceIndex, into: nil)
             referenceShifts = try await alignAgainstReference(referenceTex: refTex, indices: kept)
             referenceTex = refTex
+        }
+
+        // AutoAP — empirical AP-grid + patchHalf + drop-list + deconv-
+        // tile-size selection from the reference luma. Runs CPU-side
+        // off the reference texture we already built; cost ~50 ms
+        // regardless of frame count. `options.autoAP == .off` skips
+        // entirely (manual override path: CLI `--multi-ap-grid N` or
+        // user-touched GUI slider sets this).
+        if options.autoAP != .off {
+            applyAutoAP(
+                referenceTex: referenceTex,
+                sourceURL: reader.url,
+                globalShifts: referenceShifts,
+                keptOrder: kept
+            )
         }
 
         // Stage 3: weighted accumulation. Four paths, picked in order:
@@ -1801,7 +1845,7 @@ private final class LuckyRunner {
                     enc.setTexture(frameTex, index: 1)
                     enc.setTexture(mapTex, index: 2)
                     var p = APSearchParamsCPU(
-                        patchHalf: 8,
+                        patchHalf: UInt32(max(2, options.multiAPPatchHalf)),
                         searchRadius: Int32(options.multiAPSearch),
                         gridSize: SIMD2<UInt32>(UInt32(gridSize), UInt32(gridSize)),
                         globalShift: shift
@@ -2417,6 +2461,119 @@ private final class LuckyRunner {
         let n = max(1, min(scores.count, count))
         let sorted = scores.enumerated().sorted { $0.element > $1.element }
         return sorted.prefix(n).map { $0.offset }
+    }
+
+    // MARK: - AutoAP
+
+    /// Resolve AP geometry from the reference frame and overwrite the
+    /// relevant fields on `options` so the downstream accumulator
+    /// paths see the auto-picked grid / patch / search / drop-list /
+    /// tile-size. No-op when `options.autoAP == .off`. Logs the
+    /// chosen geometry via NSLog for the GUI / CLI to surface.
+    ///
+    /// `globalShifts` + `keptOrder` provide the temporal sequence of
+    /// alignment shifts AutoAP uses for the multi-AP yes/no gate
+    /// (low temporal variance → cleanly aligned data → multi-AP
+    /// suppressed). `keptOrder` is the original sorted-by-quality
+    /// frame index list so we sample shifts in quality order rather
+    /// than chronological — quality-ordered prefix gives us the
+    /// frames the stacker actually weights highest.
+    private func applyAutoAP(
+        referenceTex: MTLTexture,
+        sourceURL: URL,
+        globalShifts: [Int: SIMD2<Float>],
+        keptOrder: [Int]
+    ) {
+        // Pull luminance from the reference texture. AutoPSF.readLuminance
+        // already handles the rgba16Float / rgba32Float blit-staging
+        // dance, so we get a plain [Float] luma buffer back.
+        let lumaTuple = AutoPSF.readLuminance(texture: referenceTex, device: device)
+        let luma: [Float]? = lumaTuple?.0
+        let lumaW = lumaTuple?.1 ?? W
+        let lumaH = lumaTuple?.2 ?? H
+
+        // Target type from filename keyword auto-detect — same logic
+        // the GUI uses for preset auto-pick. Folder + filename are the
+        // candidate strings.
+        let candidates = [
+            sourceURL.lastPathComponent,
+            sourceURL.deletingLastPathComponent().lastPathComponent
+        ]
+        let targetType = PresetAutoDetect.detect(in: candidates)
+
+        // Capture frame rate from SER header metadata strings (SharpCap /
+        // FireCapture write `fps=NN.NN` into the telescope field).
+        // CaptureValidator already parses these — reuse it. nil when
+        // the metadata is absent.
+        let header = reader.header
+        let metadata = CaptureValidator.parseMetadata(
+            observer: header.observer,
+            instrument: header.instrument,
+            telescope: header.telescope
+        )
+        let fps: Double? = metadata["fps"]
+
+        // Build the temporally-ordered shift sequence used by the
+        // multi-AP gate. `keptOrder` is sorted by quality (best
+        // first), which matches the frames the stacker weights
+        // most heavily — measuring stability on those is more
+        // representative than averaging across the whole capture.
+        let shiftsOverTime: [SIMD2<Float>] = keptOrder.compactMap { idx in
+            globalShifts[idx]
+        }
+
+        let input = AutoAPInput(
+            imageWidth: lumaW,
+            imageHeight: lumaH,
+            frameCount: reader.header.frameCount,
+            targetType: targetType,
+            referenceLuminance: luma,
+            priorGrid: options.multiAPGrid,
+            priorPatchHalf: options.multiAPPatchHalf,
+            globalShiftsOverTime: shiftsOverTime,
+            frameRateFPS: fps
+        )
+        let result = AutoAP.estimateInitialGeometry(input)
+
+        // Confidence below 0.5 → keep the prior. AutoAP returns 0.55
+        // when AutoPSF bailed but we still have a luma buffer; below
+        // that we trust the user's preset / prior more than AutoAP's
+        // closed-form fallback.
+        guard result.confidence >= 0.5 else {
+            NSLog("AutoAP: confidence %.2f below threshold — keeping prior grid=%d patchHalf=%d",
+                  result.confidence, options.multiAPGrid, options.multiAPPatchHalf)
+            return
+        }
+
+        NSLog("%@", result.diagnostic)
+
+        // Apply the resolved geometry. Only the per-frame kernel-
+        // dispatch fields are mutated — buffer / PSO allocations
+        // already happened in `init` and remain valid since we
+        // didn't change pool sizes / texture formats.
+        options.multiAPGrid = result.gridSize
+        options.multiAPPatchHalf = result.patchHalf
+        options.multiAPSearch = result.multiAPSearch
+        options.autoAPDropList = result.dropList
+
+        // Multi-AP yes/no gate. When AutoAP detects low spatial-shear
+        // signal (clean global alignment), we override useMultiAP to
+        // false so the runner takes the fast single-shift path
+        // instead of paying the per-AP SAD cost for no quality win.
+        // Honored only in scientific mode — lightspeed never engages
+        // multi-AP regardless.
+        if result.suppressMultiAP && options.useMultiAP {
+            NSLog("AutoAP: suppressing useMultiAP per gate decision")
+            options.useMultiAP = false
+        }
+
+        // C.4 deconv tile size. The existing `tiledDeconvAPGrid` is a
+        // grid count, not a pixel size — convert by dividing the
+        // smaller frame dimension by the tile size and clamping to
+        // the supported range.
+        let minDim = min(W, H)
+        let suggestedGrid = max(4, min(16, minDim / max(50, result.deconvTileSize)))
+        options.tiledDeconvAPGrid = suggestedGrid
     }
 }
 
