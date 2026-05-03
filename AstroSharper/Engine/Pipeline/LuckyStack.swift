@@ -680,42 +680,49 @@ enum LuckyStack {
         Task.detached(priority: .userInitiated) {
             await onProgress(.opening(url: sourceURL))
 
-            let reader: SerReader
+            let reader: SourceReader
             do {
-                reader = try SerReader(url: sourceURL)
+                reader = try SourceReaderFactory.open(url: sourceURL)
             } catch {
                 await onProgress(.error("\(error)")); return
             }
 
-            // Mono 8/16, the four Bayer patterns, and packed 8-bit RGB / BGR
-            // are all supported. 16-bit RGB SERs (.rgb / .bgr with
-            // pixelDepth=16) are rejected here — the unpack_rgb8 kernel
-            // assumes 1 byte per channel. SerReader will mark the colour
-            // ID correctly; this guard catches the RGB48 case the v0
-            // kernel can't handle.
-            let cid = reader.header.colorID
-            if cid.isRGB && reader.header.bytesPerPlane != 1 {
-                await onProgress(.error("16-bit RGB SER not yet supported — re-export as 8-bit RGB or as Bayer."))
-                return
-            }
-            guard cid.isMono || cid.isBayer || cid.isRGB else {
-                await onProgress(.error("Unsupported SER colour layout (got \(cid))."))
-                return
+            // SER mono 8/16, the four Bayer patterns, and packed 8-bit RGB /
+            // BGR all flow through the SerReader fast path with their
+            // dedicated unpack kernels. AVI (and any other SourceReader)
+            // arrives pre-debayered as rgba16Float via `loadFrame`, so the
+            // colour-ID checks below only constrain the SER fast path —
+            // non-SER readers always report `.rgb` and skip the kernel
+            // gate entirely. 16-bit RGB SERs are still rejected because
+            // unpack_rgb8 assumes 1 byte per channel.
+            let cid = reader.colorID
+            if reader is SerReader {
+                if cid.isRGB && reader.pixelDepth != 8 {
+                    await onProgress(.error("16-bit RGB SER not yet supported — re-export as 8-bit RGB or as Bayer."))
+                    return
+                }
+                guard cid.isMono || cid.isBayer || cid.isRGB else {
+                    await onProgress(.error("Unsupported SER colour layout (got \(cid))."))
+                    return
+                }
             }
 
             // Path B per-channel stacking (commit 8e2a023 wired the flag,
             // LuckyStackPerChannel.swift implements the runner). Engaged
-            // only on Bayer captures: mono SERs already extract a single
-            // measured plane and don't have the per-channel atmospheric
-            // dispersion problem the path is designed to fix.
-            let usePerChannel = options.perChannelStacking
-                && reader.header.colorID.isBayer
+            // only on Bayer SER captures: mono SERs already extract a
+            // single measured plane and don't have the per-channel
+            // atmospheric dispersion problem the path is designed to fix,
+            // and AVI sources arrive pre-debayered so the per-channel
+            // separation no longer exists.
+            let serForPerChannel: SerReader? = (reader as? SerReader)
+                .flatMap { $0.header.colorID.isBayer ? $0 : nil }
+            let usePerChannel = options.perChannelStacking && serForPerChannel != nil
 
             do {
                 let stacked: MTLTexture
-                if usePerChannel {
+                if usePerChannel, let ser = serForPerChannel {
                     stacked = try await LuckyStackPerChannel.run(
-                        reader: reader,
+                        reader: ser,
                         pipeline: pipeline,
                         options: options,
                         progress: { p in
@@ -936,7 +943,12 @@ enum LuckyStack {
 // MARK: - Internal runner
 
 private final class LuckyRunner {
-    let reader: SerReader
+    let reader: SourceReader
+    /// Non-nil only when the source is a `SerReader`. Cached at init so
+    /// the per-frame hot loop can reach `withFrameBytes` without paying
+    /// the cost of a downcast every frame. Other source types (AVI today,
+    /// FITS later) leave this nil and feed the runner via `loadFrame`.
+    let serFastPath: SerReader?
     let pipeline: Pipeline
     /// Mutable so AutoAP can resolve grid / patchHalf / drop-list mid-run
     /// (after the reference frame is built). Fields read by allocation
@@ -1039,8 +1051,9 @@ private final class LuckyRunner {
     /// constructed correlator from this lazy var.
     private lazy var gpuCorrelator: GPUPhaseCorrelator? = nil
 
-    init(reader: SerReader, pipeline: Pipeline, options: LuckyStackOptions) {
+    init(reader: SourceReader, pipeline: Pipeline, options: LuckyStackOptions) {
         self.reader = reader
+        self.serFastPath = reader as? SerReader
         self.pipeline = pipeline
         self.options = options
         self.device = MetalDevice.shared.device
@@ -1061,33 +1074,53 @@ private final class LuckyRunner {
         self.apShiftPSO  = Self.makePSO(library: lib, device: device, fn: "compute_ap_shifts")
         self.accumLocalPSO = Self.makePSO(library: lib, device: device, fn: "lucky_accumulate_local")
 
-        let W = reader.header.imageWidth
-        let H = reader.header.imageHeight
-        let bytesPerPlane = reader.header.bytesPerPlane
+        let W = reader.imageWidth
+        let H = reader.imageHeight
+        // SerReader exposes the on-disk pixel layout so the unpack kernels
+        // can stage raw bytes without a copy. Other readers (AVI today)
+        // produce ready-to-go rgba16Float textures via `loadFrame` and
+        // never use the staging-texture path; bytesPerPlane / isMono16 /
+        // isBayer / RGB-swap are irrelevant in that branch and stay at
+        // their inert defaults.
+        let cid: SerColorID
+        let bytesPerPlane: Int
+        if let ser = serFastPath {
+            cid = ser.header.colorID
+            bytesPerPlane = ser.header.bytesPerPlane
+        } else {
+            cid = .rgb
+            bytesPerPlane = 0   // unused — non-SER frames bypass staging
+        }
         self.W = W
         self.H = H
         self.bytesPerPlane = bytesPerPlane
-        self.isMono16 = bytesPerPlane == 2 && !reader.header.colorID.isRGB
-        self.isBayer = reader.header.colorID.isBayer
-        self.isRGB = reader.header.colorID.isRGB
-        self.rgbSwapRB = reader.header.colorID == .bgr
-        self.bayerPattern = reader.header.colorID.bayerPatternIndex
+        self.isMono16 = (bytesPerPlane == 2) && !cid.isRGB
+        self.isBayer = cid.isBayer
+        self.isRGB = cid.isRGB
+        self.rgbSwapRB = cid == .bgr
+        self.bayerPattern = cid.bayerPatternIndex
 
         let dev = self.device
-        // RGB and mono/Bayer pools are disjoint — only one is populated
-        // per run. Allocating both would waste GPU memory on multi-GB
-        // captures; the empty array path is the lightweight default.
-        let isRGBLocal = reader.header.colorID.isRGB
-        if isRGBLocal {
-            self.stagingTextures = []
-            let rgbFrameBytes = W * H * 3
-            self.rgbBuffers = (0..<options.stagingPoolSize).map { _ in
-                dev.makeBuffer(length: rgbFrameBytes, options: [.storageModeShared])!
+        // SER fast-path staging pools — only populated when we have raw
+        // bytes to upload. RGB / mono+Bayer paths are mutually exclusive
+        // so only one of stagingTextures / rgbBuffers is populated. Non-
+        // SER readers leave both empty and feed `decodeFrame` via the
+        // SourceReader.loadFrame path instead.
+        if serFastPath != nil {
+            if cid.isRGB {
+                self.stagingTextures = []
+                let rgbFrameBytes = W * H * 3
+                self.rgbBuffers = (0..<options.stagingPoolSize).map { _ in
+                    dev.makeBuffer(length: rgbFrameBytes, options: [.storageModeShared])!
+                }
+            } else {
+                self.stagingTextures = (0..<options.stagingPoolSize).map { _ in
+                    Self.makeStaging(device: dev, w: W, h: H, mono16: bytesPerPlane == 2)
+                }
+                self.rgbBuffers = []
             }
         } else {
-            self.stagingTextures = (0..<options.stagingPoolSize).map { _ in
-                Self.makeStaging(device: dev, w: W, h: H, mono16: bytesPerPlane == 2)
-            }
+            self.stagingTextures = []
             self.rgbBuffers = []
         }
         self.frameTextures = (0..<options.stagingPoolSize).map { _ in
@@ -1138,7 +1171,7 @@ private final class LuckyRunner {
                   options.masterFlatURL?.lastPathComponent ?? "—")
         }
 
-        self.quality = QualityGrader(device: dev, frameCount: reader.header.frameCount, w: W, h: H, pso: qualityPSO)
+        self.quality = QualityGrader(device: dev, frameCount: reader.frameCount, w: W, h: H, pso: qualityPSO)
     }
 
     static func makePSO(library: MTLLibrary, device: MTLDevice, fn: String) -> MTLComputePipelineState {
@@ -1234,22 +1267,57 @@ private final class LuckyRunner {
         // (existing behaviour, zero overhead).
         let unpackTarget = calibActive ? calibrationScratch[slot] : frameTex
 
-        if isRGB {
-            let buf = rgbBuffers[slot]
-            reader.withFrameBytes(at: frameIndex) { ptr, len in
-                memcpy(buf.contents(), ptr, len)
+        if let ser = serFastPath {
+            // SER fast path — zero-copy mmap to staging buffer, then
+            // unpack on GPU. The unpack kernels (mono / Bayer / RGB)
+            // bake in colour-space + bit-depth + Bayer demosaic.
+            if isRGB {
+                let buf = rgbBuffers[slot]
+                ser.withFrameBytes(at: frameIndex) { ptr, len in
+                    memcpy(buf.contents(), ptr, len)
+                }
+                encodeUnpackRGB(commandBuffer: cmd, buffer: buf, frameTex: unpackTarget)
+            } else {
+                let staging = stagingTextures[slot]
+                ser.withFrameBytes(at: frameIndex) { ptr, _ in
+                    staging.replace(
+                        region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                          size: MTLSize(width: W, height: H, depth: 1)),
+                        mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
+                    )
+                }
+                encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: unpackTarget)
             }
-            encodeUnpackRGB(commandBuffer: cmd, buffer: buf, frameTex: unpackTarget)
         } else {
-            let staging = stagingTextures[slot]
-            reader.withFrameBytes(at: frameIndex) { ptr, _ in
-                staging.replace(
-                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
-                                      size: MTLSize(width: W, height: H, depth: 1)),
-                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
-                )
+            // Generic SourceReader path (AVI today, FITS later) — the
+            // reader hands back a ready-to-use rgba16Float texture from
+            // its own decoder. Blit-copy into unpackTarget so the
+            // downstream pipeline sees an identical layout regardless
+            // of source. AviReader already debayers + colour-converts
+            // inside AVFoundation; no further unpack kernel is needed.
+            do {
+                let src = try reader.loadFrame(at: frameIndex, device: device)
+                if let blit = cmd.makeBlitCommandEncoder() {
+                    let copyW = min(src.width, unpackTarget.width)
+                    let copyH = min(src.height, unpackTarget.height)
+                    blit.copy(
+                        from: src,
+                        sourceSlice: 0, sourceLevel: 0,
+                        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                        sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                        to: unpackTarget,
+                        destinationSlice: 0, destinationLevel: 0,
+                        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                    )
+                    blit.endEncoding()
+                }
+            } catch {
+                NSLog("LuckyRunner: decodeFrame failed at frame %d — %@",
+                      frameIndex, String(describing: error))
+                // Leave unpackTarget untouched; the accumulator will see
+                // either zeros (first frame) or the previous slot's
+                // contents. Quality grading will surface the bad frame.
             }
-            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: unpackTarget)
         }
 
         if calibActive {
@@ -1289,7 +1357,7 @@ private final class LuckyRunner {
     // MARK: - Public driver
 
     func run(progress: @escaping (LuckyStackProgress) -> Void) async throws -> MTLTexture {
-        let total = reader.header.frameCount
+        let total = reader.frameCount
 
         // Stage 1: grade every frame.
         try await gradeAllFrames(progress: progress)
@@ -1494,7 +1562,7 @@ private final class LuckyRunner {
     // MARK: - Stage helpers
 
     private func gradeAllFrames(progress: @escaping (LuckyStackProgress) -> Void) async throws {
-        let total = reader.header.frameCount
+        let total = reader.frameCount
         var lastReported = -1
 
         // Streaming loop; one cmd buffer per frame, but we never wait between
@@ -1566,29 +1634,46 @@ private final class LuckyRunner {
         }
 
         // Slot-less path (used for the reference frame load in scientific
-        // mode): allocate fresh staging on every call. RGB / BGR uses a
-        // freshly-allocated MTLBuffer; mono / Bayer uses a freshly-
-        // allocated staging texture. Both paths flow through the runner's
-        // existing encode helpers so the kernel selection logic stays in
-        // one place.
-        if isRGB {
-            let frameBytes = W * H * 3
-            guard let buf = device.makeBuffer(length: frameBytes, options: [.storageModeShared]) else {
-                throw NSError(domain: "Lucky", code: 2)
+        // mode): allocate fresh staging on every call. SER fast path uses
+        // raw-byte upload + GPU unpack; non-SER readers (AVI today) hand
+        // back a ready-to-use rgba16Float texture from `loadFrame` and
+        // are blit-copied into the target.
+        if let ser = serFastPath {
+            if isRGB {
+                let frameBytes = W * H * 3
+                guard let buf = device.makeBuffer(length: frameBytes, options: [.storageModeShared]) else {
+                    throw NSError(domain: "Lucky", code: 2)
+                }
+                ser.withFrameBytes(at: frameIndex) { ptr, len in
+                    memcpy(buf.contents(), ptr, len)
+                }
+                encodeUnpackRGB(commandBuffer: cmd, buffer: buf, frameTex: target)
+            } else {
+                let staging = Self.makeStaging(device: device, w: W, h: H, mono16: isMono16)
+                ser.withFrameBytes(at: frameIndex) { ptr, _ in
+                    staging.replace(
+                        region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
+                        mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
+                    )
+                }
+                encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: target)
             }
-            reader.withFrameBytes(at: frameIndex) { ptr, len in
-                memcpy(buf.contents(), ptr, len)
-            }
-            encodeUnpackRGB(commandBuffer: cmd, buffer: buf, frameTex: target)
         } else {
-            let staging = Self.makeStaging(device: device, w: W, h: H, mono16: isMono16)
-            reader.withFrameBytes(at: frameIndex) { ptr, _ in
-                staging.replace(
-                    region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: W, height: H, depth: 1)),
-                    mipmapLevel: 0, withBytes: ptr, bytesPerRow: W * bytesPerPlane
+            let src = try reader.loadFrame(at: frameIndex, device: device)
+            if let blit = cmd.makeBlitCommandEncoder() {
+                let copyW = min(src.width, target.width)
+                let copyH = min(src.height, target.height)
+                blit.copy(
+                    from: src,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: target,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
                 )
+                blit.endEncoding()
             }
-            encodeUnpack(commandBuffer: cmd, staging: staging, frameTex: target)
         }
         cmd.commit()
         cmd.waitUntilCompleted()
@@ -2501,17 +2586,23 @@ private final class LuckyRunner {
         ]
         let targetType = PresetAutoDetect.detect(in: candidates)
 
-        // Capture frame rate from SER header metadata strings (SharpCap /
-        // FireCapture write `fps=NN.NN` into the telescope field).
-        // CaptureValidator already parses these — reuse it. nil when
-        // the metadata is absent.
-        let header = reader.header
-        let metadata = CaptureValidator.parseMetadata(
-            observer: header.observer,
-            instrument: header.instrument,
-            telescope: header.telescope
-        )
-        let fps: Double? = metadata["fps"]
+        // Capture frame rate. SER captures bury it in the SharpCap /
+        // FireCapture metadata strings (telescope field) — parse via
+        // CaptureValidator. AVI / other containers expose it directly
+        // through SourceReader.nominalFrameRate (AVAssetTrack reports
+        // the nominal FPS for AVI). Either source is fine for the
+        // multi-AP fps×3 pilot-count rule downstream.
+        let fps: Double? = {
+            if let ser = serFastPath {
+                let metadata = CaptureValidator.parseMetadata(
+                    observer: ser.header.observer,
+                    instrument: ser.header.instrument,
+                    telescope: ser.header.telescope
+                )
+                return metadata["fps"]
+            }
+            return reader.nominalFrameRate
+        }()
 
         // Build the temporally-ordered shift sequence used by the
         // multi-AP gate. `keptOrder` is sorted by quality (best
@@ -2525,7 +2616,7 @@ private final class LuckyRunner {
         let input = AutoAPInput(
             imageWidth: lumaW,
             imageHeight: lumaH,
-            frameCount: reader.header.frameCount,
+            frameCount: reader.frameCount,
             targetType: targetType,
             referenceLuminance: luma,
             priorGrid: options.multiAPGrid,

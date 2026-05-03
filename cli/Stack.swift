@@ -558,10 +558,14 @@ enum Stack {
             return 1
         }
 
-        // AVI gating — pending E.1 SourceReader-driven LuckyRunner.
+        // E.1 SourceReader-driven LuckyRunner — SER fast path stays as-is,
+        // AVI / MOV / MP4 / M4V are accepted via AVFoundation. FITS lucky-
+        // stack will follow once the FitsFrameReader path is exercised on
+        // captures (header is multi-frame ready, decode loop isn't).
         let ext = inputURL.pathExtension.lowercased()
-        guard ext == "ser" else {
-            cliStderr("stack: only SER lucky-stack is supported in v0 (got .\(ext)). AVI lucky-stack lands with the SourceReader refactor (E.1).")
+        let supported: Set<String> = ["ser", "avi", "mov", "mp4", "m4v"]
+        guard supported.contains(ext) else {
+            cliStderr("stack: unsupported input '.\(ext)'. Supported: .ser, .avi, .mov, .mp4, .m4v.")
             return 2
         }
 

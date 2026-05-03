@@ -3,6 +3,34 @@
 Notable changes per release. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows semantic versioning once it leaves 0.x.
 
+## [Unreleased]
+
+### Added
+- **AVI / MOV / MP4 / M4V lucky-stack** (E.1 SourceReader-driven LuckyRunner).
+  `LuckyRunner` now consumes the `SourceReader` protocol instead of being
+  hard-wired to `SerReader`. SER captures keep the zero-copy mmap fast path
+  via the cached `serFastPath` reference; non-SER readers feed the runner
+  with their own `loadFrame(at:device:)` implementation (AVI today via
+  `AVAssetImageGenerator`, FITS multi-frame later). Per-channel stacking
+  (Path B) still gates on Bayer SER since AVI sources arrive
+  pre-debayered.
+- **Coffee support dialog** is now enabled for v0.4.0 first-public-release
+  cohort. Cadence (every Nth launch + minimum interval) is gated inside
+  `CoffeeSupportDialog.presentIfDue` itself.
+
+### Changed
+- CLI `astrosharper stack` accepts `.avi / .mov / .mp4 / .m4v` in addition
+  to `.ser`.
+
+### Internal
+- `project.yml` pins `ARCHS = arm64` + `EXCLUDED_ARCHS = x86_64`. Engine
+  code uses `Float16(bitPattern:)` which doesn't exist on Intel; without
+  the lock, Release / Archive builds fail trying to compile the x86_64
+  slice.
+- Regression sweep: 6/6 BiggSky SER fixtures byte-identical after the
+  `SerReader` → `SourceReader` migration. AVI smoke-test pending real
+  capture fixtures.
+
 ## [0.4.0] — 2026-05-03
 
 The "engine decides everything" release. Replaces hand-tuned per-target presets
