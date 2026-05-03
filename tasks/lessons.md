@@ -20,7 +20,7 @@ Patterns and gotchas captured from this project. Read at session start; append a
 ## [2026-04-26] — Mouse model for any preview = AstroTriage's, copied verbatim
 - **Mistake:** Twice "improved" the preview pan/zoom to my own scheme (plain drag = pan). User rejected both, asked for "exactly as astrotriage repo is showing it. e.g. photoshop style zoom".
 - **Rule:** For preview viewers, **port** AstroTriage's `ZoomableMTKView` mouse model — anchored click-drag zoom on plain drag, ⌥-drag pan, double-click fit, anchored pinch zoom. Don't redesign.
-- **Reference:** `/Users/joergklaas/Desktop/claude-code/AstroTriage-blinkV2/AstroTriage/UI/ImageViewerView.swift` lines ~410-650.
+- **Reference:** AstroTriage repo, `AstroTriage/UI/ImageViewerView.swift` (`ZoomableMTKView`, lines ~410-650).
 - **Applies to:** `App/Views/PreviewView.swift::ZoomableMTKView`.
 
 ## [2026-04-26] — MTKView for static previews must be on-demand, not free-spin

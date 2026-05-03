@@ -701,7 +701,14 @@ final class AppModel: ObservableObject {
             .filter { targets.contains($0.id) }
             .map { $0.id }
 
-        var referenceID: FileEntry.ID = orderedTargetIDs.first!
+        // `targets.count >= 2` is checked above, but the catalog filter
+        // can still yield zero entries if rows were removed concurrently.
+        guard let firstTargetID = orderedTargetIDs.first else {
+            jobStatus = .error("Stabilize: no matching files in catalog")
+            return
+        }
+
+        var referenceID: FileEntry.ID = firstTargetID
         var referenceWarning: String?
         switch stabilize.referenceMode {
         case .marked:
@@ -711,12 +718,12 @@ final class AppModel: ObservableObject {
                 referenceWarning = "No reference marked — using first selected. Press R on a row to pin one."
             }
         case .firstSelected:
-            referenceID = orderedTargetIDs.first!
+            referenceID = firstTargetID
         case .brightestQuality:
             // Best-quality frame is picked inside the Stabilizer (it has
             // the texture handles). We pass `nil` to signal that; here we
             // just leave the placeholder — Stabilizer will overwrite.
-            referenceID = orderedTargetIDs.first!
+            referenceID = firstTargetID
         }
 
         // (b) Pre-flight warning when running from Memory and prior in-
@@ -769,7 +776,9 @@ final class AppModel: ObservableObject {
         if let warn = referenceWarning {
             // Non-fatal — surface as a status message. Cleared automatically
             // when a job starts.
+            #if DEBUG
             print("[stabilize] \(warn)")
+            #endif
         }
 
         jobStatus = .running(processed: 0, total: urls.count)

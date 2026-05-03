@@ -109,7 +109,10 @@ final class SerReader {
         precondition(index >= 0 && index < header.frameCount, "frame index out of range")
         let offset = frameDataOffset + index * header.bytesPerFrame
         return try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> R in
-            let base = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
+            guard let rawBase = raw.baseAddress else {
+                preconditionFailure("SerReader: empty memory-mapped buffer for \(url.lastPathComponent)")
+            }
+            let base = rawBase.assumingMemoryBound(to: UInt8.self)
             return try body(base.advanced(by: offset), header.bytesPerFrame)
         }
     }

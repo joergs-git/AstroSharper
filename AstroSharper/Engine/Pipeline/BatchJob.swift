@@ -76,16 +76,16 @@ final class BatchJob {
             var cropOrigin: (x: Int, y: Int) = (0, 0)
             var cropSize: (w: Int, h: Int)? = nil  // nil = no cropping
 
-            if config.stabilize.enabled && inputs.count >= 2 {
-                let refURL = inputs.first!.url
-                guard let refTex = try? ImageTexture.load(url: refURL, device: MetalDevice.shared.device) else {
+            if config.stabilize.enabled, let refInput = inputs.first, inputs.count >= 2 {
+                guard let refTex = try? ImageTexture.load(url: refInput.url, device: MetalDevice.shared.device) else {
                     await onEvent(.finished(processed: 0))
                     return
                 }
                 let srcW = refTex.width, srcH = refTex.height
+                let refID = refInput.id
                 for input in inputs {
                     if await BatchJob.isCancelled() { await onEvent(.cancelled); return }
-                    if input.id == inputs.first!.id {
+                    if input.id == refID {
                         shifts[input.id] = AlignShift(dx: 0, dy: 0)
                         continue
                     }
