@@ -88,6 +88,17 @@ struct PreviewStatsHUD: View {
                             .help("Root-mean-square frame-to-frame shift (phase correlation between adjacent samples). Higher = more atmospheric motion to register.")
                     }
                 }
+                // A.5 — median half-flux radius across the sampled
+                // frames. Lower = sharper (more concentrated PSF).
+                // Same row style as Jitter for visual consistency.
+                if let h = d.medianHFR {
+                    HStack(spacing: 4) {
+                        Image(systemName: "scope")
+                            .foregroundColor(.secondary)
+                        Text("HFR: \(String(format: "%.2f", h)) px")
+                            .help("Median half-flux radius across sampled frames. The radius around the brightness centroid that contains 50% of the total flux. Lower = sharper / more concentrated PSF. Compare values within the same target — absolute numbers depend on subject brightness profile.")
+                    }
+                }
                 Text("Recommend: keep top \(Int(d.recommendedKeepFraction * 100))% (\(d.recommendedKeepCount) of \(d.totalFrames))")
                     .fontWeight(.semibold)
                     .foregroundColor(.yellow)

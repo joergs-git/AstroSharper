@@ -52,6 +52,11 @@ enum Stack {
         var usePerChannelStacking = false
         var useAutoPSF = false
         var autoPSFSNR: Double = 50
+        // Block C.2: auto-ROI cascade fallback. Off by default —
+        // opted in via `--auto-psf-roi` per the bail-out lesson
+        // `feedback_autopsf_lunar_bail.md`. Only meaningful when
+        // `--auto-psf` is also passed.
+        var useAutoPSFAutoROI = false
         var useAutoKeep = false
         var keepWasExplicit = false
         var denoisePrePercent: Int = 0
@@ -82,6 +87,13 @@ enum Stack {
         var rffOuterFraction: Double? = nil
         // B.3 adaptive AP rejection fraction. nil = engine default 0.20.
         var adaptiveAPRejectFraction: Double = 0.20
+        // C.4 scope-formula tile-size auto-calc. Off by default; opted
+        // in via `--auto-tile-size` together with `--focal-length-mm`,
+        // `--pixel-pitch-um`, and optionally `--barlow`.
+        var autoTileSizeFromScope: Bool = false
+        var scopeFocalLengthMM: Double? = nil
+        var scopePixelPitchUm: Double? = nil
+        var scopeBarlowMagnification: Double = 1.0
         // F.2 common-area auto-crop. Default ON for AS!4 parity.
         var cropToCommonArea = true
         // D.1 pre-stack calibration. Master frames provided as paths to
@@ -336,6 +348,52 @@ enum Stack {
                 // those override what we'd auto-estimate.
                 useAutoPSF = true
                 i += 1
+            case "--auto-tile-size":
+                // Block C.4: derive the tiled-deconv grid count from
+                // the BiggSky scope formula (focalLength/pixelPitch ×
+                // barlow). Requires --focal-length-mm + --pixel-pitch-um;
+                // --barlow defaults to 1.0. Logs a warning and falls
+                // through to whatever value AutoAP / the user set when
+                // the parameters are missing.
+                autoTileSizeFromScope = true
+                i += 1
+            case "--focal-length-mm":
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v > 0
+                else {
+                    cliStderr("stack: --focal-length-mm requires a positive number (e.g. 2000 for an 8\" SCT)")
+                    return 64
+                }
+                scopeFocalLengthMM = v
+                i += 2
+            case "--pixel-pitch-um":
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v > 0
+                else {
+                    cliStderr("stack: --pixel-pitch-um requires a positive number (e.g. 3.75 for an ASI224MC)")
+                    return 64
+                }
+                scopePixelPitchUm = v
+                i += 2
+            case "--barlow":
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v > 0
+                else {
+                    cliStderr("stack: --barlow requires a positive number (e.g. 2.0 for a 2× Barlow; 1.0 for none)")
+                    return 64
+                }
+                scopeBarlowMagnification = v
+                i += 2
+            case "--auto-psf-roi":
+                // Block C.2: cascade fallback to the auto-ROI PSF
+                // estimator when the planetary limb-LSF estimator
+                // bails (lunar / textured / cropped subjects). Default
+                // OFF per `feedback_autopsf_lunar_bail.md` — wrong σ
+                // is worse than nothing. Only meaningful with
+                // --auto-psf; on its own it's a no-op since planetary
+                // estimation runs first regardless.
+                useAutoPSFAutoROI = true
+                i += 1
             case "--auto-psf-snr":
                 guard i + 1 < args.count, let v = Double(args[i + 1]),
                       v.isFinite, v > 0
@@ -538,7 +596,7 @@ enum Stack {
 
         guard let input = inputPath, let output = outputPath else {
             cliStderr("stack: missing input or output path")
-            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--sharpen [--sharpen-amount X]] [--auto-psf [--auto-psf-snr N] [--capture-gamma N]] [--metrics file.json] [--quiet]")
+            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--sharpen [--sharpen-amount X]] [--auto-psf [--auto-psf-snr N] [--auto-psf-roi] [--capture-gamma N]] [--auto-tile-size --focal-length-mm N --pixel-pitch-um N [--barlow N]] [--metrics file.json] [--quiet]")
             return 64
         }
 
@@ -548,6 +606,21 @@ enum Stack {
         if useAutoPSF, wienerSigma != nil || lrSigma != nil {
             cliStderr("stack: --auto-psf is mutually exclusive with --wiener-sigma / --lr-sigma (auto overrides; pick one)")
             return 64
+        }
+
+        // --auto-psf-roi is the cascade fallback for --auto-psf — on
+        // its own it's a no-op since planetary estimation runs first
+        // regardless. Warn rather than error so adventurous users can
+        // experiment without the parser fighting them.
+        if useAutoPSFAutoROI, !useAutoPSF {
+            cliStderr("stack: --auto-psf-roi has no effect without --auto-psf (it's the cascade fallback for the planetary estimator)")
+        }
+
+        // --auto-tile-size needs scope params to be useful — warn
+        // when toggle is on but params are missing so users notice
+        // before they trust the (silent fallback) output.
+        if autoTileSizeFromScope, scopeFocalLengthMM == nil || scopePixelPitchUm == nil {
+            cliStderr("stack: --auto-tile-size requires --focal-length-mm and --pixel-pitch-um (engine logs a fallback notice and keeps the previous grid otherwise)")
         }
 
         let inputURL  = URL(fileURLWithPath: input)
@@ -607,6 +680,11 @@ enum Stack {
             options.perChannelStacking = usePerChannelStacking
             options.useAutoPSF = useAutoPSF
             options.autoPSFSNR = autoPSFSNR
+            options.useAutoPSFAutoROI = useAutoPSFAutoROI
+            options.autoTileSizeFromScope = autoTileSizeFromScope
+            options.scopeFocalLengthMM = scopeFocalLengthMM
+            options.scopePixelPitchUm = scopePixelPitchUm
+            options.scopeBarlowMagnification = scopeBarlowMagnification
             options.captureGamma = captureGamma
             options.processLuminanceOnly = processLuminanceOnly
             options.borderCropPixels = borderCropPixels

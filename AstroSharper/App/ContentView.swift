@@ -27,8 +27,14 @@ struct ContentView: View {
 
             VSplitView {
                 VStack(spacing: 0) {
-                    PreviewView()
-                        .frame(minHeight: 240)
+                    HStack(spacing: 0) {
+                        PreviewView()
+                            .frame(minHeight: 240)
+                        if app.compareSidePanelVisible {
+                            Divider()
+                            CompareSidePanel()
+                        }
+                    }
                     if app.previewSerFrameCount > 1 {
                         Divider()
                         SerScrubBar()
@@ -167,13 +173,20 @@ private struct ToolbarView: View {
             }
             .help("Display brightness — multiplies the on-screen pixel values only (saved files unaffected). Combine with Auto for a sensible starting point on dim captures.")
 
-            // Before / After compare (B) — single, prominent.
-            Toggle(isOn: $app.showAfter) {
-                Label(app.showAfter ? "After" : "Before", systemImage: app.showAfter ? "eye.fill" : "eye.slash")
+            // Compare side panel (B) — when on, two thumbnails appear
+            // beside the preview. Top = the file currently displayed
+            // (= "stacked / output / memory" before manipulations);
+            // bottom = the source SER's first frame (= "before stack").
+            // The main preview itself always shows the manipulated
+            // result. Replaced the old Before/After main-view flip
+            // (2026-05-03) so users can see all three states at once
+            // instead of toggling through them.
+            Toggle(isOn: $app.compareSidePanelVisible) {
+                Label("Compare", systemImage: app.compareSidePanelVisible ? "rectangle.split.2x1.fill" : "rectangle.split.2x1")
             }
             .toggleStyle(.button)
             .keyboardShortcut("b", modifiers: [])
-            .help("Toggle Before / After (B)")
+            .help("Show / hide the comparison side panel (B). Top thumbnail = the displayed file (no manipulations). Bottom thumbnail = the source SER's first frame, populated when Lucky Stack runs.")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)

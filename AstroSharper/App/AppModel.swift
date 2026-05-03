@@ -77,8 +77,27 @@ final class AppModel: ObservableObject {
     @Published var stabilize = StabilizeSettings()
     @Published var toneCurve = ToneCurveSettings()
 
-    // Before/After compare — toggle, not slider.
-    @Published var showAfter: Bool = true
+    // Compare side panel — when on, two thumbnails appear next to the
+    // preview: top = the currently displayed file (= the stacked /
+    // memory output, no manipulations baked in unless the user did
+    // bake-in), bottom = the source SER's first frame (= "before
+    // stack"). The main preview itself always shows the manipulated
+    // result; the side panel is purely for at-a-glance comparison.
+    // Replaced the old Before/After main-view flip toggle (2026-05-03).
+    @Published var compareSidePanelVisible: Bool = false
+
+    /// URL of the source SER that produced the most recent
+    /// lucky-stack output. Set by `runNextLuckyStackItem` and read by
+    /// the compare side panel for the "before stack" thumbnail.
+    /// Persists for the duration of the session — survives navigating
+    /// to Outputs / Memory and back. nil until the first stack run.
+    @Published var lastStackedSourceURL: URL? = nil
+
+    /// Thumbnail of frame 0 of `lastStackedSourceURL`. Pre-loaded by
+    /// `ThumbnailLoader.serFrameZero` when the source URL is set, so
+    /// the compare side panel can render synchronously without a
+    /// disk read on every toggle.
+    @Published var lastStackedSourceThumbnail: NSImage? = nil
 
     // Job status for batch runs
     @Published var jobStatus: JobStatus = .idle
@@ -1241,6 +1260,26 @@ final class AppModel: ObservableObject {
         luckyStack.queue[nextIdx].status = .processing
         luckyStack.queue[nextIdx].progress = 0.0
 
+        // Compare side panel — track the source SER so the panel's
+        // bottom thumbnail ("before stack") can render synchronously
+        // when the user later toggles compare mode. Skip the thumbnail
+        // load when the source matches the previously-tracked URL so
+        // back-to-back stacks of the same file don't re-decode frame 0.
+        if lastStackedSourceURL != item.url {
+            lastStackedSourceURL = item.url
+            let sourceURL = item.url
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let thumb = ThumbnailLoader.load(url: sourceURL, maxDimension: 200)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    // Only commit if the URL hasn't been replaced by a
+                    // newer stack run while this thumbnail was decoding.
+                    guard self.lastStackedSourceURL == sourceURL else { return }
+                    self.lastStackedSourceThumbnail = thumb
+                }
+            }
+        }
+
         var perItemOpts = options
         perItemOpts.meridianFlipped = item.meridianFlipped
         perItemOpts.keepPercent = item.keepPercent
@@ -1270,6 +1309,10 @@ final class AppModel: ObservableObject {
         // checkbox states.
         perItemOpts.useAutoPSF = luckyStack.autoNuke ? true : luckyStack.autoPSF
         perItemOpts.autoPSFSNR = luckyStack.autoNuke ? 100 : luckyStack.autoPSFSNR
+        // C.2 cascade (auto-ROI fallback). AutoNuke leaves it OFF on
+        // purpose: AutoNuke is the "do everything safely" preset, and
+        // auto-ROI is opt-in until the bracket validates per-subject.
+        perItemOpts.useAutoPSFAutoROI = luckyStack.autoNuke ? false : luckyStack.autoPSFAutoROI
         // RFF user setting → per-run options. Auto = pass nil so the
         // engine's σ-aware formula computes the fractions per disc
         // geometry. Manual = pass the user's slider values. Off = pass
@@ -1290,6 +1333,14 @@ final class AppModel: ObservableObject {
         perItemOpts.denoisePostPercent = luckyStack.denoisePostPercent
         perItemOpts.useTiledDeconv = luckyStack.tiledDeconv
         perItemOpts.tiledDeconvAPGrid = luckyStack.tiledDeconvAPGrid
+        // C.4 — scope-formula tile-size override. Engine treats
+        // missing / non-positive scope params as "no override" via a
+        // logged silent fallback, so we always pass the toggle through
+        // and let the engine make the call.
+        perItemOpts.autoTileSizeFromScope = luckyStack.autoTileSize
+        perItemOpts.scopeFocalLengthMM = luckyStack.scopeFocalLengthMM > 0 ? luckyStack.scopeFocalLengthMM : nil
+        perItemOpts.scopePixelPitchUm = luckyStack.scopePixelPitchUm > 0 ? luckyStack.scopePixelPitchUm : nil
+        perItemOpts.scopeBarlowMagnification = luckyStack.scopeBarlow > 0 ? luckyStack.scopeBarlow : 1.0
         perItemOpts.useAutoKeepPercent = luckyStack.autoNuke ? true : luckyStack.autoKeepPercent
         // Stack-end remap: GUI toggle drives the engine flag. Default OFF
         // in luckyStack.autoRecoverDynamicRange — bare accumulator
@@ -2109,6 +2160,17 @@ struct LuckyStackUIState {
     /// on noisy data).
     var autoPSFSNR: Double = 50
 
+    /// Block C.2 cascade: when the planetary limb-LSF estimator bails
+    /// (lunar / textured / cropped subjects), fall through to the
+    /// auto-ROI estimator that finds the strongest robust step edge
+    /// anywhere in the frame and measures its perpendicular LSF.
+    /// Default OFF per `feedback_autopsf_lunar_bail.md` — wrong σ is
+    /// worse than nothing. When the auto-ROI cascade succeeds, RFF
+    /// is skipped (no disc geometry); tiled deconv (when on) still
+    /// applies because it's geometry-free. Only meaningful when
+    /// `autoPSF == true`.
+    var autoPSFAutoROI: Bool = false
+
     /// Radial Fade Filter (RFF) settings — Auto / Manual / Off. Default
     /// Auto uses the σ-aware formula. Manual exposes inner / outer
     /// sliders. Off skips the fade entirely (Wiener output used
@@ -2134,6 +2196,20 @@ struct LuckyStackUIState {
     /// when `autoPSF == true`.
     var tiledDeconv: Bool = false
     var tiledDeconvAPGrid: Int = 8
+
+    /// Block C.4 — scope-formula tile-size auto-calc. When ON and
+    /// the three scope parameters below are populated, the runner
+    /// derives the tile grid count from the BiggSky scope formula
+    /// (focalLength / pixelPitch × barlow) and overrides
+    /// `tiledDeconvAPGrid`. Default OFF; users typically enter scope
+    /// parameters once per setup and leave the toggle on.
+    var autoTileSize: Bool = false
+    /// Telescope focal length in mm (e.g. 2032 for an 8" SCT).
+    var scopeFocalLengthMM: Double = 0
+    /// Camera pixel pitch in micrometres (e.g. 3.75 for ASI224MC).
+    var scopePixelPitchUm: Double = 0
+    /// Barlow / extender magnification (1.0 = none, 2.0 = 2× Barlow).
+    var scopeBarlow: Double = 1.0
 
     /// Auto-keep-% (Block A.4). When ON, the runner uses the per-frame
     /// quality distribution (free output of the runner's own grading

@@ -2,6 +2,16 @@
 
 Patterns and gotchas captured from this project. Read at session start; append after every correction.
 
+## [2026-05-03] — Anchor edge thresholds on peak gradient, not percentile, when most of the frame has no gradient
+- **Mistake:** First version of `AutoPSFAutoROI` used a 95th-percentile threshold over interior gradient magnitudes to find candidate edges. For thin-edge inputs (a single horizontal step in a 200×200 frame), only ~5 % of pixels carry meaningful gradient — the 95th percentile fell into the FP-rounding noise floor (~3e-4) instead of picking out the edge band. Tests for σ=1.0 returned nil because EVERY pixel's gradMag exceeded the threshold and the candidate-list ballooned, then NMS suppressed the strong edge in favour of phantom equal-mag pixels in the bright/dark plateaus.
+- **Rule:** When detecting strong edges in mostly-flat frames (planetary, lunar terminator, ROI crops), threshold candidates on `pMax × 0.30` with an absolute floor (e.g. 0.01) — anchored on the peak gradient, not a percentile. Percentiles are appropriate for "what counts as content" decisions over distributions; peak-anchored thresholds are appropriate for "what counts as the strongest edges" decisions over sparse signals.
+- **Applies to:** `AutoPSFAutoROI.estimate` candidate filter; same pattern would apply to any future "find the strongest edge" code path.
+
+## [2026-05-03] — Second-moment integration window must scale with the upper σ clamp
+- **Mistake:** First version of `AutoPSFAutoROI` used `halfWindow=6` (perpendicular ±6 px) with integration ±5 around the peak. Testing on σ=3.5 underestimated to σ≈2.4 (rel err 0.31) because the LSF tails for σ=3.5 (FWHM ≈ 8.2 px) extend beyond ±5 — second-moment integration missed tail energy → underestimated M₂ → underestimated σ.
+- **Rule:** When the algorithm clamps σ to a known upper bound (here 5.0), pick the LSF integration window to capture >2σ of tail at the upper bound. For ±10 perpendicular sweep + ±8 integration, σ=5 falls within 1.6σ of the window edge — captures ~94 % of LSF energy on each side. Tighter windows (the previous 6 / 5) silently bias toward the lower clamp on soft edges.
+- **Applies to:** `AutoPSFAutoROI.estimate` LSF window. Same principle for any future moment-based estimator with an output clamp.
+
 ## [2026-05-03] — Pin `ARCHS=arm64` in `project.yml`, not just at the xcodebuild invocation
 - **Mistake:** During the v0.4.0 release pipeline, the first Release-config build failed with `Float16` errors because Xcode tried to compile both arm64 and x86_64 slices. The arm64-only rule existed in memory (`feedback_arm64_only.md`) but only as a per-invocation flag — XcodeGen-generated targets had no architecture lock baked in.
 - **Rule:** Bake architecture lock into `project.yml` `settings.base` (`ARCHS / ONLY_ACTIVE_ARCH / VALID_ARCHS / EXCLUDED_ARCHS`) so any subsequent `xcodebuild ... archive` cannot accidentally cross-compile the unsupported slice. A flag the human has to remember every time is a flag they will forget every other time.

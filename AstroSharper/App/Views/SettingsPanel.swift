@@ -304,6 +304,23 @@ struct SharpeningSection: View {
 
             Divider().padding(.vertical, 4)
 
+            // Section-wide reset. Restores every Step 1 control —
+            // pickers, sliders, toggles, wavelet bands, NR — to the
+            // factory `SharpenSettings()` initialiser. Useful when
+            // the user has accumulated experimental tweaks that
+            // changed the output unexpectedly. Section ends up OFF
+            // (the SharpenSettings default), preserving the existing
+            // UX rule that the section is opt-in.
+            HStack {
+                Button("Reset Step 1 to defaults") {
+                    app.sharpen = SharpenSettings()
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11))
+                .help("Restore every Step 1 control (deconvolution, boost, wavelet bands, noise reduction, capture gamma) to its factory default. The section ends up OFF afterward — re-enable it via the title-bar switch when ready.")
+                Spacer()
+            }
+
             LuckyRunButton(
                 disabled: false,
                 title: "Apply Sharpening",

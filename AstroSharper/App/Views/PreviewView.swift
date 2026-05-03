@@ -380,9 +380,10 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 self?.loadCurrentFile()
             }
             .store(in: &cancellables)
-        app.$showAfter
-            .sink { [weak self] _ in self?.view?.needsDisplay = true }
-            .store(in: &cancellables)
+        // Compare side panel toggle was previously wired to a Before/After
+        // main-view flip via `app.$showAfter`. The flip was retired
+        // 2026-05-03 — main view always shows the manipulated result;
+        // comparison happens via the dedicated side panel instead.
         // displayAutoRange toggle: just trigger a redraw — the cached
         // percentiles are reused, no recompute needed.
         app.$displayAutoRange
@@ -1203,9 +1204,10 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         let tw = Float(beforeTex?.width ?? 1)
         let th = Float(beforeTex?.height ?? 1)
 
-        // Before/After toggle: pass splitX=1 (fully "after") when showAfter is on,
-        // else 0 (fully "before"). The display shader already handles both paths.
-        let split: Float = app.showAfter ? 1.0 : 0.0
+        // Compare side panel replaced the old Before/After main-view flip
+        // (2026-05-03). Always render fully "after" (post-pipeline);
+        // direct comparison now happens via the side-panel thumbnails.
+        let split: Float = 1.0
         let autoOn = app.displayAutoRange
         let user: Float = Float(max(0.1, app.displayGain))
         let bk: Float = autoOn ? displayBlack : 0

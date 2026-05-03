@@ -254,6 +254,20 @@ struct LuckyStackOptions {
     var useAutoPSF: Bool = false
     var autoPSFSNR: Double = 50
 
+    /// Cascade fallback to the auto-ROI PSF estimator (Block C.2) when
+    /// the planetary limb-LSF estimator bails. Designed for lunar /
+    /// textured / cropped subjects where there is no clean planetary
+    /// disc but there IS a strong, clean step edge somewhere in the
+    /// frame (terminator, crater rim, ridge). Default OFF — opted in
+    /// per the `feedback_autopsf_lunar_bail.md` lesson: a wrong σ is
+    /// worse than no deconv. When the auto-ROI cascade succeeds, the
+    /// downstream pipeline runs Wiener with the estimated σ but
+    /// SKIPS the radial-fade filter (RFF assumes planetary disc
+    /// geometry that doesn't exist for an arbitrary interior edge).
+    /// Tiled-deconv blend (when enabled) still applies — it's
+    /// geometry-free.
+    var useAutoPSFAutoROI: Bool = false
+
     /// Capture-gamma compensation around the auto-PSF + Wiener post-pass
     /// (Block C.6). 1.0 = no correction (data assumed linear). Typical
     /// SharpCap / FireCapture defaults apply gamma 2.0 by default; pre-
@@ -375,6 +389,25 @@ struct LuckyStackOptions {
     /// classification on small details; larger = smoother boundaries.
     /// Range [4, 16] in practice.
     var tiledDeconvAPGrid: Int = 8
+
+    /// Block C.4 — scope-formula tile-size auto-calc.
+    ///
+    /// When ON and all three scope parameters below are present, the
+    /// runner overrides `tiledDeconvAPGrid` after AutoAP using the
+    /// BiggSky-documented formula:
+    ///
+    ///     tileSize = round(focalLengthMM / pixelPitchUm × barlowMag, 100)
+    ///     grid     = clamp(minDim / tileSize, 4, 16)
+    ///
+    /// Wins over both the user's manual grid and AutoAP's heuristic
+    /// because the scope formula is a cleaner, scope-specific signal
+    /// than the subject-driven heuristic. Falls back silently when
+    /// the parameters aren't supplied (no scope info → use whichever
+    /// value the prior pass left in `tiledDeconvAPGrid`).
+    var autoTileSizeFromScope: Bool = false
+    var scopeFocalLengthMM: Double? = nil
+    var scopePixelPitchUm: Double? = nil
+    var scopeBarlowMagnification: Double = 1.0
 }
 
 enum LuckyStackProgress {
@@ -765,15 +798,38 @@ enum LuckyStack {
                 if options.useAutoPSF {
                     let device = MetalDevice.shared.device
 
-                    // Pre-flight PSF estimate on the bare stack — if
-                    // this fails we skip the entire post-pass and
-                    // write the stack as-is.
-                    let psfPreflight = AutoPSF.estimate(texture: final, device: device)
+                    // Pre-flight PSF estimate on the bare stack —
+                    // planetary limb-LSF first, then auto-ROI cascade
+                    // (Block C.2) when enabled. If both fail we skip
+                    // the entire post-pass and write the stack as-is.
+                    let psfPreflight = AutoPSF.estimateCascade(
+                        texture: final,
+                        device: device,
+                        autoROIFallback: options.useAutoPSFAutoROI
+                    )
 
-                    if let psf = psfPreflight {
-                        NSLog("AutoPSF: σ=%.2f conf=%.2f r=%.0f at (%.0f, %.0f)",
-                              psf.sigma, psf.confidence, psf.discRadius,
-                              psf.discCenter.x, psf.discCenter.y)
+                    if let psfEst = psfPreflight {
+                        // Extract σ + flag whether RFF can apply. RFF
+                        // assumes planetary disc geometry that doesn't
+                        // exist when σ came from auto-ROI; the tiled
+                        // blend (geometry-free) still applies.
+                        let psfSigma: Float = psfEst.sigma
+                        let psfIsAutoROI: Bool
+                        let psfPlanetary: AutoPSF.Result?
+                        switch psfEst {
+                        case .planetary(let r):
+                            psfIsAutoROI = false
+                            psfPlanetary = r
+                            NSLog("AutoPSF: planetary σ=%.2f conf=%.2f r=%.0f at (%.0f, %.0f)",
+                                  r.sigma, r.confidence, r.discRadius,
+                                  r.discCenter.x, r.discCenter.y)
+                        case .autoROI(let r):
+                            psfIsAutoROI = true
+                            psfPlanetary = nil
+                            NSLog("AutoPSF: auto-ROI σ=%.2f conf=%.2f dirStd=%.1f° stepC=%.3f at (%.0f, %.0f) — RFF skipped (no disc geometry)",
+                                  r.sigma, r.confidence, r.dirStdDeg, r.stepContrast,
+                                  r.edgePoint.x, r.edgePoint.y)
+                        }
 
                         // Stage 1: pre-denoise (Block C.5 first half).
                         if options.denoisePrePercent > 0 {
@@ -807,7 +863,7 @@ enum LuckyStack {
                             Wiener.deconvolve(
                                 input: final,
                                 output: deconvTex,
-                                sigma: psf.sigma,
+                                sigma: psfSigma,
                                 snr: Float(options.autoPSFSNR),
                                 device: device,
                                 captureGamma: safeGamma,
@@ -822,7 +878,7 @@ enum LuckyStack {
                             // Tiled deconv stays available as a manual
                             // option for subjects where the radial
                             // assumption doesn't fit (multi-feature
-                            // solar surface, future use cases).
+                            // solar surface, auto-ROI fallback).
                             // σ-aware RFF defaults (2026-05-01) fit to user
                             // picks across 3 disc sizes:
                             //   mars  r=58  σ=2.90 σ/r=5.0% → inner 0.65 (A)
@@ -835,17 +891,37 @@ enum LuckyStack {
                             // the formula. Self-tuning per disc geometry: large
                             // planetary disc → tight RFF, sharp limb. Small disc
                             // → wide RFF, no dark-ring artifact.
-                            // RFF Off (user GUI setting): skip the radial fade
-                            // entirely; the bare Wiener output stands in for
-                            // the blend. Useful where the auto fade looks wrong
-                            // — solar Hα chromosphere edge per 2026-05-01
-                            // user feedback.
+                            // RFF skipped when:
+                            //   - User toggled RFF Off (solar Hα limb edge case)
+                            //     → bare Wiener output, identical to the
+                            //     pre-C.2 behaviour. Tiled deconv is NOT
+                            //     applied even if enabled — the user asked
+                            //     for "no radial fade" historically meant
+                            //     "no blend at all".
+                            //   - σ came from auto-ROI cascade (no disc
+                            //     geometry) → fall through to tiled-deconv
+                            //     blend when enabled (geometry-free), else
+                            //     bare Wiener output.
                             if options.disableRFF {
                                 NSLog("RFF: disabled by user (Off mode) — using bare Wiener output")
                                 final = deconvTex
-                                // Skip the rest of the radial / tiled blend block.
-                                // Continue to denoise via the post-stage check below.
-                            } else {
+                            } else if psfIsAutoROI {
+                                if options.useTiledDeconv {
+                                    if let blended = Self.tiledDeconvBlend(
+                                        pre: final,
+                                        deconv: deconvTex,
+                                        apGrid: options.tiledDeconvAPGrid,
+                                        pipeline: pipeline,
+                                        device: device
+                                    ) {
+                                        final = blended
+                                    } else {
+                                        final = deconvTex
+                                    }
+                                } else {
+                                    final = deconvTex
+                                }
+                            } else if let psf = psfPlanetary {
                                 let sigma = Float(psf.sigma)
                                 let radius = max(Float(1), Float(psf.discRadius))
                                 let ratio = sigma / radius
@@ -882,7 +958,13 @@ enum LuckyStack {
                                 } else {
                                     final = deconvTex
                                 }
-                            }   // end RFF-on branch (else of disableRFF)
+                            } else {
+                                // Defensive — should be unreachable: psfIsAutoROI
+                                // is false and disableRFF is false, so
+                                // psfPlanetary must be non-nil. Treat as bare
+                                // deconv if we ever fall here.
+                                final = deconvTex
+                            }
                         }
 
                         // Stage 3: post-denoise (Block C.5 second half).
@@ -897,7 +979,7 @@ enum LuckyStack {
                             }
                         }
                     } else {
-                        NSLog("AutoPSF: estimation skipped (no clean disc — likely lunar / textured subject); bare stack written, dual-stage denoise also skipped since it wraps the deconv it has nothing to do without")
+                        NSLog("AutoPSF: estimation skipped (planetary + auto-ROI both bailed); bare stack written, dual-stage denoise also skipped since it wraps the deconv it has nothing to do without")
                     }
                 }
 
@@ -1442,6 +1524,13 @@ private final class LuckyRunner {
                 keptOrder: kept
             )
         }
+
+        // Block C.4 — scope-formula tile-size override. Runs after
+        // AutoAP so the scope formula wins over AutoAP's subject-
+        // driven heuristic when the user has supplied scope params.
+        // No-op when the auto toggle is off or any scope parameter
+        // is missing.
+        applyScopeFormulaTileSize()
 
         // Stage 3: weighted accumulation. Four paths, picked in order:
         //   - useTwoStageQuality : per-AP local quality re-rank,
@@ -2665,6 +2754,44 @@ private final class LuckyRunner {
         let minDim = min(W, H)
         let suggestedGrid = max(4, min(16, minDim / max(50, result.deconvTileSize)))
         options.tiledDeconvAPGrid = suggestedGrid
+    }
+
+    /// Block C.4 — scope-formula tile-size override.
+    ///
+    /// When `options.autoTileSizeFromScope` is true AND all three
+    /// scope parameters (focal length, pixel pitch, Barlow) are
+    /// present + valid, override `options.tiledDeconvAPGrid` with
+    /// the grid count derived from the BiggSky formula:
+    ///
+    ///     tileSizePx = round(focalLengthMM / pixelPitchUm × barlowMag, 100)
+    ///     grid       = clamp(minDim / tileSizePx, 4, 16)
+    ///
+    /// Runs AFTER `applyAutoAP` so the scope formula wins over the
+    /// AutoAP subject-driven heuristic. Silent no-op when the
+    /// toggle is off or any scope parameter is missing — falls
+    /// through to whatever value the prior pass (AutoAP or user
+    /// manual) left in `tiledDeconvAPGrid`.
+    private func applyScopeFormulaTileSize() {
+        guard options.autoTileSizeFromScope else { return }
+        guard
+            let f = options.scopeFocalLengthMM,
+            let p = options.scopePixelPitchUm,
+            f.isFinite, p.isFinite, f > 0, p > 0
+        else {
+            NSLog("C.4: --auto-tile-size set but scope parameters missing; keeping grid=%d",
+                  options.tiledDeconvAPGrid)
+            return
+        }
+        let tileSizePx = CaptureGeometry.tileSize(
+            focalLengthMM: f,
+            pixelPitchUm: p,
+            barlowMagnification: options.scopeBarlowMagnification
+        )
+        let minDim = min(W, H)
+        let grid = max(4, min(16, minDim / max(50, tileSizePx)))
+        NSLog("C.4: scope formula focal=%.0fmm pixel=%.2fµm barlow=%.2f → tileSize=%dpx grid=%d×%d (frame %d×%d)",
+              f, p, options.scopeBarlowMagnification, tileSizePx, grid, grid, W, H)
+        options.tiledDeconvAPGrid = grid
     }
 }
 

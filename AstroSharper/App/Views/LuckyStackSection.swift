@@ -496,6 +496,13 @@ struct LuckyStackSection: View {
                         .controlSize(.small)
                     }
 
+                    // Block C.2 — auto-ROI cascade fallback. Off by
+                    // default; bracketed per-subject before relying on.
+                    Toggle("Auto-ROI fallback (lunar / textured)", isOn: $app.luckyStack.autoPSFAutoROI)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .help("When the planetary limb estimator finds no clean disc, fall back to scanning the frame for the strongest robust step edge and measure σ from its perpendicular LSF. Designed for lunar / textured / cropped subjects. Off by default — a wrong σ on these subjects is worse than no deconv. Skips the radial fade filter (no disc geometry); tiled deconv still applies when enabled.")
+
                     // Radial Fade Filter (RFF). Auto = σ-aware formula.
                     // Manual = expose inner / outer sliders. Off = skip the
                     // fade entirely (raw Wiener output) — for solar Hα
@@ -610,6 +617,39 @@ struct LuckyStackSection: View {
                             in: 4...16, step: 1
                         )
                         .controlSize(.small)
+                            .disabled(app.luckyStack.autoTileSize)
+
+                        // Block C.4 — scope-formula tile-size auto-calc.
+                        // When ON and scope params populated, engine
+                        // overrides the slider value via the BiggSky
+                        // formula (tileSize = focal/pixel × barlow).
+                        Toggle("Auto tile size (scope formula)", isOn: $app.luckyStack.autoTileSize)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .help("Override the tile grid using the BiggSky scope formula: tileSize = focalLength/pixelPitch × barlow, then grid = frame ÷ tileSize. Requires the three fields below; falls back to the slider value if any are missing or zero.")
+
+                        if app.luckyStack.autoTileSize {
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Focal mm").font(.caption2).foregroundColor(.secondary)
+                                    TextField("2032", value: $app.luckyStack.scopeFocalLengthMM, format: .number)
+                                        .textFieldStyle(.roundedBorder)
+                                        .controlSize(.small)
+                                }
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Pixel µm").font(.caption2).foregroundColor(.secondary)
+                                    TextField("3.75", value: $app.luckyStack.scopePixelPitchUm, format: .number)
+                                        .textFieldStyle(.roundedBorder)
+                                        .controlSize(.small)
+                                }
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Barlow").font(.caption2).foregroundColor(.secondary)
+                                    TextField("1.0", value: $app.luckyStack.scopeBarlow, format: .number)
+                                        .textFieldStyle(.roundedBorder)
+                                        .controlSize(.small)
+                                }
+                            }
+                        }
                     }
                 }
 
