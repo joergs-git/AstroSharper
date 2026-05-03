@@ -2,6 +2,41 @@
 
 Patterns and gotchas captured from this project. Read at session start; append after every correction.
 
+## [2026-05-03] — `Color.clear.frame(width:)` defaults to fill all available height
+- **Mistake:** Used `Color.clear.frame(width: 260)` as a right-side balancer in BrandHeader to keep the target picker centered. Without an explicit `height:`, Color claimed all available vertical space — the brand bar inflated to ~150 pt of empty grey.
+- **Rule:** Any `Color.clear` placeholder used as a layout spacer needs an explicit `height: N` (use `1` for a near-zero footprint). Combine with `.frame(height:)` on the outer container as a hard cap — child intrinsic sizes can never push past it.
+- **Applies to:** `App/Views/BrandHeader.swift` and any future SwiftUI bar / strip layout that needs invisible spacers.
+
+## [2026-05-03] — `JSONEncoder` omits nil optional keys; some servers require them present-with-null
+- **Mistake:** `TelemetryEvent` and `CommunityShareMetadata` used default Codable synthesis with `Optional<T>` fields. Swift's encoder OMITS the key entirely when nil; the Supabase edge functions' validators required the key present (with `null`) and returned HTTP 400 for missing keys.
+- **Rule:** When the wire format requires `"field": null` for absent values (e.g. strict server validators, or downstream consumers that compute over a fixed schema), provide a manual `encode(to:)` that uses `container.encode(value, forKey:)` — that path emits null for nil values. The default synthesised version uses `encodeIfPresent` which skips them.
+- **Applies to:** Any future Codable struct on the network boundary. Server-side: tolerate both forms (`null` and missing) defensively to avoid this kind of round-trip failure.
+
+## [2026-05-03] — Sandboxed app needs `com.apple.security.network.client` to even resolve DNS
+- **Mistake:** Added telemetry + community share HTTP POSTs without updating the entitlements file. The app sandbox blocked `mDNSResponder` on first network call → URLSession returned `-1003 ServiceNotRunning` → "Telemetry POST failed: A server with the specified hostname could not be found."
+- **Rule:** Adding ANY outbound HTTP to a sandboxed app requires `com.apple.security.network.client = true` in the entitlements file. Without it the failure is misleading (looks like DNS, is actually sandbox blocking the resolver). The Sandbox `deny network-outbound /private/var/run/mDNSResponder` log line is the definitive smoking gun.
+- **Applies to:** `AstroSharper/AstroSharper.entitlements`. The entitlement is the FIRST step before any URLSession code, not an afterthought.
+
+## [2026-05-03] — Nested SwiftUI View body has a finite type-check budget
+- **Mistake:** Inlining the third alert (update checker) into the existing `WindowGroup` body that already had 2 sheets + 2 alerts + 3 observers triggered SwiftUI's "expression too complex" compile error. Symptom is a build failure on a body that LOOKS reasonable; root cause is the generic resolver giving up on the modifier chain.
+- **Rule:** Whenever a `body` chain accumulates ≥3 `.alert` / `.sheet` calls or has multiple `Binding(get:set:)` constructions, extract into a dedicated wrapper View with its own `body`. Per-button `@ViewBuilder` helper methods further reduce per-call complexity. The compile failure is reversible by refactoring; don't disable `-Xfrontend` flags as escape hatches.
+- **Applies to:** `App/AstroSharperApp.swift::RootContent` is the canonical extraction pattern. Re-use for any future top-level App view.
+
+## [2026-05-03] — Don't inject tone manipulation into "preview thumbnail" exports
+- **Mistake:** Added 1%/99% percentile auto-stretch + γ 2.2 to `CommunityShare.makeThumbnailJPEG` to make bare-accumulator outputs visible in the feed. On properly-toned outputs (lunar surface stacks), the stretch crushed natural midtones and the community feed showed high-contrast over-processed "negatives" of what the user actually saved.
+- **Rule:** A "thumbnail" of a saved file should be a faithful downscale of the saved bytes — never re-tone, never re-balance. If the source is dark, the thumbnail is dark; that's the truth. Push the tone decision to the saved-file pipeline (Bake-in / Auto-tone toggles), not to the export step.
+- **Applies to:** `App/CommunityShare.swift::makeThumbnailJPEG`. Same principle for any future "send a preview elsewhere" path.
+
+## [2026-04-27] — Lucky-stack accumulator must be 32-bit float, not half-precision
+- **Mistake:** Used `rgba16Float` for the stacked-output accumulator (and the drizzle accumulator). With ~10 bits of mantissa in the 0..1 mid-range, weighted-mean accumulation across hundreds of frames + a final unsharp+wavelet pass surfaced as visible colour banding on smooth Jupiter cloud detail. Existing comments warned about this for the sigma-clip Welford state, but the standard / two-stage / drizzle paths missed the upgrade.
+- **Rule:** Any pipeline stage that *accumulates* across many frames must use `rgba32Float` (single precision). Half-precision is fine for pass-through textures (per-frame sharpen output, display blits) but never for the running mean / weighted sum / variance state. Memory cost: 2× per accumulator — negligible on Apple Silicon.
+- **Applies to:** `Engine/Pipeline/LuckyStack.swift::makeAccumulator`, drizzle accumulator. Same principle for any future blind-deconv / tiled-deconv accumulators.
+
+## [2026-04-27] — No auto-probe on file/frame switch in interactive UI
+- **Mistake:** Both `loadCurrentFile` and `loadCurrentSerFrame` ran `SharpnessProbe.compute` on the freshly-loaded full-resolution texture so the HUD showed a "current sharpness" number. At source resolution that's 5–30 ms per click — bearable on one file, unbearable when fanning through a folder of large SERs or holding next-frame.
+- **Rule:** Anything more expensive than ~1 ms must NOT auto-run on routine UI navigation (file selection, frame scrub). Wire it behind an explicit "Calculate / Analyze" button (the SER distribution scanner already does this — pattern to follow). Acceptable to compute for cached entries on-disk in a background pass once at import; never on every click.
+- **Applies to:** `App/Views/PreviewView.swift`, future per-frame probes (HFR sparkline, jitter score, capture validator on scrub). Same principle for any new "show me a metric" UI.
+
 ## [2026-04-27] — Anchored-zoom math is per-axis, not isotropic
 - **Mistake:** Ported AstroTriage's `anchoredZoom` using a single `baseFit = min(viewW/texW, viewH/texH)` for both axes. The display shader uses **per-axis** `fitScale.x` / `fitScale.y` (different when image and view aspect ratios differ), so the pan-compensation has the wrong magnitude on at least one axis — large enough that the user perceives it as a sign flip ("left is right, up is down").
 - **Rule:** Any anchor-preserving viewport math must read the SAME fit-scale convention the shader uses. Compute `tex pixels per view pixel` per axis as `tpv_axis = texSize_axis / (viewSize_axis * fitScale_axis)`, then `panPx_new = panPx_old + relAxis * tpv_axis * (1/oldZ − 1/newZ)`.
@@ -20,7 +55,7 @@ Patterns and gotchas captured from this project. Read at session start; append a
 ## [2026-04-26] — Mouse model for any preview = AstroTriage's, copied verbatim
 - **Mistake:** Twice "improved" the preview pan/zoom to my own scheme (plain drag = pan). User rejected both, asked for "exactly as astrotriage repo is showing it. e.g. photoshop style zoom".
 - **Rule:** For preview viewers, **port** AstroTriage's `ZoomableMTKView` mouse model — anchored click-drag zoom on plain drag, ⌥-drag pan, double-click fit, anchored pinch zoom. Don't redesign.
-- **Reference:** `/Users/joergklaas/Desktop/claude-code/AstroTriage-blinkV2/AstroTriage/UI/ImageViewerView.swift` lines ~410-650.
+- **Reference:** AstroTriage repo, `AstroTriage/UI/ImageViewerView.swift` (`ZoomableMTKView`, lines ~410-650).
 - **Applies to:** `App/Views/PreviewView.swift::ZoomableMTKView`.
 
 ## [2026-04-26] — MTKView for static previews must be on-demand, not free-spin
@@ -122,3 +157,30 @@ Patterns and gotchas captured from this project. Read at session start; append a
 ## [Forever] — Read before edit
 - **Rule:** Before any non-trivial edit, read all affected files, not just the entry point. SourceKit "cannot find type" warnings are usually false positives during a workspace cache rebuild — trust the actual `xcodebuild` output.
 - **Applies to:** Every multi-file change.
+
+## [2026-04-29] — Don't feed coalesced retries back through the same Combine subject
+- **Mistake:** When the live-preview pipeline took longer than the 33 ms throttle interval, an in-guard `reprocessSubject.send(())` retry from `PreviewCoordinator.reprocess` fed BOTH the throttle subscriber AND a newly-added 200 ms debounce subscriber. The debounce timer kept resetting on every retry-send, the throttle kept re-firing while `inFlight` was true, and each pipeline cycle kicked off another one — "Processing" spinner + section pulsing ran forever even when the user wasn't touching anything.
+- **Root cause:** Multiple subscribers on a single `PassthroughSubject` mean a single `.send(())` reaches all of them. Self-sends from inside a sink create feedback loops that compound when the work outside the sink takes longer than the throttle interval.
+- **Rule:** When a sink needs to "queue another pass after the current one finishes", don't `subject.send` back into the same subject. Use a coalesced state flag (e.g. `pendingPreview: Bool?`) on the coordinator and drain it directly when the current run lands. Direct re-call from the completion block doesn't poke any Combine subscribers awake.
+- **Applies to:** `PreviewView.PreviewCoordinator.reprocess`. Pattern generalizes to any Combine sink with a busy-retry path.
+
+## [2026-04-29] — Always-on auto-recovery needs a histogram-shape gate, not a percentile clamp
+- **Mistake:** Shipped a stack-end histogram remap that ran unconditionally (1%/99% percentile → [0, 0.97] linear). Lunar / solar / textured subjects fill the histogram natively; on those the remap pushed already-wide range to extremes. Output was crushed shadows + blown rims — same "unnatural over-contrast" failure mode the old user-facing autoStretch toggle had.
+- **Root cause:** Treated mean-stacking compression as universal. It's only universal for *dark-dominated* histograms (planet on dark sky); *mid-tone-dominated* histograms (lunar terrain, solar disc) start full-range so any stretch over-shoots.
+- **Rule:** For an always-on tonal recovery, gate on the input's median luminance (or a similar histogram-shape signal), not just on percentile spread. Threshold: median ≥ 0.30 → skip remap (data already fills range); median < 0.30 → apply (planet on sky, compression to undo).
+- **Applies to:** `Pipeline.applyOutputRemap`. Pattern generalizes to any "fix the obvious failure mode" auto-recovery — confirm the failure mode actually applies before touching the data.
+
+## [2026-04-29] — Eager-compile MTLComputePipelineState in init
+- **Rule:** Lazy `MTLComputePipelineState` building is ~5–8 ms per kernel on Apple Silicon. With 14 kernels in `Pipeline`, the first slider drag eats an 80–100 ms hiccup. Move all PSOs to immediate construction in `Pipeline.init` — the cost shifts onto app launch (covered by the SwiftUI splash) and the live preview is smooth from tick zero.
+- **How to apply:** When init needs to run a closure that touches `self.device`, capture the device into a local FIRST and have the helper closure reference the local. Otherwise Swift errors with "self used before all stored properties are initialized".
+- **Applies to:** `Engine/Pipeline/Pipeline.swift`. Same pattern in any future Metal pipeline class with multiple PSOs.
+
+## [2026-04-29] — Test before building manual UI
+- **Mistake (avoided):** Saw a BiggSky note about Saturn using 28 *manually placed* APs and almost spec'd a manual AP placement UI for v1.
+- **Rule:** Before committing to a manual-UI feature that mirrors a manual workflow in another tool, run a regression test with our automation against the manual reference. If automatic gets within 90% (or beats it), skip the UI; if not, build it. Saved the work after a 13-line python script showed our auto-grid 6×6 (36 APs) hits 1.13× the LAPD sharpness of BiggSky's 28 manual APs on the same Saturn SER (after histogram normalization).
+- **Applies to:** Any "users in tool X do this manually, should we expose a knob?" decision.
+
+## [2026-04-29] — CLI prints can drift from real behavior
+- **Mistake:** `cli/Stack.swift` printed `keep=\(plan.percent)%` after a stack run, which reported the *configured* keep% rather than the *resolved* one. Under `--auto-keep`, the actual stack used a 75% recommendation (correct, NSLog'd) but the print said 25% — looked like the auto-keep flag wasn't applied. It was; only the print was wrong.
+- **Rule:** When an option re-resolves a value at runtime (auto-keep, auto-PSF, auto-keep-count, …), the user-facing print should reflect what was actually used, not what was passed in. Annotate the mode (`(auto-keep)`) so the discrepancy is explained.
+- **Applies to:** Every CLI summary line. Same lesson applies to GUI status badges that surface a derived value.

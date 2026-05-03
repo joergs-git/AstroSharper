@@ -6,19 +6,27 @@ A short tour of how AstroSharper is wired together. Aimed at someone reading the
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  SwiftUI Views    ContentView · SettingsPanel · FileListView · …     │
+│  SwiftUI Views    ContentView · SettingsPanel · FileListView ·       │
+│                   BrandHeader (target picker) · SplashView ·         │
+│                   CoffeeSupportDialog · StatusBar (opt-out icons)    │
 ├──────────────────────────────────────────────────────────────────────┤
 │  AppModel         @MainActor, the single source of truth             │
 │                   catalog · selection · marks · referenceID ·        │
 │                   playback (memory) · sharpen / stabilize / tone     │
-│                   settings · jobStatus · presets                     │
+│                   settings · luckyStack (with autoNuke + autoAP) ·   │
+│                   jobStatus · presets · pendingCommunityShare        │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Engine / Pipeline                                                   │
 │   Sharpen   Stabilizer   LuckyStack   Wiener   Wavelet   Deconvolve  │
 │   Align     ToneCurve    BatchJob     Pipeline (texture pool)        │
+│   AutoPSF   AutoAP       APPlanner    LuckyStackPerChannel  Drizzle  │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Engine / IO     ImageTexture · SerReader · SerFrameLoader ·         │
-│                   RotateTexture · Histogram · Exporter               │
+│                   Fits · CaptureValidator · RotateTexture ·          │
+│                   Histogram · Exporter                               │
+├──────────────────────────────────────────────────────────────────────┤
+│  Telemetry/Comm  MachineID · TelemetryClient · CommunityShare        │
+│                  (opt-out, NSLog stubs — endpoint TBD per todo.md)   │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Metal           Compute kernels (Shaders.metal) · MPSGraph FFT ·    │
 │                   shared MTLDevice / library / queue                 │
@@ -69,17 +77,30 @@ The per-frame Sharpen + Tone-Curve pipeline lives in `Engine/Pipeline/Pipeline.s
 | `App/Views/LuckyStackSection.swift` | Lucky-stack UI with mode picker, multi-AP grid, variants. |
 | `Engine/Pipeline/Stabilizer.swift` | Sequence aligner — shifts, ROI, disc-centroid, crop. Now accepts pre-loaded textures. |
 | `Engine/Pipeline/Align.swift` | Phase correlation (vDSP), ROI variant, disc-centroid, quality scoring. |
-| `Engine/Pipeline/LuckyStack.swift` | Quality grading, top-N selection, multi-AP shifts, weighted accumulation. |
-| `Engine/Pipeline/Sharpen.swift` | Unsharp mask + à-trous wavelet sharpening. |
+| `Engine/Pipeline/LuckyStack.swift` | Quality grading, top-N selection, multi-AP shifts, weighted accumulation, AutoAP integration. |
+| `Engine/Pipeline/LuckyStackPerChannel.swift` | Path B per-channel Bayer stacking (chromatic-dispersion correction). |
+| `Engine/Pipeline/AutoAP.swift` | Empirical AP-grid + patchHalf + drop-list resolver + multi-AP yes/no gate + feature-size cascade + kneedle keep-fraction. |
+| `Engine/Pipeline/AutoPSF.swift` | Limb-LSF Gaussian σ estimator. Auto-bails on lunar / textured. |
+| `Engine/Pipeline/APPlanner.swift` | Cell-LAPD + luma-cutoff scoring (drop-list + feature-size probe). |
 | `Engine/Pipeline/Wiener.swift` | FFT-based Wiener deconvolution (per-channel). |
 | `Engine/Pipeline/Deconvolve.swift` | Lucy-Richardson iterations (Metal). |
+| `Engine/Pipeline/Drizzle.swift` | Drop splat reconstruction with AA pre-filter. |
+| `Engine/Pipeline/Sharpen.swift` | Unsharp mask + à-trous wavelet sharpening. |
 | `Engine/Pipeline/ToneCurve.swift` | Catmull-Rom spline → 1D LUT texture. |
 | `Engine/Pipeline/BatchJob.swift` | File-level batch runner with cancel + progress events. |
 | `Engine/Pipeline/Pipeline.swift` | Per-frame pipeline + texture pool. |
 | `Engine/IO/SerReader.swift` | Memory-mapped SER reader (mono / Bayer, 8 / 16-bit). |
 | `Engine/IO/SerFrameLoader.swift` | Single-frame extraction with GPU Bayer demosaic. |
+| `Engine/IO/CaptureValidator.swift` | Parses fps / exp / gain from SER metadata strings (used by AutoAP gate). |
+| `Engine/IO/Fits.swift` | FITS read + write. |
 | `Engine/MetalDevice.swift` | Shared `MTLDevice`, `MTLLibrary`, `MTLCommandQueue` singleton. |
 | `Engine/Shaders/Shaders.metal` | All compute and fragment kernels. |
+| `App/MachineID.swift` | Stable random per-machine UUID (only identifying field in telemetry / community payloads). |
+| `App/TelemetryClient.swift` | Opt-out anonymous telemetry payload + send stub. |
+| `App/CommunityShare.swift` | Opt-out community thumbnail upload payload + stub. |
+| `App/Views/BrandHeader.swift` | Headline bar + 6-target picker chips. |
+| `App/Views/CoffeeSupportDialog.swift` | Floating NSWindow buy-me-a-coffee prompt (ported from AstroTriage). |
+| `App/Views/SplashView.swift` | Welcome sheet on launch. |
 
 ## Data flow for a typical session
 
@@ -89,16 +110,29 @@ The per-frame Sharpen + Tone-Curve pipeline lives in `Engine/Pipeline/Pipeline.s
    FileCatalog.load()         scans dir, builds [FileEntry]
       ↓
    AppModel.catalog updated   FileListView re-renders
-      ↓
-   user marks frames + R key
-      ↓
-   Apply ALL Stuff (⇧⌘A)
+      ↓                        BrandHeader target picker re-detects
+   user clicks Run Lucky Stack (or Apply to Selection ⌘R)
       ├── SER selected? → runLuckyStackOnSelection()
-      │       → Quality.grade → top-N% pick
-      │       → multi-AP shifts → weighted accumulate → bake-in
+      │       → SerReader memory-maps frames
+      │       → gradeAllFrames (Laplacian-variance compute kernel)
+      │       → autoKeepPercent? → kneedle keep-% pick
+      │       → topN frames selected
+      │       → reference build (scientific: top-5% accumulator, lightspeed: argmax)
+      │       → alignAgainstReference (vDSP 2D FFT phase correlation, parallel)
+      │       → applyAutoAP (when autoAP != .off):
+      │           · AutoPSF.estimate on reference luma
+      │           · resolve grid + patchHalf + drop-list + tile-size
+      │           · multi-AP yes/no gate from globalShifts variance
+      │           · mutate options.{multiAPGrid, multiAPPatchHalf, useMultiAP, …}
+      │       → accumulate (one of: standard, two-stage, drizzle, sigma-clip)
+      │       → cropToCommonArea
+      │       → optional bakeIn (Sharpen + Tone via Pipeline.process)
+      │       → optional AutoPSF + Wiener + RFF post-pass
       │       → Exporter.writeTIFF → catalog.appendOutput
+      │       → telemetry.recordStackCompleted (opt-out)
+      │       → maybePromptCommunityShare (opt-out per-stack)
       │
-      └── otherwise   → applyToSelection() → BatchJob
+      └── non-SER → applyToSelection() → BatchJob
               for each file:
                 ImageTexture.load → Stabilizer (if N≥2)
                                   → Sharpen.process

@@ -80,11 +80,147 @@ enum Align {
     /// `+shift` to `frame` aligns it to `reference`). Convenience wrapper —
     /// when correlating many frames against the same reference, prefer the
     /// `computeFFT` + `phaseCorrelate(refFFT:frameFFT:)` path.
+    ///
+    /// Runs the existing fine-resolution (up to 1024²) phase-correlation
+    /// — proper PSS cascade as of 2026-05-01 (Block B.5):
+    ///
+    ///   1. Run a cheap coarse 256² phase correlation first.
+    ///   2. Convert the coarse peak to fine-grid coordinates.
+    ///   3. Run the fine FFT correlation but constrain its peak-find
+    ///      to a search window around the coarse-derived centre. The
+    ///      fine peak therefore can't lock to noise / aliased basins
+    ///      outside that window — those are the failure modes the
+    ///      previous "run both, mismatch detector" approach caught
+    ///      *after* the fact. Constrained search prevents them.
+    ///   4. Sub-pixel parabolic fit at the constrained peak.
+    ///
+    /// Falls back to global fine search if coarse computation fails;
+    /// falls back to coarse-only if fine computation fails. Both
+    /// failures together → returns nil (caller marks the frame
+    /// rejected).
+    ///
+    /// Search radius is 8 fine-grid pixels by default — covers
+    /// the residual jitter between the coarse-rounded peak (±0.5 ×
+    /// `n_fine / 256` ≈ ±2-4 fine px on typical 512-1024² frames)
+    /// plus another factor for sub-pixel content. Tighten further
+    /// if a regression suggests it.
     static func phaseCorrelate(reference: MTLTexture, frame: MTLTexture) -> AlignShift? {
+        // Coarse pass first. Expand `phaseCorrelateBuffers` inline so
+        // the coarse Peak is in scope for the fine constrained search;
+        // the helper otherwise discards the Peak after converting to
+        // AlignShift.
+        let coarse: AlignShift?
+        let coarsePeak: Peak?
+        if let coarseRefBox = luminanceBuffer(from: reference, size: 256),
+           let coarseFrameBox = luminanceBuffer(from: frame, size: 256) {
+            var c0 = coarseRefBox.wrappedValue
+            var c1 = coarseFrameBox.wrappedValue
+            prepareBuffer(&c0, size: 256)
+            prepareBuffer(&c1, size: 256)
+            if let cFFT0 = fft2dForwardOnce(input: c0, log2n: 8),
+               let cFFT1 = fft2dForwardOnce(input: c1, log2n: 8),
+               let cp = fft2dPhaseCorrelation(
+                refReal: cFFT0.real, refImag: cFFT0.imag,
+                frmReal: cFFT1.real, frmImag: cFFT1.imag,
+                log2n: 8
+               ) {
+                var dxI = cp.x, dyI = cp.y
+                if dxI > 128 { dxI -= 256 }
+                if dyI > 128 { dyI -= 256 }
+                let sx = Float(reference.width) / 256.0
+                let sy = Float(reference.height) / 256.0
+                coarse = AlignShift(
+                    dx: (Float(dxI) + cp.subX) * sx,
+                    dy: (Float(dyI) + cp.subY) * sy
+                )
+                coarsePeak = cp
+            } else {
+                coarse = nil
+                coarsePeak = nil
+            }
+        } else {
+            coarse = nil
+            coarsePeak = nil
+        }
+
+        // Fine pass — constrained to the coarse peak's neighbourhood
+        // when coarse succeeded; unconstrained otherwise.
         guard let r = computeFFT(of: reference),
               let f = computeFFT(of: frame),
-              r.log2n == f.log2n else { return nil }
-        return phaseCorrelate(refFFT: r, frameFFT: f)
+              r.log2n == f.log2n else {
+            return coarse  // fine FFT failed; coarse-only fallback
+        }
+        let nFine = r.n
+        var searchCentre: (x: Int, y: Int)? = nil
+        var searchRadius: Int = 0
+        if let cp = coarsePeak {
+            // Map coarse (256-grid) peak to fine-grid coords. Coarse
+            // returns indices in [0, 256) with separate sub-pixel
+            // offsets — combine then scale to nFine, round to int.
+            let fineX = Int(((Float(cp.x) + cp.subX) * Float(nFine) / 256.0).rounded())
+            let fineY = Int(((Float(cp.y) + cp.subY) * Float(nFine) / 256.0).rounded())
+            searchCentre = (x: ((fineX % nFine) + nFine) % nFine,
+                            y: ((fineY % nFine) + nFine) % nFine)
+            searchRadius = 8
+        }
+        guard let peak = fft2dPhaseCorrelation(
+            refReal: r.real, refImag: r.imag,
+            frmReal: f.real, frmImag: f.imag,
+            log2n: r.log2n,
+            searchCenter: searchCentre,
+            searchRadius: searchRadius
+        ) else {
+            return coarse  // fine peak-find failed; coarse-only fallback
+        }
+
+        // Convert fine peak (n-grid) to source-pixel shift.
+        var dxI = peak.x, dyI = peak.y
+        if dxI > nFine / 2 { dxI -= nFine }
+        if dyI > nFine / 2 { dyI -= nFine }
+        let scaleX = Float(f.sourceWidth) / Float(nFine)
+        let scaleY = Float(f.sourceHeight) / Float(nFine)
+        let subX = peak.subX * scaleX
+        let subY = peak.subY * scaleY
+        return AlignShift(
+            dx: Float(dxI) * scaleX + subX,
+            dy: Float(dyI) * scaleY + subY
+        )
+    }
+
+    /// Phase-correlate two raw float buffers of size n×n (n = 1 << log2n).
+    /// Used by chromatic-dispersion correction which extracts per-channel
+    /// (R/G/B) planes from a stacked texture and aligns them against the
+    /// green reference. The buffers should already be DC-removed and Hann-
+    /// windowed by the caller — both are done by `prepareBuffer(_:)` below.
+    /// Returns the shift in pixel units of the n×n grid.
+    static func phaseCorrelateBuffers(
+        reference: [Float],
+        frame: [Float],
+        log2n: Int
+    ) -> AlignShift? {
+        let n = 1 << log2n
+        guard reference.count == n * n, frame.count == n * n else { return nil }
+        guard let r = fft2dForwardOnce(input: reference, log2n: log2n),
+              let f = fft2dForwardOnce(input: frame, log2n: log2n),
+              let peak = fft2dPhaseCorrelation(
+                refReal: r.real, refImag: r.imag,
+                frmReal: f.real, frmImag: f.imag,
+                log2n: log2n
+              ) else {
+            return nil
+        }
+        var dxI = peak.x, dyI = peak.y
+        if dxI > n / 2 { dxI -= n }
+        if dyI > n / 2 { dyI -= n }
+        return AlignShift(dx: Float(dxI) + peak.subX, dy: Float(dyI) + peak.subY)
+    }
+
+    /// Prepare a raw plane for phase correlation: subtract the mean and
+    /// apply a 2-D Hann window in place. Caller passes the buffer to
+    /// `phaseCorrelateBuffers` afterwards.
+    static func prepareBuffer(_ buffer: inout [Float], size n: Int) {
+        subtractMean(&buffer)
+        applyHannWindow(&buffer, size: n)
     }
 
     // MARK: - Reference quality scoring
@@ -385,9 +521,18 @@ enum Align {
 
     /// Cross-power spectrum + inverse FFT + peak find. Both inputs must
     /// already be in frequency domain (use `fft2dForwardOnce`).
+    ///
+    /// `searchCenter` + `searchRadius` constrain the peak-find to a
+    /// box around the supplied centre (PSS coarse-to-fine refinement,
+    /// 2026-05-01). When nil, scan globally — same behaviour as the
+    /// pre-PSS API. Coordinates wrap modulo n so the box can straddle
+    /// the natural [0, n) boundary that vDSP's wrap-aware peak layout
+    /// places half the shift space on the far side of.
     private static func fft2dPhaseCorrelation(refReal: [Float], refImag: [Float],
                                               frmReal: [Float], frmImag: [Float],
-                                              log2n: Int) -> Peak? {
+                                              log2n: Int,
+                                              searchCenter: (x: Int, y: Int)? = nil,
+                                              searchRadius: Int = 0) -> Peak? {
         let n = 1 << log2n
 
         guard let setup = vDSP_create_fftsetup(vDSP_Length(log2n + 1), FFTRadix(kFFTRadix2)) else { return nil }
@@ -420,12 +565,29 @@ enum Align {
 
         fft2dInverse(&cpReal, &cpImag)
 
-        // Peak = max of |cpReal| (imag is noise for a real cross-correlation).
+        // Peak find. Either constrained (PSS — search box around the
+        // coarse-derived centre) or global. Box-constrained mode
+        // forbids the peak from locking to noise basins outside the
+        // window, which the unconstrained scan can pick when the
+        // fine-grid signal is weak relative to its own noise floor.
         var peakVal: Float = -.infinity
         var peakIdx = 0
-        for k in 0..<count {
-            let v = cpReal[k]
-            if v > peakVal { peakVal = v; peakIdx = k }
+        if let centre = searchCenter, searchRadius > 0 {
+            let r = searchRadius
+            for dyOff in -r...r {
+                let yi = ((centre.y + dyOff) % n + n) % n
+                for dxOff in -r...r {
+                    let xi = ((centre.x + dxOff) % n + n) % n
+                    let k = yi * n + xi
+                    let v = cpReal[k]
+                    if v > peakVal { peakVal = v; peakIdx = k }
+                }
+            }
+        } else {
+            for k in 0..<count {
+                let v = cpReal[k]
+                if v > peakVal { peakVal = v; peakIdx = k }
+            }
         }
         let py = peakIdx / n
         let px = peakIdx % n

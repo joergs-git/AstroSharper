@@ -18,8 +18,15 @@ TESTIMAGES/
 **/_luckystack/
 **/.astrosharper-probe-*
 
+# Regression harness scratch (per-run JSON results, build logs).
+# Tests/Regression/baselines/ IS committed.
+.regression/
+
 # Swift Package Manager
 .build/
 Packages/
 Package.resolved
 .swiftpm/
+
+# Supabase CLI cache (auto-created by `supabase` invocations)
+supabase/.temp/

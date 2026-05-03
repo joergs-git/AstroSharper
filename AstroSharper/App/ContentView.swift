@@ -97,23 +97,6 @@ private struct ToolbarView: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            // "Apply ALL Stuff" — single hero entry point. Picks lucky-stack,
-            // memory in-place, or file-batch depending on context (see
-            // AppModel.applyAllStuff).
-            Button { app.applyAllStuff() } label: {
-                Label("Apply ALL Stuff", systemImage: "wand.and.stars")
-                    .labelStyle(.titleAndIcon)
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .tint(AppPalette.accent)
-            .keyboardShortcut("a", modifiers: [.command, .shift])
-            .disabled(!app.canApply)
-            .help("Run every enabled operation on the current selection (⇧⌘A). Lucky Stack short-circuits the chain because it consumes whole SER files.")
-
-            Divider().frame(height: 18)
-
             PresetMenu()
 
             Divider().frame(height: 18)
@@ -135,12 +118,54 @@ private struct ToolbarView: View {
 
             Spacer()
 
-            Button { openWindow(id: "howto") } label: {
-                Label("Howto", systemImage: "questionmark.circle")
+            // Howto button moved to BrandHeader's right slot 2026-05-03
+            // (alongside Community) so the toolbar is less crowded.
+
+            // Display Auto-Range — auto-computes a per-texture gain so dim
+            // captures (Ha SER, low-gain lunar, deep-sky) land at sensible
+            // brightness without manual tuning. The Brightness slider
+            // multiplies further. Display only — saved files unaffected.
+            Toggle(isOn: $app.displayAutoRange) {
+                Label("Auto", systemImage: app.displayAutoRange ? "circle.lefthalf.filled" : "circle")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("Open the workflow guide in a movable, non-blocking window — keep it on screen while you work.")
+            .toggleStyle(.button)
+            .keyboardShortcut("a", modifiers: [])
+            .help("Auto display gain (A): per-texture brightness so dim captures look right out of the box. Off = the Brightness slider applies alone. Saved files are never affected.")
+
+            // Display Brightness — independent of any pipeline stage. Live
+            // preview only; the saved TIF carries no visible trace.
+            // Logarithmic stops (×0.5 …×16) match the AS!4 brightness ladder.
+            HStack(spacing: 4) {
+                Image(systemName: "sun.min")
+                    .foregroundColor(.secondary)
+                    .font(.system(size: 11))
+                Slider(
+                    value: Binding(
+                        get: { log2(max(0.25, app.displayGain)) },
+                        set: { app.displayGain = pow(2.0, $0) }
+                    ),
+                    in: -2.0...4.0,   // 0.25× … 16×
+                    step: 0.25
+                )
+                .frame(width: 100)
+                Image(systemName: "sun.max")
+                    .foregroundColor(.secondary)
+                    .font(.system(size: 11))
+                Text(String(format: "%.1fx", app.displayGain))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .frame(width: 32, alignment: .trailing)
+                Button {
+                    app.displayGain = 1.0
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.borderless)
+                .help("Reset to 1.0×")
+                .disabled(abs(app.displayGain - 1.0) < 0.01)
+            }
+            .help("Display brightness — multiplies the on-screen pixel values only (saved files unaffected). Combine with Auto for a sensible starting point on dim captures.")
 
             // Before / After compare (B) — single, prominent.
             Toggle(isOn: $app.showAfter) {

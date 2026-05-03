@@ -1,0 +1,15 @@
+{
+  "inputFile" : "saturn_2023-10-10-1320_8-CK-L-Sat_pipp.ser",
+  "keepPercents" : [
+    {
+      "elapsedSeconds" : 6.1156030893325806,
+      "keepPercent" : 25,
+      "outputBytes" : 567162,
+      "outputFFTHighFraction" : 0.00064928272161934614,
+      "outputFFTMidFraction" : 0.0011575469672358101,
+      "outputFile" : "biggsky__saturn_2023-10-10-1320_8-CK-L-Sat_pipp.ser.tif",
+      "outputSharpness" : 2.5198774892487563e-05,
+      "referenceRMSE" : 0.19008609930033149
+    }
+  ]
+}

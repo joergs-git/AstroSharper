@@ -7,6 +7,7 @@
 // marks if any, otherwise current selection.
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct FileListView: View {
     @EnvironmentObject private var app: AppModel
@@ -31,6 +32,49 @@ struct FileListView: View {
             let hit = file.name.range(of: q, options: .caseInsensitive) != nil
             return negateSearch ? !hit : hit
         }
+    }
+
+    /// Map a context-menu selection (Set is unordered) into URLs in the same
+    /// order the file list currently displays — so multi-row Reveal in Finder
+    /// and Copy-to-Clipboard come out in the visible order rather than a
+    /// random hash order. Skips IDs whose entries no longer exist (e.g. just
+    /// removed from the catalog).
+    private func urlsForIDs(_ ids: Set<FileEntry.ID>) -> [URL] {
+        filteredFiles.filter { ids.contains($0.id) }.map(\.url)
+    }
+
+    /// Currently-active preset's target — drives the per-row mini-chip
+    /// in the thumbnail column. nil when no preset is active (which is
+    /// also the state where Run Lucky Stack refuses to start).
+    private var activePresetTarget: PresetTarget? {
+        guard let id = app.presets.activeID else { return nil }
+        return app.presets.preset(withID: id)?.target
+    }
+
+    /// Compact violet chip (32×32) showing the active preset's target.
+    /// Same palette as the headline-bar TargetPickerRow chips so the
+    /// "this row will be processed as Sun" link is visually obvious.
+    private static let listChipViolet     = Color(red: 0.55, green: 0.34, blue: 0.92)
+    private static let listChipVioletDeep = Color(red: 0.40, green: 0.20, blue: 0.78)
+    @ViewBuilder
+    private func targetMiniChip(_ target: PresetTarget) -> some View {
+        VStack(spacing: 0) {
+            Image(systemName: target.icon)
+                .font(.system(size: 13, weight: .semibold))
+            Text(target.rawValue)
+                .font(.system(size: 7, weight: .semibold, design: .rounded))
+                .lineLimit(1)
+        }
+        .foregroundColor(.white)
+        .frame(width: 40, height: 32)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(LinearGradient(
+                    colors: [Self.listChipViolet, Self.listChipVioletDeep],
+                    startPoint: .top, endPoint: .bottom
+                ))
+        )
+        .help("Will be processed as the \(target.rawValue) preset.")
     }
 
     var body: some View {
@@ -111,26 +155,61 @@ struct FileListView: View {
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 32, height: 32)
                         .cornerRadius(2)
+                } else if file.isSER, let target = activePresetTarget {
+                    // No real thumbnail available (SER captures don't
+                    // carry one). Show the active preset's target as
+                    // a violet mini-chip so the user can see at a
+                    // glance which target this row will be processed
+                    // as. Mirrors the headline-bar picker styling.
+                    targetMiniChip(target)
                 } else {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(Color.secondary.opacity(0.15))
                         .frame(width: 32, height: 32)
                 }
             }
-            .width(40)
+            .width(56)
 
             TableColumn("Name", value: \.name) { (file: FileEntry) in
-                Text(file.name).font(.system(size: 12))
+                HStack(spacing: 4) {
+                    // Blink-play / current-preview indicator. Distinct from
+                    // row selection so the user can have N files selected
+                    // for blinking AND see WHICH of the N is currently
+                    // displayed in the preview. Empty space reserved when
+                    // not the preview row so other rows don't reflow.
+                    if app.previewFileID == file.id {
+                        Image(systemName: "eye.fill")
+                            .foregroundColor(.accentColor)
+                            .font(.system(size: 10))
+                            .help("Currently shown in the preview.")
+                    } else {
+                        Image(systemName: "eye.fill")
+                            .foregroundColor(.clear)
+                            .font(.system(size: 10))
+                    }
+                    Text(file.name).font(.system(size: 12))
+                }
             }
 
             // Sortable extension column — clicking groups SER together and
             // raster images together when the user opened a mixed folder.
-            TableColumn("Type", value: \.typeKey) { (file: FileEntry) in
-                Text(file.typeKey.uppercased())
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary)
+            // Type + pixel dimensions combined into one column. Two
+            // columns would push the table over SwiftUI's TupleView
+            // limit (~10), so we render type / dims stacked here.
+            TableColumn("Format", value: \.typeKey) { (file: FileEntry) in
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(file.typeKey.uppercased())
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    if let w = file.pixelWidth, let h = file.pixelHeight {
+                        Text("\(w)×\(h)")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.7))
+                    }
+                }
+                .help("File type + pixel dimensions (read from header at import).")
             }
-            .width(48)
+            .width(80)
 
             // Static-image sharpness (variance of Laplacian — higher = sharper).
             // SER / AVI rows show "—" since they use a distribution scan
@@ -187,6 +266,42 @@ struct FileListView: View {
                 }
                 Divider()
             }
+            // File-system actions on the right-clicked rows. Multi-select
+            // is supported: reveal selects all picked files in Finder, copy
+            // joins paths with newlines, "Open in other App…" opens every
+            // selected file in the chosen app.
+            Button("Open Folder in Finder") {
+                let urls = urlsForIDs(ids)
+                guard !urls.isEmpty else { return }
+                NSWorkspace.shared.activateFileViewerSelecting(urls)
+            }
+            .disabled(ids.isEmpty)
+            Button("Copy Path+Filename to Clipboard") {
+                let paths = urlsForIDs(ids).map(\.path).joined(separator: "\n")
+                guard !paths.isEmpty else { return }
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.setString(paths, forType: .string)
+            }
+            .disabled(ids.isEmpty)
+            Button("Open in Other App…") {
+                let urls = urlsForIDs(ids)
+                guard !urls.isEmpty else { return }
+                let panel = NSOpenPanel()
+                panel.title = "Choose Application"
+                panel.prompt = "Open"
+                panel.allowedContentTypes = [.application]
+                panel.directoryURL = URL(fileURLWithPath: "/Applications")
+                panel.allowsMultipleSelection = false
+                panel.canChooseDirectories = false
+                if panel.runModal() == .OK, let appURL = panel.url {
+                    let cfg = NSWorkspace.OpenConfiguration()
+                    NSWorkspace.shared.open(urls, withApplicationAt: appURL,
+                                            configuration: cfg, completionHandler: nil)
+                }
+            }
+            .disabled(ids.isEmpty)
+            Divider()
             Button("Mark Selection") { app.markedFileIDs.formUnion(ids) }
                 .disabled(ids.isEmpty)
             Button("Unmark Selection") { app.markedFileIDs.subtract(ids) }

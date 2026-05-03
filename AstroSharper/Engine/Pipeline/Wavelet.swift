@@ -17,13 +17,21 @@ import Metal
 import MetalPerformanceShaders
 
 enum Wavelet {
-    private struct AddParams { var amount: Float }
+    /// Mirrors the Metal `WaveletAddParams` struct — amount + per-band
+    /// soft-threshold for noise reduction.
+    private struct AddParams { var amount: Float; var threshold: Float }
 
     static func sharpen(
         input: MTLTexture,
         output: MTLTexture,
         amounts: [Float],
         baseSigma: Float,
+        // Per-coefficient soft-threshold applied to each layer before
+        // adding it back. 0 = no thresholding (identical to the previous
+        // behaviour). Scales DOWN with band index because finer scales
+        // carry more noise per coefficient: thresh_i = base × 2^(-i/2).
+        // Pass 0 to disable.
+        noiseThreshold: Float = 0,
         pipeline: Pipeline,
         commandBuffer: MTLCommandBuffer,
         borrowed: inout [MTLTexture]
@@ -32,7 +40,13 @@ enum Wavelet {
         let w = input.width, h = input.height
         let fmt = input.pixelFormat
 
-        let scales = max(1, min(amounts.count, 6))
+        // Engine cap raised from 6 → 8 so users can chase faint band /
+        // surface detail at the 64–128 px scale (Registax 6 ships 6
+        // bands; AS!4 supports 7). Each extra band is one more
+        // MPSImageGaussianBlur pass + one weighted-add — cheap on
+        // Apple Silicon. Pyramid time is dominated by the larger
+        // sigmas at the bottom regardless.
+        let scales = max(1, min(amounts.count, 8))
         let coarse0 = pipeline.borrow(width: w, height: h, format: fmt)
         borrowed.append(coarse0)
         if let blit = commandBuffer.makeBlitCommandEncoder() {
@@ -77,8 +91,15 @@ enum Wavelet {
         }
 
         // Add each layer with its own amount — read-write on `output`.
+        // Per-band threshold scales as base × 2^(-i/2) so the finest
+        // (noisiest) bands get the most denoising and the largest bands
+        // (which carry low-frequency signal, not noise) keep their full
+        // contribution.
         for (i, layer) in layers.enumerated() {
-            var params = AddParams(amount: amounts[i])
+            let bandThreshold = noiseThreshold > 0
+                ? noiseThreshold * powf(2.0, -Float(i) / 2.0)
+                : 0
+            var params = AddParams(amount: amounts[i], threshold: bandThreshold)
             if let enc = commandBuffer.makeComputeCommandEncoder() {
                 enc.setComputePipelineState(pipeline.waddPipeline)
                 enc.setTexture(layer, index: 0)

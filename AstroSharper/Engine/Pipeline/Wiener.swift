@@ -25,20 +25,67 @@ enum Wiener {
     /// Deconvolves `input` with a Gaussian PSF of stddev `sigma` (px) and
     /// signal-to-noise ratio `snr`, writing the result into `output`. Both
     /// must be the same size; `output` is allowed to be private-storage.
+    ///
+    /// `captureGamma` (C.6): pre-linearises the input by raising each
+    /// channel to `captureGamma`, runs the linear-forward-model Wiener
+    /// inverse on the linear data, then re-encodes the output with
+    /// `1/captureGamma`. Pass 1.0 (default) to skip the linearisation
+    /// when the source is already linear (e.g. raw 16-bit FITS or a
+    /// camera with gamma=0 acquisition). Typical planetary cameras
+    /// running SharpCap defaults sit at gamma 2.0.
+    ///
+    /// `processLuminanceOnly` (C.7): when true, compute Y (BT.601
+    /// luminance) from R/G/B, run a SINGLE Wiener pass on Y, compute
+    /// Δ = Y' − Y, and add Δ to all three channels. Halves cost vs the
+    /// 3-channel default and avoids per-channel ringing artefacts when
+    /// the three channels have different noise floors (typical OSC
+    /// Bayer pattern). On mono / pre-balanced sources the result is
+    /// numerically identical to per-channel since R=G=B at the input.
     static func deconvolve(
         input: MTLTexture,
         output: MTLTexture,
         sigma: Float,
         snr: Float,
-        device: MTLDevice
+        device: MTLDevice,
+        captureGamma: Float = 1.0,
+        processLuminanceOnly: Bool = false
     ) {
         let W = input.width
         let H = input.height
         precondition(output.width == W && output.height == H, "Wiener: I/O size mismatch")
 
-        // Step 1: read input bytes (rgba16Float) via a shared staging texture.
+        // Step 1: read input bytes via a shared staging texture matching
+        // the input's actual pixel format. The earlier hard-coded
+        // rgba16Float staging produced visible byte-stride artifacts (a
+        // checkerboard / tile pattern) once the lucky-stack accumulator
+        // was upgraded to rgba32Float — Metal's blit copy does NOT
+        // format-convert between mismatched textures, so reading rgba32
+        // bytes as rgba16 misaligned every pixel.
+        let inputFormat = input.pixelFormat
+        let bytesPerChannel: Int
+        let isFloat32: Bool
+        switch inputFormat {
+        case .rgba32Float:
+            bytesPerChannel = 4
+            isFloat32 = true
+        case .rgba16Float:
+            bytesPerChannel = 2
+            isFloat32 = false
+        default:
+            // Unsupported format — bail out via blit-copy of the input
+            // so the caller still gets a valid texture, just unaffected.
+            let queue = MetalDevice.shared.commandQueue
+            if let cmd = queue.makeCommandBuffer(), let blit = cmd.makeBlitCommandEncoder() {
+                blit.copy(from: input, to: output)
+                blit.endEncoding()
+                cmd.commit()
+                cmd.waitUntilCompleted()
+            }
+            return
+        }
+
         let stageDesc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba16Float, width: W, height: H, mipmapped: false
+            pixelFormat: inputFormat, width: W, height: H, mipmapped: false
         )
         stageDesc.storageMode = .shared
         stageDesc.usage = [.shaderRead, .shaderWrite]
@@ -52,29 +99,63 @@ enum Wiener {
             cmd.waitUntilCompleted()
         }
 
-        let bytesPerRow = W * 8                         // 4 channels × 2 bytes
-        var raw = [UInt16](repeating: 0, count: W * H * 4)
-        raw.withUnsafeMutableBufferPointer { buf in
-            staging.getBytes(
-                buf.baseAddress!,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: W, height: H, depth: 1)
-                ),
-                mipmapLevel: 0
-            )
-        }
-
-        // Step 2: extract three Float32 channel planes.
+        let bytesPerRow = W * bytesPerChannel * 4
         let plane = W * H
         var rPlane = [Float](repeating: 0, count: plane)
         var gPlane = [Float](repeating: 0, count: plane)
         var bPlane = [Float](repeating: 0, count: plane)
-        for i in 0..<plane {
-            rPlane[i] = Float(Float16(bitPattern: raw[i * 4 + 0]))
-            gPlane[i] = Float(Float16(bitPattern: raw[i * 4 + 1]))
-            bPlane[i] = Float(Float16(bitPattern: raw[i * 4 + 2]))
+
+        if isFloat32 {
+            // rgba32Float: read directly into Float buffers.
+            var raw = [Float](repeating: 0, count: W * H * 4)
+            raw.withUnsafeMutableBufferPointer { buf in
+                staging.getBytes(
+                    buf.baseAddress!,
+                    bytesPerRow: bytesPerRow,
+                    from: MTLRegion(
+                        origin: MTLOrigin(x: 0, y: 0, z: 0),
+                        size: MTLSize(width: W, height: H, depth: 1)
+                    ),
+                    mipmapLevel: 0
+                )
+            }
+            for i in 0..<plane {
+                rPlane[i] = raw[i * 4 + 0]
+                gPlane[i] = raw[i * 4 + 1]
+                bPlane[i] = raw[i * 4 + 2]
+            }
+        } else {
+            // rgba16Float: read as UInt16 bitpatterns then convert.
+            var raw = [UInt16](repeating: 0, count: W * H * 4)
+            raw.withUnsafeMutableBufferPointer { buf in
+                staging.getBytes(
+                    buf.baseAddress!,
+                    bytesPerRow: bytesPerRow,
+                    from: MTLRegion(
+                        origin: MTLOrigin(x: 0, y: 0, z: 0),
+                        size: MTLSize(width: W, height: H, depth: 1)
+                    ),
+                    mipmapLevel: 0
+                )
+            }
+            for i in 0..<plane {
+                rPlane[i] = Float(Float16(bitPattern: raw[i * 4 + 0]))
+                gPlane[i] = Float(Float16(bitPattern: raw[i * 4 + 1]))
+                bPlane[i] = Float(Float16(bitPattern: raw[i * 4 + 2]))
+            }
+        }
+
+        // Capture-gamma linearisation (C.6). When the source has a non-
+        // linear gamma encoding baked in by the camera, raising each
+        // channel to `captureGamma` recovers the linear domain that the
+        // Wiener inverse-filter assumes. Skipped when gamma == 1.0 to
+        // keep the no-correction path identical to v0.3.x.
+        if captureGamma != 1.0, captureGamma > 0, captureGamma.isFinite {
+            for i in 0..<plane {
+                rPlane[i] = rPlane[i] > 0 ? powf(rPlane[i], captureGamma) : rPlane[i]
+                gPlane[i] = gPlane[i] > 0 ? powf(gPlane[i], captureGamma) : gPlane[i]
+                bPlane[i] = bPlane[i] > 0 ? powf(bPlane[i], captureGamma) : bPlane[i]
+            }
         }
 
         // Step 3: pad to next power of two (padding = 0). Mirror padding would
@@ -100,31 +181,87 @@ enum Wiener {
             }
         }
 
-        // Step 5: process each channel.
-        rPlane = wienerProcess(channel: rPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
-        gPlane = wienerProcess(channel: gPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
-        bPlane = wienerProcess(channel: bPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
-
-        // Step 6: pack back into Float16 RGBA, clamped to [0, 1].
-        let one16 = Float16(1.0).bitPattern
-        for i in 0..<plane {
-            raw[i * 4 + 0] = Float16(max(0, min(1, rPlane[i]))).bitPattern
-            raw[i * 4 + 1] = Float16(max(0, min(1, gPlane[i]))).bitPattern
-            raw[i * 4 + 2] = Float16(max(0, min(1, bPlane[i]))).bitPattern
-            raw[i * 4 + 3] = one16
+        // Step 5: deconvolve. Two paths:
+        //   - `processLuminanceOnly`: ONE Wiener on the BT.601 luma plane;
+        //     the deconv Δ = Y' − Y is added to every channel. Halves cost,
+        //     avoids per-channel ringing on OSC bayer sources where R/G/B
+        //     have different noise statistics.
+        //   - default: per-channel pipeline (legacy v0.3.x behaviour). On
+        //     mono inputs the two paths produce identical output since
+        //     R=G=B at the input — only the cost differs.
+        if processLuminanceOnly {
+            var yPlane = [Float](repeating: 0, count: plane)
+            for i in 0..<plane {
+                yPlane[i] = 0.299 * rPlane[i] + 0.587 * gPlane[i] + 0.114 * bPlane[i]
+            }
+            let yDeconv = wienerProcess(channel: yPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
+            for i in 0..<plane {
+                let delta = yDeconv[i] - yPlane[i]
+                rPlane[i] += delta
+                gPlane[i] += delta
+                bPlane[i] += delta
+            }
+        } else {
+            rPlane = wienerProcess(channel: rPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
+            gPlane = wienerProcess(channel: gPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
+            bPlane = wienerProcess(channel: bPlane, srcW: W, srcH: H, N: N, log2N: log2N, mask: wiener, setup: setup)
         }
 
-        // Step 7: write back into staging then blit into the caller's output.
-        raw.withUnsafeBufferPointer { buf in
-            staging.replace(
-                region: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: W, height: H, depth: 1)
-                ),
-                mipmapLevel: 0,
-                withBytes: buf.baseAddress!,
-                bytesPerRow: bytesPerRow
-            )
+        // Capture-gamma re-encode (C.6). Inverse of the pre-FFT linearise.
+        // Restores the original camera-gamma encoding so downstream stages
+        // (radial / tiled blend with the still-encoded `pre`, denoise, tone
+        // curve) see the same encoding throughout the pipeline.
+        if captureGamma != 1.0, captureGamma > 0, captureGamma.isFinite {
+            let invGamma = 1.0 / captureGamma
+            for i in 0..<plane {
+                rPlane[i] = rPlane[i] > 0 ? powf(rPlane[i], invGamma) : rPlane[i]
+                gPlane[i] = gPlane[i] > 0 ? powf(gPlane[i], invGamma) : gPlane[i]
+                bPlane[i] = bPlane[i] > 0 ? powf(bPlane[i], invGamma) : bPlane[i]
+            }
+        }
+
+        // Step 6: pack back into RGBA at the input's native precision,
+        // clamped to [0, 1]. Branch on isFloat32 so the byte layout matches
+        // the staging texture's format — same fix as the readback above.
+        if isFloat32 {
+            var rawOut = [Float](repeating: 0, count: plane * 4)
+            for i in 0..<plane {
+                rawOut[i * 4 + 0] = max(0, min(1, rPlane[i]))
+                rawOut[i * 4 + 1] = max(0, min(1, gPlane[i]))
+                rawOut[i * 4 + 2] = max(0, min(1, bPlane[i]))
+                rawOut[i * 4 + 3] = 1.0
+            }
+            rawOut.withUnsafeBufferPointer { buf in
+                staging.replace(
+                    region: MTLRegion(
+                        origin: MTLOrigin(x: 0, y: 0, z: 0),
+                        size: MTLSize(width: W, height: H, depth: 1)
+                    ),
+                    mipmapLevel: 0,
+                    withBytes: buf.baseAddress!,
+                    bytesPerRow: bytesPerRow
+                )
+            }
+        } else {
+            var rawOut = [UInt16](repeating: 0, count: plane * 4)
+            let one16 = Float16(1.0).bitPattern
+            for i in 0..<plane {
+                rawOut[i * 4 + 0] = Float16(max(0, min(1, rPlane[i]))).bitPattern
+                rawOut[i * 4 + 1] = Float16(max(0, min(1, gPlane[i]))).bitPattern
+                rawOut[i * 4 + 2] = Float16(max(0, min(1, bPlane[i]))).bitPattern
+                rawOut[i * 4 + 3] = one16
+            }
+            rawOut.withUnsafeBufferPointer { buf in
+                staging.replace(
+                    region: MTLRegion(
+                        origin: MTLOrigin(x: 0, y: 0, z: 0),
+                        size: MTLSize(width: W, height: H, depth: 1)
+                    ),
+                    mipmapLevel: 0,
+                    withBytes: buf.baseAddress!,
+                    bytesPerRow: bytesPerRow
+                )
+            }
         }
         if let cmd = queue.makeCommandBuffer(), let blit = cmd.makeBlitCommandEncoder() {
             blit.copy(from: staging, to: output)

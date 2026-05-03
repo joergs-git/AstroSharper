@@ -83,6 +83,17 @@ final class AppModel: ObservableObject {
     // Job status for batch runs
     @Published var jobStatus: JobStatus = .idle
 
+    /// Pending community-share prompt — set after a stack lands when
+    /// the user hasn't disabled community sharing globally. The
+    /// SwiftUI layer observes this and presents the alert with
+    /// Yes / No / Always-Off buttons. Cleared on response.
+    @Published var pendingCommunityShare: PendingCommunityShare? = nil
+    /// Re-published opt-out flag so SwiftUI re-renders the bottom-bar
+    /// icons when the user toggles them. The actual storage lives in
+    /// UserDefaults (TelemetryClient.userDisabled / CommunityShare.userDisabled).
+    @Published var telemetryEnabled: Bool = !TelemetryClient.userDisabled
+    @Published var communityShareEnabled: Bool = !CommunityShare.userDisabled
+
     // Output folder model — split into two so the auto-derived folder can
     // track the currently-opened root, while the user's explicit Choose stays
     // sticky across folder switches.
@@ -146,6 +157,23 @@ final class AppModel: ObservableObject {
     @Published var serPlaybackActive: Bool = false
     private var serPlaybackTimer: Timer?
 
+    /// Display-only auto-range stretch. OFF by default (2026-05-01):
+    /// matches Preview.app / Photoshop's industry-standard chain for
+    /// saved files — the shader applies the standard sRGB display
+    /// encode (pow ., 2.2) unconditionally so a TIFF in our app and
+    /// in Preview render identically with no other filters active.
+    /// Toggle ON when viewing dim raw SER frames where the auto
+    /// stretch + γ=2.5 reveals contrast the file's narrow [p1, p99]
+    /// band hides at standard brightness. Saved files and the
+    /// underlying texture are unaffected — display only.
+    @Published var displayAutoRange: Bool = false
+
+    /// User-controlled display brightness slider (AS!4-style "Brightness
+    /// Nx"). Multiplies the displayed pixel value AFTER the auto-gain
+    /// (when displayAutoRange is on). Range [0.25, 16]; default 1.0 =
+    /// no further scaling. Texture and saved files unchanged.
+    @Published var displayGain: Double = 1.0
+
     // Preview HUD — translucent stats overlay shown on top of the preview.
     // `previewStats` is filled by PreviewCoordinator as data becomes
     // available (header → current frame → distribution).
@@ -160,6 +188,40 @@ final class AppModel: ObservableObject {
     /// True while a Calculate-Video-Quality scan is running for the active
     /// file. The HUD swaps the button for a spinner when set.
     @Published var isCalculatingVideoQuality: Bool = false
+
+    /// True while the live-preview pipeline is processing the most recent
+    /// slider / setting change. Drives the top-right ProgressView overlay
+    /// on PreviewView so the user knows their change is being applied —
+    /// the preview was already async (background processingQueue), but
+    /// the user had no signal that work was happening.
+    @Published var processingInFlight: Bool = false
+
+    /// True while a freshly-clicked file is being read into a preview
+    /// texture. Critical for NAS-mounted SERs where the first frame's
+    /// page-fault read can take 1-3 seconds — without this signal the
+    /// user sees a black canvas and assumes the app is broken.
+    @Published var isLoadingPreview: Bool = false
+
+    /// Filename + size shown in the loading overlay so the user knows
+    /// WHICH file is being read (vs guessing because they just clicked
+    /// fast through several rows). Cleared when isLoadingPreview goes
+    /// false.
+    @Published var loadingPreviewLabel: String? = nil
+
+    /// User-facing error from the most recent preview load. nil means
+    /// the load succeeded or there's no current file. PreviewView shows
+    /// this as an inline overlay so SER format / decode failures
+    /// (unsupported ColorID, corrupt header, RGB-not-yet-supported,
+    /// readerOpenFailed on a bad NAS share) don't silently leave the
+    /// user with a black canvas.
+    @Published var previewError: String? = nil
+
+    /// Which high-level pipeline stage is currently executing in the
+    /// live preview. nil = idle. Drives the colored highlight on the
+    /// SettingsPanel section headers so the user can see which step
+    /// of the pipeline is running. Pipeline.process emits transitions
+    /// via a callback that PreviewCoordinator forwards to this property.
+    @Published var activePreviewStage: PreviewStage? = nil
 
     /// When ON, a folder/file open auto-detects Sun/Moon/Jupiter/Saturn/Mars
     /// from filenames + folder names and applies the matching default preset.
@@ -324,6 +386,52 @@ final class AppModel: ObservableObject {
         !batchTargetIDs.isEmpty && jobStatus.isIdle
     }
 
+    /// Stabilize / Align operates on a *sequence of single-frame files*
+    /// (one TIFF per timestamp / per session). It is NOT meaningful on
+    /// .ser / .avi inputs — those are video containers where the
+    /// equivalent stabilization happens inside the Lucky Stack pipeline
+    /// per-frame. The button gate also requires ≥ 2 targets and a
+    /// reference frame marker — without an explicit reference, the
+    /// alignment uses the first frame which is rarely the sharpest.
+    /// Idle gate keeps clicks from queuing while a run is already in
+    /// flight.
+    var canStabilize: Bool {
+        guard jobStatus.isIdle else { return false }
+        let targets = batchTargetIDs
+        guard targets.count >= 2 else { return false }
+        // Reject if ANY target is a SER / AVI sequence container.
+        let videoExts: Set<String> = ["ser", "avi", "mov", "mp4", "m4v"]
+        for id in targets {
+            guard let f = catalog.files.first(where: { $0.id == id }) else { continue }
+            if videoExts.contains(f.url.pathExtension.lowercased()) { return false }
+        }
+        // Reference marker must be set AND must point at one of the
+        // current targets (otherwise the marker is on a row the user
+        // didn't actually include in this batch).
+        guard let ref = referenceFileID, targets.contains(ref) else { return false }
+        return true
+    }
+
+    /// Reason the Stabilize button is disabled — surfaced as a tooltip
+    /// in the GUI so the user knows what's missing instead of staring
+    /// at a greyed button. Returns nil when the button is enabled.
+    var stabilizeDisabledReason: String? {
+        if !jobStatus.isIdle { return "Job already running" }
+        let targets = batchTargetIDs
+        if targets.count < 2 { return "Mark or select ≥ 2 image files" }
+        let videoExts: Set<String> = ["ser", "avi", "mov", "mp4", "m4v"]
+        for id in targets {
+            guard let f = catalog.files.first(where: { $0.id == id }) else { continue }
+            if videoExts.contains(f.url.pathExtension.lowercased()) {
+                return "Stabilize doesn't apply to SER / AVI sequences"
+            }
+        }
+        if referenceFileID == nil || !targets.contains(referenceFileID!) {
+            return "Press R on a row to set a reference frame"
+        }
+        return nil
+    }
+
     var selectionCount: Int { selectedFileIDs.count }
     var markedCount: Int { markedFileIDs.count }
 
@@ -378,12 +486,17 @@ final class AppModel: ObservableObject {
         grantSecurityScope(url)
 
         catalog.load(from: url)
-        selectedFileIDs.removeAll()
+        // Auto-select the first file so the user doesn't have to click a row
+        // before running Apply / Lucky Stack. Matches AstroTriage's behaviour
+        // and removes a redundant click from the open-→-process path.
+        let firstID = catalog.files.first?.id
+        selectedFileIDs = firstID.map { Set([$0]) } ?? []
         markedFileIDs.removeAll()
-        previewFileID = catalog.files.first?.id
+        previewFileID = firstID
         jobStatus = .idle
         loadThumbnailsAsync()
         autoApplyDefaultPreset(candidates: catalogCandidateStrings(rootURL: url))
+        autoApplyOscDefaults()
         autoSetupOutputFolder(in: url)
     }
 
@@ -419,6 +532,19 @@ final class AppModel: ObservableObject {
         c.append(contentsOf: catalog.files.prefix(20).map { $0.url.lastPathComponent })
         c.append(contentsOf: catalog.files.prefix(20).map { $0.url.deletingLastPathComponent().lastPathComponent })
         return c
+    }
+
+    /// Block D.3: turn on auto white balance when the just-loaded files
+    /// contain at least one OSC (Bayer SER / RGB SER / AVI) source. The
+    /// detection peeks at the first file's SER header — sub-millisecond
+    /// on Apple Silicon. Idempotent (no-op when autoWB is already on or
+    /// the source is mono) so re-opening a folder doesn't toggle the
+    /// flag back and forth.
+    private func autoApplyOscDefaults() {
+        guard let firstURL = catalog.files.first?.url else { return }
+        if OscDefaults.applyDefaults(to: &toneCurve, for: firstURL) {
+            NSLog("OscDefaults: enabled autoWB for OSC source %@", firstURL.lastPathComponent)
+        }
     }
 
     /// If auto-detect is on, find the matching target and apply that target's
@@ -467,12 +593,17 @@ final class AppModel: ObservableObject {
         }
         let inferredRoot = anyFolder ?? urls.first?.deletingLastPathComponent()
         catalog.loadURLs(allURLs, root: inferredRoot)
-        selectedFileIDs.removeAll()
+        // Auto-select the first file so the user doesn't have to click a row
+        // before running Apply / Lucky Stack. Matches AstroTriage's behaviour
+        // and removes a redundant click from the open-→-process path.
+        let firstID = catalog.files.first?.id
+        selectedFileIDs = firstID.map { Set([$0]) } ?? []
         markedFileIDs.removeAll()
-        previewFileID = catalog.files.first?.id
+        previewFileID = firstID
         jobStatus = .idle
         loadThumbnailsAsync()
         autoApplyDefaultPreset(candidates: catalogCandidateStrings(rootURL: inferredRoot ?? urls.first))
+        autoApplyOscDefaults()
         if let root = inferredRoot { autoSetupOutputFolder(in: root) }
     }
 
@@ -574,6 +705,19 @@ final class AppModel: ObservableObject {
         if autoSwitch && displayedSection != .outputs {
             switchToSection(.outputs)
         }
+    }
+
+    /// Select + preview the just-registered output file so the user sees
+    /// it highlighted in the file list AND loaded in the preview pane.
+    /// Looks up the entry by URL because `registerOutput` appended via
+    /// the active-or-stashed path; either way the URL is unique. No-op if
+    /// the row isn't in the active catalog yet (deferred entries land
+    /// after switchToSection).
+    func highlightLatestOutput(url: URL) {
+        guard let id = catalog.files.first(where: { $0.url == url })?.id else { return }
+        selectedFileIDs = Set([id])
+        markedFileIDs.removeAll()
+        previewFileID = id
     }
 
     private func appendOutputEntry(_ entry: FileEntry) {
@@ -701,7 +845,14 @@ final class AppModel: ObservableObject {
             .filter { targets.contains($0.id) }
             .map { $0.id }
 
-        var referenceID: FileEntry.ID = orderedTargetIDs.first!
+        // `targets.count >= 2` is checked above, but the catalog filter
+        // can still yield zero entries if rows were removed concurrently.
+        guard let firstTargetID = orderedTargetIDs.first else {
+            jobStatus = .error("Stabilize: no matching files in catalog")
+            return
+        }
+
+        var referenceID: FileEntry.ID = firstTargetID
         var referenceWarning: String?
         switch stabilize.referenceMode {
         case .marked:
@@ -711,12 +862,12 @@ final class AppModel: ObservableObject {
                 referenceWarning = "No reference marked — using first selected. Press R on a row to pin one."
             }
         case .firstSelected:
-            referenceID = orderedTargetIDs.first!
+            referenceID = firstTargetID
         case .brightestQuality:
             // Best-quality frame is picked inside the Stabilizer (it has
             // the texture handles). We pass `nil` to signal that; here we
             // just leave the placeholder — Stabilizer will overwrite.
-            referenceID = orderedTargetIDs.first!
+            referenceID = firstTargetID
         }
 
         // (b) Pre-flight warning when running from Memory and prior in-
@@ -769,7 +920,9 @@ final class AppModel: ObservableObject {
         if let warn = referenceWarning {
             // Non-fatal — surface as a status message. Cleared automatically
             // when a job starts.
+            #if DEBUG
             print("[stabilize] \(warn)")
+            #endif
         }
 
         jobStatus = .running(processed: 0, total: urls.count)
@@ -989,6 +1142,19 @@ final class AppModel: ObservableObject {
     }
 
     func runLuckyStackOnSelection() {
+        // MANDATORY target selection (2026-05-03). Either a built-in or
+        // user preset is active (covers the auto-detect-from-filename
+        // path AND any explicit chip click) OR the run is blocked
+        // with a clear error pointing the user at the picker chips.
+        // Rationale: AutoAP / AutoPSF + the per-target Wiener defaults
+        // all key off the active preset's target; running without one
+        // means falling back to generic defaults that never match the
+        // data well.
+        guard presets.activeID != nil else {
+            jobStatus = .error("Pick a target first — click one of the planet / Sun / Moon chips at the top of the window.")
+            return
+        }
+
         let targets = batchTargetIDs
         let selectedSers = catalog.files.filter { targets.contains($0.id) && $0.isSER }
         let selectedAvi  = catalog.files.filter { targets.contains($0.id) && $0.isAVI }
@@ -1081,7 +1247,73 @@ final class AppModel: ObservableObject {
         perItemOpts.keepCount = item.absoluteCount
         perItemOpts.useMultiAP = (luckyStack.mode == .scientific) && luckyStack.multiAP.enabled
         perItemOpts.multiAPGrid = luckyStack.multiAP.grid
-        perItemOpts.multiAPSearch = max(4, min(16, luckyStack.multiAP.patchHalf))
+        // The GUI's `patchHalf` slider always meant "the SAD correlation
+        // patch radius" by its label; until 2026-05-02 it was wired into
+        // `multiAPSearch` (the search radius) AND the actual correlation
+        // patchHalf was hardcoded to 8 in the kernel call. Now both are
+        // properly threaded: the slider drives `multiAPPatchHalf`; the
+        // search radius is derived from it (patchHalf / 2 + 2, capped at 16).
+        perItemOpts.multiAPPatchHalf = max(4, min(48, luckyStack.multiAP.patchHalf))
+        perItemOpts.multiAPSearch = max(4, min(16, perItemOpts.multiAPPatchHalf / 2 + 2))
+        // AutoAP — default-on (`.fast`). Flips to `.off` when the user
+        // touched the multi-AP grid / patch sliders, recorded by the
+        // GUI as `multiAP.userOverride`. CLI `--multi-ap-grid N` flips
+        // it the same way. AutoNuke ON forces .fast regardless of any
+        // manual override flag — the master toggle wins.
+        perItemOpts.autoAP = (luckyStack.autoNuke || !luckyStack.multiAP.userOverride)
+            ? .fast : .off
+        perItemOpts.perChannelStacking = luckyStack.perChannelStacking
+        // AutoNuke ON forces these to the engine-decides values
+        // regardless of what the (greyed-out) UI controls hold. This
+        // is the "single source of truth for auto" the user asked
+        // for: one toggle, no surprise interactions with stale
+        // checkbox states.
+        perItemOpts.useAutoPSF = luckyStack.autoNuke ? true : luckyStack.autoPSF
+        perItemOpts.autoPSFSNR = luckyStack.autoNuke ? 100 : luckyStack.autoPSFSNR
+        // RFF user setting → per-run options. Auto = pass nil so the
+        // engine's σ-aware formula computes the fractions per disc
+        // geometry. Manual = pass the user's slider values. Off = pass
+        // the sentinel value 0 to the disable flag the engine reads.
+        perItemOpts.disableRFF = (luckyStack.rffMode == .off)
+        switch luckyStack.rffMode {
+        case .auto:
+            perItemOpts.rffInnerFraction = nil
+            perItemOpts.rffOuterFraction = nil
+        case .manual:
+            perItemOpts.rffInnerFraction = luckyStack.rffInnerFraction
+            perItemOpts.rffOuterFraction = luckyStack.rffOuterFraction
+        case .off:
+            perItemOpts.rffInnerFraction = nil
+            perItemOpts.rffOuterFraction = nil
+        }
+        perItemOpts.denoisePrePercent = luckyStack.denoisePrePercent
+        perItemOpts.denoisePostPercent = luckyStack.denoisePostPercent
+        perItemOpts.useTiledDeconv = luckyStack.tiledDeconv
+        perItemOpts.tiledDeconvAPGrid = luckyStack.tiledDeconvAPGrid
+        perItemOpts.useAutoKeepPercent = luckyStack.autoNuke ? true : luckyStack.autoKeepPercent
+        // Stack-end remap: GUI toggle drives the engine flag. Default OFF
+        // in luckyStack.autoRecoverDynamicRange — bare accumulator
+        // preserves highlight detail, which the bracket on 2026-04-30
+        // showed users prefer over the percentile stretch.
+        perItemOpts.disableOutputRemap = !luckyStack.autoRecoverDynamicRange
+        // Sigma-clip accumulator (B.1) — Scientific mode only. The
+        // engine's `accumulateAlignedSigmaClipped` path triggers when
+        // `options.sigmaThreshold` is non-nil, so we leave it nil
+        // unless the GUI checkbox is on AND we're in scientific mode.
+        perItemOpts.sigmaThreshold = (luckyStack.mode == .scientific && luckyStack.sigmaClipEnabled)
+            ? Float(luckyStack.sigmaClipThreshold)
+            : nil
+        // Pre-stack calibration (D.1). Engine treats nil as "no
+        // calibration"; missing-on-disk / dimension-mismatched master
+        // frames are handled inside LuckyRunner with a logged drop.
+        perItemOpts.masterDarkURL = luckyStack.masterDarkURL
+        perItemOpts.masterFlatURL = luckyStack.masterFlatURL
+        // Drizzle reconstruction (B.6). scale=1 = off; engine routes
+        // straight to the standard accumulator. 2/3 invokes the
+        // drizzle splat path with the configured pixfrac.
+        perItemOpts.drizzleScale = luckyStack.drizzleScale
+        perItemOpts.drizzlePixfrac = Float(luckyStack.drizzlePixfrac)
+        perItemOpts.drizzleAASigma = Float(luckyStack.drizzleAASigma)
 
         if luckyStack.bakeInProcessing {
             let lut: MTLTexture? = toneCurve.enabled
@@ -1093,6 +1325,57 @@ final class AppModel: ObservableObject {
                 toneCurveLUT: lut
             )
         }
+
+        // Diagnostic: log the effective saved-file pipeline before
+        // running. Mirrors the GUI summary line so log + UI agree.
+        // Surfaces every path that could modify the saved TIFF beyond
+        // the bare accumulator — debugging the "I deselected
+        // everything but it still looks sharpened" failure mode.
+        var firing: [String] = []
+        if perItemOpts.useMultiAP { firing.append("multi-AP") }
+        if perItemOpts.useAutoPSF { firing.append("auto-PSF") }
+        if perItemOpts.useTiledDeconv && perItemOpts.useAutoPSF { firing.append("tiled-deconv") }
+        if perItemOpts.denoisePrePercent > 0 { firing.append("denoise-pre") }
+        if perItemOpts.denoisePostPercent > 0 { firing.append("denoise-post") }
+        if perItemOpts.bakeIn != nil {
+            let parts = [
+                sharpen.enabled ? "sharpen" : nil,
+                toneCurve.enabled ? "tone" : nil
+            ].compactMap { $0 }
+            firing.append("bake-in(" + (parts.isEmpty ? "nothing" : parts.joined(separator: "+")) + ")")
+        }
+        if !perItemOpts.disableOutputRemap && luckyStack.autoRecoverDynamicRange {
+            firing.append("auto-tone")
+        }
+        let pipelineSummary = firing.isEmpty ? "bare accumulator" : firing.joined(separator: " → ")
+        NSLog("LuckyStack pipeline: %@ (file=%@, autoNuke=%@)",
+              pipelineSummary,
+              item.url.lastPathComponent,
+              luckyStack.autoNuke ? "ON" : "off")
+
+        // Telemetry — captured at start so we can compute elapsed
+        // when the runner reports `.finished`. The SER header is
+        // a sub-millisecond mmap read; doing it here lets us send
+        // dimensions + frameCount without threading them through
+        // the engine's progress callback.
+        //
+        // Target source-of-truth (2026-05-03): the ACTIVE PRESET's
+        // target, not the filename keyword detect. After the
+        // mandatory-target gate in `runLuckyStackOnSelection`, the
+        // user has either auto-applied a preset (filename matched)
+        // or explicitly clicked a chip — both paths set
+        // `presets.activeID`. So this string reflects the user's
+        // actual intent rather than a re-derivation that might miss
+        // cases like `img_1234.ser`.
+        let stackStart = Date()
+        let serHeader = try? SerReader(url: item.url).header
+        let activeTarget: String? = presets.activeID
+            .flatMap { presets.preset(withID: $0) }?.target.rawValue
+            ?? PresetAutoDetect.detect(in: [
+                item.url.lastPathComponent,
+                item.url.deletingLastPathComponent().lastPathComponent
+            ])?.rawValue
+        let autoNukeAtStart = luckyStack.autoNuke
 
         LuckyStack.run(
             sourceURL: item.url,
@@ -1125,11 +1408,42 @@ final class AppModel: ObservableObject {
                 self.luckyStack.queue[nextIdx].progress = 1.0
                 self.luckyStack.queue[nextIdx].outputURL = url
                 self.luckyStack.queue[nextIdx].statusText = "done"
-                // Surface the new output in the Outputs section. First output
-                // of a run flips to OUTPUTS automatically so the user sees
-                // their results without having to toggle.
-                let isFirst = (self.outputsRootURL == nil)
-                self.registerOutput(url: url, autoSwitch: isFirst)
+                // Telemetry: fire once per finished stack. No-op when
+                // user opted out via the status-bar toggle.
+                let elapsed = Date().timeIntervalSince(stackStart)
+                TelemetryClient.recordStackCompleted(
+                    target: activeTarget,
+                    frameCount: serHeader?.frameCount ?? 0,
+                    imageWidth: serHeader?.imageWidth ?? 0,
+                    imageHeight: serHeader?.imageHeight ?? 0,
+                    autoPSFSigma: nil,   // engine-internal, wired in next iteration
+                    autoAPGrid: perItemOpts.multiAPGrid,
+                    autoAPPatch: perItemOpts.multiAPPatchHalf,
+                    shiftSigma: nil,     // engine-internal, wired in next iteration
+                    elapsedSec: elapsed,
+                    autoNuke: autoNukeAtStart
+                )
+                // Community share prompt (default ON via status bar). Asks
+                // the user if they want to upload a thumbnail for the
+                // community feed. Suppressed when user disabled community
+                // share globally via the bottom-bar icon.
+                // `serHeader?.frameCount` from the source SER (captured
+                // at stack-start above) — passed through so the metadata
+                // row shows real numbers rather than `0` (the previous
+                // re-read-from-output-TIFF path always returned 0).
+                self.maybePromptCommunityShare(
+                    stackedURL: url,
+                    target: activeTarget,
+                    frameCount: serHeader?.frameCount ?? 0,
+                    elapsedSec: elapsed
+                )
+                // ALWAYS flip to Outputs after a stack lands so the user
+                // sees their result without manual navigation. registerOutput
+                // appends the file to the catalog (active or stashed); we
+                // then select+preview it so the row is highlighted and the
+                // texture is loaded into the preview pane.
+                self.registerOutput(url: url, autoSwitch: true)
+                self.highlightLatestOutput(url: url)
                 self.runNextLuckyStackItem(outputFolder: outputFolder, options: options)
             case .error(let msg):
                 self.luckyStack.queue[nextIdx].status = .error
@@ -1142,9 +1456,26 @@ final class AppModel: ObservableObject {
     // MARK: - Presets
 
     func applyPreset(_ preset: Preset) {
+        // Preserve user's session-sticky Sharpen/Stabilize/ToneCurve
+        // ENABLE flags. Built-in presets (Sun, Jupiter, etc.) often
+        // come with these enabled, but the user wants them to default
+        // OFF at app launch and to STAY at whatever they've set during
+        // the session — file changes (which trigger autoApplyDefaultPreset)
+        // shouldn't flip them back on. Default Bool is false at app
+        // launch, so the first applyPreset call leaves them off; if the
+        // user toggles enabled=true mid-session, that state survives
+        // subsequent file loads.
+        let userSharpenEnabled  = sharpen.enabled
+        let userStabilizeEnabled = stabilize.enabled
+        let userToneEnabled      = toneCurve.enabled
+
         sharpen = preset.sharpen
         stabilize = preset.stabilize
         toneCurve = preset.toneCurve
+
+        sharpen.enabled   = userSharpenEnabled
+        stabilize.enabled = userStabilizeEnabled
+        toneCurve.enabled = userToneEnabled
         luckyStack.mode = preset.luckyMode
         luckyStack.keepPercent = preset.luckyKeepPercent
         // Per-preset Multi-AP tuning. Grid==0 means the preset prefers the
@@ -1155,7 +1486,62 @@ final class AppModel: ObservableObject {
             luckyStack.multiAP = .off
         }
         luckyStack.variants = preset.luckyVariants
+        // Apply the full lucky-stack tuning block (autoNuke + auto-PSF
+        // bundle, denoise, drizzle, RFF, bake-in, auto-tone) when the
+        // preset carries one. Old presets (saved before 2026-05-02)
+        // have luckyDetails = nil — leave the corresponding GUI
+        // fields at their session-current values so loading an old
+        // preset doesn't silently flip auto-features the user didn't
+        // ask for.
+        if let d = preset.luckyDetails {
+            luckyStack.autoNuke = d.autoNuke
+            luckyStack.autoPSF = d.autoPSF
+            luckyStack.autoPSFSNR = d.autoPSFSNR
+            luckyStack.autoKeepPercent = d.autoKeepPercent
+            luckyStack.perChannelStacking = d.perChannelStacking
+            luckyStack.denoisePrePercent = d.denoisePrePercent
+            luckyStack.denoisePostPercent = d.denoisePostPercent
+            luckyStack.tiledDeconv = d.tiledDeconv
+            luckyStack.tiledDeconvAPGrid = d.tiledDeconvAPGrid
+            luckyStack.sigmaClipEnabled = d.sigmaClipEnabled
+            luckyStack.sigmaClipThreshold = d.sigmaClipThreshold
+            luckyStack.drizzleScale = d.drizzleScale
+            luckyStack.drizzlePixfrac = d.drizzlePixfrac
+            luckyStack.drizzleAASigma = d.drizzleAASigma
+            luckyStack.bakeInProcessing = d.bakeInProcessing
+            luckyStack.autoRecoverDynamicRange = d.autoRecoverDynamicRange
+            luckyStack.rffMode = d.rffMode
+            luckyStack.rffInnerFraction = d.rffInnerFraction
+            luckyStack.rffOuterFraction = d.rffOuterFraction
+        }
         presets.activeID = preset.id
+    }
+
+    /// Build a `LuckyPresetDetails` snapshot of the current GUI state.
+    /// Used by save / update to make presets reproducible — every
+    /// toggle / slider in the Lucky Stack section round-trips.
+    private func currentLuckyDetails() -> LuckyPresetDetails {
+        var d = LuckyPresetDetails()
+        d.autoNuke = luckyStack.autoNuke
+        d.autoPSF = luckyStack.autoPSF
+        d.autoPSFSNR = luckyStack.autoPSFSNR
+        d.autoKeepPercent = luckyStack.autoKeepPercent
+        d.perChannelStacking = luckyStack.perChannelStacking
+        d.denoisePrePercent = luckyStack.denoisePrePercent
+        d.denoisePostPercent = luckyStack.denoisePostPercent
+        d.tiledDeconv = luckyStack.tiledDeconv
+        d.tiledDeconvAPGrid = luckyStack.tiledDeconvAPGrid
+        d.sigmaClipEnabled = luckyStack.sigmaClipEnabled
+        d.sigmaClipThreshold = luckyStack.sigmaClipThreshold
+        d.drizzleScale = luckyStack.drizzleScale
+        d.drizzlePixfrac = luckyStack.drizzlePixfrac
+        d.drizzleAASigma = luckyStack.drizzleAASigma
+        d.bakeInProcessing = luckyStack.bakeInProcessing
+        d.autoRecoverDynamicRange = luckyStack.autoRecoverDynamicRange
+        d.rffMode = luckyStack.rffMode
+        d.rffInnerFraction = luckyStack.rffInnerFraction
+        d.rffOuterFraction = luckyStack.rffOuterFraction
+        return d
     }
 
     /// Snapshot the current settings into a new user preset.
@@ -1172,7 +1558,8 @@ final class AppModel: ObservableObject {
             luckyKeepPercent: luckyStack.keepPercent,
             luckyMultiAPGrid: luckyStack.multiAP.grid,
             luckyMultiAPPatchHalf: luckyStack.multiAP.patchHalf,
-            luckyVariants: luckyStack.variants
+            luckyVariants: luckyStack.variants,
+            luckyDetails: currentLuckyDetails()
         )
         presets.save(p)
     }
@@ -1191,7 +1578,46 @@ final class AppModel: ObservableObject {
         updated.luckyMultiAPGrid = luckyStack.multiAP.grid
         updated.luckyMultiAPPatchHalf = luckyStack.multiAP.patchHalf
         updated.luckyVariants = luckyStack.variants
+        updated.luckyDetails = currentLuckyDetails()
         presets.save(updated)
+    }
+
+    // MARK: - Telemetry / community share helpers
+
+    /// Conditionally enqueue a community-share prompt after a stack
+    /// completes. No-op when the user has globally disabled
+    /// community share via the bottom-bar icon. The SwiftUI layer
+    /// observes `pendingCommunityShare` and presents the alert.
+    /// `frameCount` should be the SOURCE SER's frame count (captured
+    /// at stack-start) — re-reading the output TIFF as a SER would
+    /// always return 0.
+    fileprivate func maybePromptCommunityShare(
+        stackedURL: URL,
+        target: String?,
+        frameCount: Int,
+        elapsedSec: Double
+    ) {
+        guard CommunityShare.shouldPromptAfterStack else { return }
+        guard pendingCommunityShare == nil else { return }   // don't queue multiple
+        pendingCommunityShare = PendingCommunityShare(
+            stackedURL: stackedURL,
+            target: target,
+            frameCount: frameCount,
+            elapsedSec: elapsedSec
+        )
+    }
+
+    /// Bottom-bar telemetry toggle. Updates the persistent opt-out
+    /// flag AND the published mirror so SwiftUI re-renders the icon.
+    func setTelemetryEnabled(_ enabled: Bool) {
+        TelemetryClient.userDisabled = !enabled
+        telemetryEnabled = enabled
+    }
+
+    /// Bottom-bar community-share toggle. Same pattern.
+    func setCommunityShareEnabled(_ enabled: Bool) {
+        CommunityShare.userDisabled = !enabled
+        communityShareEnabled = enabled
     }
 
     // MARK: - Per-section apply actions
@@ -1212,50 +1638,6 @@ final class AppModel: ObservableObject {
     func runToneOnActiveSection() {
         runMixedAction(name: "tone", suffix: "_tone",
                        includeSharpen: false, includeTone: true)
-    }
-
-    /// "Apply ALL Stuff" — single-button pipeline that picks the right path
-    /// based on the active section and which sections are enabled. Lucky
-    /// Stack inherently breaks the chain (it consumes a whole SER and
-    /// produces a single stacked frame), so if it's enabled and SER files
-    /// are present in the selection we run *only* lucky-stack — its bake-in
-    /// option already pulls sharpen / tone-curve into the stacked output.
-    /// Otherwise:
-    ///   - In Memory: apply sharpen + tone in-place to memory frames.
-    ///   - In Inputs: run the regular file batch (stabilize → sharpen →
-    ///     tone) which writes straight to the outputs folder.
-    func applyAllStuff() {
-        guard case .idle = jobStatus else { return }
-        let targets = batchTargetIDs
-        let serSelected = catalog.files.contains { targets.contains($0.id) && $0.isSER }
-
-        // Lucky Stack route — auto-engages whenever SER files are present in
-        // the selection. SER is the lucky-imaging input format, so this is
-        // what the user expects; non-SER input falls through to the regular
-        // file pipeline (stabilize / sharpen / tone).
-        if serSelected {
-            runLuckyStackOnSelection()
-            return
-        }
-
-        if displayedSection == .memory {
-            // Run both sharpen and tone in-place on memory frames. If
-            // neither is enabled there's nothing to do — surface a helpful
-            // status message instead of silently no-oping.
-            if !sharpen.enabled && !toneCurve.enabled {
-                jobStatus = .error("Nothing to apply — enable Sharpening or Tone Curve first.")
-                return
-            }
-            applyToMemoryFrames(opName: "all",
-                                includeSharpen: sharpen.enabled,
-                                includeTone: toneCurve.enabled)
-            return
-        }
-
-        // Inputs / Outputs section — the file-level pipeline. applyToSelection
-        // already honours each section's `enabled` flag so we can hand it the
-        // current settings unchanged.
-        applyToSelection()
     }
 
     private func runMixedAction(
@@ -1438,8 +1820,17 @@ final class AppModel: ObservableObject {
                     guard let self, let idx = self.catalog.index(of: id) else { return }
                     self.catalog.files[idx].thumbnail = img
                 }
-                // Static-image sharpness — cheap, computed once. SER / AVI
-                // files use the on-demand video-quality scan instead.
+                // Static-image sharpness — populated from cache only. The
+                // earlier auto-compute path ran SharpnessProbe on every new
+                // static image at section-switch time, which scaled with
+                // the OUTPUTS folder size: 20 freshly-stacked TIFFs ≈
+                // 20 GPU passes + 20 main-thread writes ≈ 1–3 s before the
+                // table felt responsive again. Match the pattern already
+                // established for SER quality scans: cache hits populate
+                // automatically, cache misses leave the column blank until
+                // the user explicitly opts in via the
+                // "Calculate Video Quality" button (or a future static-
+                // image equivalent).
                 guard !isFrameSeq else { return }
                 if let cached = await QualityCache.shared.lookup(url: url),
                    let s = cached.sharpness {
@@ -1447,24 +1838,6 @@ final class AppModel: ObservableObject {
                         guard let self, let idx = self.catalog.index(of: id) else { return }
                         self.catalog.files[idx].sharpness = s
                     }
-                    return
-                }
-                // Shared probe — instantiating one per file in a 500-file
-                // import burned more time on queue/cache setup than the
-                // actual GPU pass. Load via ImageIO's thumbnail path capped
-                // at 512² so a 6 K TIFF doesn't trigger a full decode just
-                // to score sharpness — variance-of-Laplacian is largely
-                // scale-invariant on natural content.
-                guard let tex = try? ImageTexture.loadDownsampled(
-                    url: url,
-                    maxDimension: 512,
-                    device: MetalDevice.shared.device
-                ) else { return }
-                let s = SharpnessProbe.shared.compute(texture: tex)
-                await MainActor.run {
-                    guard let self, let idx = self.catalog.index(of: id) else { return }
-                    self.catalog.files[idx].sharpness = s
-                    QualityCache.shared.store(url: url, sharpness: s)
                 }
             }
         }
@@ -1609,100 +1982,12 @@ final class AppModel: ObservableObject {
 }
 
 // MARK: - Settings
-
-struct SharpenSettings: Equatable, Codable {
-    var enabled: Bool = true
-
-    // Classical Unsharp Mask.
-    var unsharpEnabled: Bool = true
-    var radius: Double = 1.5         // Gaussian sigma in pixels
-    var amount: Double = 1.0         // Unsharp amount
-    var adaptive: Bool = false
-
-    // Lucy-Richardson deconvolution.
-    var lrEnabled: Bool = false
-    var lrIterations: Int = 30
-    var lrSigma: Double = 1.3
-
-    // Wiener deconvolution (synthetic Gaussian PSF).
-    // Linear MSE-optimal inverse — sharper edges than L-R for known PSFs,
-    // but ringing risk if SNR is mis-set. Best for crisp planetary frames
-    // where the optical PSF is well-modelled by a Gaussian.
-    var wienerEnabled: Bool = false
-    var wienerSigma: Double = 1.4
-    var wienerSNR: Double = 50
-
-    // Wavelet sharpening (à-trous / starlet) — 4 dyadic scales, independently
-    // boosted. Standard tool for solar/planetary sharpening (Registax-style).
-    var waveletEnabled: Bool = false
-    var waveletScales: [Double] = [1.8, 1.4, 1.0, 0.6]  // amounts for scales 1..4
-}
-
-struct StabilizeSettings: Equatable, Codable {
-    var enabled: Bool = false
-    var referenceMode: ReferenceMode = .marked
-    var cropMode: CropMode = .crop
-    var stackAverage: Bool = false
-    var alignmentMode: AlignmentMode = .fullFrame
-    /// User-defined region of interest in *normalised* reference-frame
-    /// coordinates (0…1, top-left origin). Only consulted when
-    /// `alignmentMode == .referenceROI`.
-    var roi: NormalisedRect? = nil
-
-    enum ReferenceMode: String, CaseIterable, Identifiable, Codable {
-        /// Use the frame the user explicitly tagged with the gold-star
-        /// "Reference" marker. Default — clearest user intent.
-        case marked = "Marked Reference"
-        case firstSelected = "First Selected"
-        case brightestQuality = "Best-Quality Frame"
-        var id: String { rawValue }
-    }
-
-    enum CropMode: String, CaseIterable, Identifiable, Codable {
-        case pad = "Pad to Bounding Box"       // output stays at input size, black borders
-        case crop = "Crop to Intersection"     // output = overlap region of all frames
-        var id: String { rawValue }
-    }
-
-    /// Picks how the per-frame shift is computed. Each mode shines on a
-    /// different subject:
-    ///   - `.fullFrame`: phase-correlation on the whole image — robust for
-    ///     general scenes with widely-distributed detail.
-    ///   - `.discCentroid`: locks onto the bright disc's centre of mass
-    ///     against a dark background. Designed for full-disc Sun / Moon
-    ///     where surface detail is faint relative to the disc edge — the
-    ///     limb itself becomes the anchor and works even on featureless
-    ///     surfaces or thin clouds.
-    ///   - `.referenceROI`: phase-correlate only inside a user-drawn rect
-    ///     on the reference frame. Pin alignment to a specific feature —
-    ///     a sunspot group, prominence, lunar crater, planetary moon
-    ///     transit. Other parts of the frame are ignored entirely.
-    enum AlignmentMode: String, CaseIterable, Identifiable, Codable {
-        case fullFrame      = "Full Frame"
-        case discCentroid   = "Disc Centroid (Sun / Moon)"
-        case referenceROI   = "Reference ROI (feature lock)"
-        var id: String { rawValue }
-    }
-}
-
-/// Plain-Codable rect used for normalised ROI storage. CGRect isn't
-/// Codable directly, so we keep our own minimal type.
-struct NormalisedRect: Equatable, Codable {
-    var x: Double      // 0…1, left
-    var y: Double      // 0…1, top
-    var w: Double      // 0…1
-    var h: Double      // 0…1
-    var asCGRect: CGRect { CGRect(x: x, y: y, width: w, height: h) }
-}
-
-struct ToneCurveSettings: Equatable, Codable {
-    var enabled: Bool = false
-    var controlPoints: [CGPoint] = [
-        CGPoint(x: 0.0, y: 0.0),
-        CGPoint(x: 0.5, y: 0.5),
-        CGPoint(x: 1.0, y: 1.0),
-    ]
-}
+//
+// `SharpenSettings`, `StabilizeSettings`, `NormalisedRect`, and
+// `ToneCurveSettings` moved to `Engine/PipelineSettings.swift` so the
+// headless CLI and test targets can consume them without dragging in
+// SwiftUI / @MainActor / AppModel itself. Their definitions and
+// defaults are unchanged — preset JSON on disk keeps loading.
 
 // MARK: - Lucky Stack UI state
 
@@ -1732,16 +2017,23 @@ struct LuckyStackItem: Identifiable {
 struct LuckyMultiAPConfig: Codable, Equatable {
     var grid: Int = 0
     var patchHalf: Int = 8
+    /// Set to true when the user manually drags the grid / patch
+    /// sliders — flips AutoAP to `.off` so the manual pick stands.
+    /// Default false means AutoAP fires on every stack run; touching
+    /// either slider opts out for the rest of the session (the
+    /// preset-apply path resets this to false).
+    var userOverride: Bool = false
     var enabled: Bool { grid > 0 }
 
-    static let off = LuckyMultiAPConfig(grid: 0, patchHalf: 8)
+    static let off = LuckyMultiAPConfig(grid: 0, patchHalf: 8, userOverride: false)
     static func grid(_ n: Int, _ patchHalf: Int = 8) -> LuckyMultiAPConfig {
-        LuckyMultiAPConfig(grid: n, patchHalf: patchHalf)
+        LuckyMultiAPConfig(grid: n, patchHalf: patchHalf, userOverride: false)
     }
 
     var label: String {
         if !enabled { return "Off" }
-        return "\(grid)×\(grid) (patch \(patchHalf * 2))"
+        let suffix = userOverride ? "" : " · AUTO"
+        return "\(grid)×\(grid) (patch \(patchHalf * 2))\(suffix)"
     }
 }
 
@@ -1751,18 +2043,9 @@ enum LuckyStackFilenameMode: String, CaseIterable, Identifiable, Equatable, Coda
     var id: String { rawValue }
 }
 
-/// Optional extra stack outputs requested per .ser, on top of the default
-/// "keep best N%" slider value. Each non-zero entry triggers a *separate*
-/// stack run for that file, written to a subdirectory of the output folder
-/// (e.g. `f100/`, `p25/`). Default values are all zero meaning "off".
-struct LuckyStackVariants: Codable, Equatable {
-    var absoluteCounts: [Int] = [0, 0, 0]   // f-slots
-    var percentages: [Int] = [0, 0, 0]      // p-slots
-
-    var isEmpty: Bool {
-        absoluteCounts.allSatisfy { $0 == 0 } && percentages.allSatisfy { $0 == 0 }
-    }
-}
+// `LuckyStackVariants` moved to Engine/Pipeline/LuckyStack.swift in v1.0
+// foundation work — Preset.swift consumes it, so it must be in Engine
+// for the headless CLI build.
 
 struct LuckyStackUIState {
     var mode: LuckyStackMode = .lightspeed
@@ -1772,15 +2055,140 @@ struct LuckyStackUIState {
     var filenameMode: LuckyStackFilenameMode = .sharpcap
     var multiAP: LuckyMultiAPConfig = .off
     var variants: LuckyStackVariants = LuckyStackVariants()
+
+    /// AutoNuke master toggle (2026-05-02). When ON, the engine
+    /// picks every "auto" feature simultaneously and the manual
+    /// controls below are disabled / greyed out:
+    ///   - autoPSF              → forced ON
+    ///   - autoKeepPercent      → forced ON
+    ///   - multi-AP geometry    → AutoAP picks (ignores user override)
+    ///   - multi-AP yes/no      → AutoAP gate decides per fixture
+    ///   - tiled deconv grid    → AutoAP picks
+    /// When OFF, no implicit auto behaviour: every checkbox / slider
+    /// in the section is honoured exactly as the user set it. This is
+    /// the single source of truth for "let it decide" vs "I'll
+    /// configure" — replaces the old Smart-auto button which only
+    /// nudged a few flags one-shot and left manual controls active.
+    var autoNuke: Bool = false
     /// When ON, the stacked texture is run through the standard sharpen +
-    /// tone pipeline before being written to disk. Default ON because users
-    /// almost always expect the saved file to look like the live preview;
-    /// turn OFF to keep raw stacks for separate downstream processing.
-    var bakeInProcessing: Bool = true
+    /// tone pipeline before being written to disk. Default OFF: a freshly
+    /// stacked image should land "raw" so the user can decide which post-
+    /// processing to apply. Turning this ON folds the current Sharpen + Tone
+    /// settings into the saved TIF, which can be unintended on the first
+    /// stack of a session.
+    var bakeInProcessing: Bool = false
+
+    /// Stack-end subject-aware tone adjust. Default OFF (2026-05-02
+    /// per user feedback): the bare accumulator preserves highlight
+    /// detail and the user prefers it. ON applies the subject-aware
+    /// gamma 1.3 to dark-dominated subjects (planetary) for midtone
+    /// compression without clamping; lunar / wide-range pass through
+    /// unchanged.
+    var autoRecoverDynamicRange: Bool = false
 
     /// Optional target tag used to fill the WinJUPOS `<obj>` field. Defaults
     /// to whatever is in the active preset's target if any.
     var winjuposTarget: String = "Sun"
+
+    /// Per-channel stacking (Path B). On Bayer captures, splits the
+    /// SER into independent R/G/B channel planes, aligns + stacks
+    /// each one separately against a shared reference, then
+    /// recombines via a Bayer-pattern-aware bilinear upsample.
+    /// Mono SER captures ignore this flag. ~3× runtime cost.
+    var perChannelStacking: Bool = false
+
+    /// Auto-PSF post-pass (Block C.1 v0). When ON, after the bake-in
+    /// runs, the engine estimates Gaussian PSF sigma from the
+    /// planetary limb's line-spread function and applies Wiener
+    /// deconvolution with the estimated sigma. Works on planetary
+    /// captures (lunar/solar/Jupiter/Saturn/Mars/Venus); skipped
+    /// silently if no clear limb is found in the stacked output.
+    var autoPSF: Bool = false
+    /// Wiener SNR for the auto-PSF post-pass. 50 = balanced default,
+    /// 30 = aggressive (rings on bright planets), 100 = soft (gentle
+    /// on noisy data).
+    var autoPSFSNR: Double = 50
+
+    /// Radial Fade Filter (RFF) settings — Auto / Manual / Off. Default
+    /// Auto uses the σ-aware formula. Manual exposes inner / outer
+    /// sliders. Off skips the fade entirely (Wiener output used
+    /// directly — useful for solar Hα where the auto fade looks
+    /// strange against the chromosphere edge per 2026-05-01 user
+    /// feedback).
+    var rffMode: RFFMode = .auto
+    var rffInnerFraction: Double = 0.85
+    var rffOuterFraction: Double = 1.05
+
+    /// Dual-stage denoise around the auto-PSF + Wiener path (Block C.5).
+    /// 0..100. Pre-denoise wraps the input before PSF estimation +
+    /// deconv (cleaner LSF, less noise amplification). Post-denoise
+    /// runs after Wiener restore (suppresses residual ringing). Both
+    /// only fire when `autoPSF == true`.
+    var denoisePrePercent: Int = 0
+    var denoisePostPercent: Int = 0
+
+    /// Tiled deconvolution with green/yellow/red mask (Block C.3 v0).
+    /// Classifies each AP cell by content: surface (full deconv),
+    /// limb (half deconv), background (skip). Soft mask blend
+    /// suppresses noise amplification in dark regions. Only fires
+    /// when `autoPSF == true`.
+    var tiledDeconv: Bool = false
+    var tiledDeconvAPGrid: Int = 8
+
+    /// Auto-keep-% (Block A.4). When ON, the runner uses the per-frame
+    /// quality distribution (free output of the runner's own grading
+    /// pass) to derive a keep fraction via
+    /// `SerQualityScanner.computeKeepRecommendation` instead of the
+    /// `keepPercent` slider value. Smart auto turns this on; the
+    /// user can always override by setting `keepPercent` manually.
+    var autoKeepPercent: Bool = false
+
+    /// Sigma-clipped stacking (Block B.1). When ON in Scientific mode,
+    /// the accumulator does a Welford pass to compute per-pixel mean +
+    /// variance, then a second pass that re-means only samples within
+    /// `sigmaClipThreshold × σ` of the per-pixel mean — outlier frames
+    /// (cosmic rays, satellite trails, single-frame seeing spikes) get
+    /// clipped per-pixel rather than rejected wholesale. Default OFF
+    /// because the two-pass cost is ~2× the unclipped accumulator;
+    /// users opt in when they have visible outlier contamination.
+    /// AS!4 / RegiStax default σ=2.5; we mirror that.
+    var sigmaClipEnabled: Bool = false
+    var sigmaClipThreshold: Double = 2.5
+
+    /// Pre-stack calibration master frames (Block D.1). Both optional;
+    /// nil = no calibration applied (engine bypasses the
+    /// `apply_calibration` kernel). Per-pixel formula is (light − dark)
+    /// / flatNorm, applied at decode time before quality grading +
+    /// alignment so the quality scores see calibrated frames.
+    /// Dimension mismatch with the source SER → engine logs + drops
+    /// the offending master rather than crashing. The pickers below
+    /// take pre-built master TIFFs (typical PixInsight / ASTAP
+    /// workflow); building masters from a folder of bias/dark/flat
+    /// shots is a v1+ helper that hasn't shipped yet.
+    var masterDarkURL: URL? = nil
+    var masterFlatURL: URL? = nil
+
+    /// Drizzle reconstruction (Block B.6). `drizzleScale` 1 = off
+    /// (default — output at source resolution); 2 / 3 splat each input
+    /// pixel onto a 2× / 3× upsampled accumulator with sub-pixel
+    /// precision driven by the alignment shifts. Useful on
+    /// undersampled subjects (lunar / solar surface at long focal
+    /// length, or planetary captures where the seeing FWHM is below
+    /// 2.4 × pixel scale). `drizzlePixfrac` is the drop size as a
+    /// fraction of input pixel — BiggSky-documented sweet spot 0.7;
+    /// lower = sharper but more dropouts on sparse samples; higher =
+    /// smoother but blurrier. AA pre-filter (the BiggSky-warned grid
+    /// moiré protection) is NOT yet implemented — track via roadmap
+    /// B.6 follow-up.
+    var drizzleScale: Int = 1
+    var drizzlePixfrac: Double = 0.7
+
+    /// Drizzle AA pre-filter sigma in input pixels. 0 = off (pre-
+    /// 2026-05-01 behaviour); 0.7 default smooths the splat-drop hard
+    /// edges so they don't beat with the underlying signal on sparse
+    /// / coarse-shift inputs (the BiggSky-warned grid-moiré artefact).
+    /// Only effective when `drizzleScale > 1`.
+    var drizzleAASigma: Double = 0.7
 }
 
 enum LuckyStackNaming {
@@ -1810,30 +2218,10 @@ enum LuckyStackNaming {
 }
 
 // MARK: - Playback (in-memory sequence)
-
-struct PlaybackFrame: Identifiable {
-    let id: UUID         // matches FileEntry.id of the source file
-    let sourceURL: URL
-    var texture: MTLTexture
-    /// Trail of operations that have been applied to this in-memory frame.
-    /// Drives the smart filename suffixes when the user saves to disk —
-    /// e.g. ["aligned", "sharp", "tone"] → `<source>_aligned_sharp_tone.tif`.
-    var appliedOps: [String] = []
-}
-
-struct PlaybackState {
-    var frames: [PlaybackFrame] = []
-    var currentIndex: Int = 0
-    var isPlaying: Bool = false
-    var fps: Double = 18
-    var loop: Bool = true
-
-    var hasFrames: Bool { !frames.isEmpty }
-    var currentFrame: PlaybackFrame? {
-        guard frames.indices.contains(currentIndex) else { return nil }
-        return frames[currentIndex]
-    }
-}
+//
+// `PlaybackFrame` and `PlaybackState` moved to Engine/PlaybackState.swift
+// in v1.0 foundation work so Engine/Exporter.swift and the headless CLI
+// can reference them without dragging in SwiftUI.
 
 // MARK: - Job status
 
@@ -1844,4 +2232,18 @@ enum JobStatus: Equatable {
     case error(String)
 
     var isIdle: Bool { if case .idle = self { return true } else { return false } }
+}
+
+/// In-flight community-share prompt payload — populated when a stack
+/// finishes and community share is enabled. The SwiftUI alert reads
+/// these fields to render the prompt and route the response.
+struct PendingCommunityShare: Identifiable, Equatable {
+    let id = UUID()
+    let stackedURL: URL
+    let target: String?
+    let frameCount: Int
+    /// Wall-clock time the stack took on this machine. Surfaced in
+    /// the community feed window's "duration" column so other users
+    /// can compare their hardware.
+    let elapsedSec: Double
 }

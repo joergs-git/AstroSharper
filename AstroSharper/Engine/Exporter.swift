@@ -12,23 +12,24 @@ import Metal
 import UniformTypeIdentifiers
 
 enum ExportFormat: String, CaseIterable, Identifiable {
-    case tiffSequence = "TIFF sequence (16-bit)"
-    case pngSequence  = "PNG sequence (8-bit)"
-    case jpegSequence = "JPEG sequence"
-    case mp4H264      = "MP4 video (H.264)"
-    case movProRes    = "MOV video (ProRes 422)"
-    case animatedGIF  = "Animated GIF"
+    case tiffSequence       = "TIFF sequence (16-bit)"
+    case tiff32FloatSequence = "TIFF sequence (32-bit float)"
+    case pngSequence        = "PNG sequence (8-bit)"
+    case jpegSequence       = "JPEG sequence"
+    case mp4H264            = "MP4 video (H.264)"
+    case movProRes          = "MOV video (ProRes 422)"
+    case animatedGIF        = "Animated GIF"
     var id: String { rawValue }
 
     var isSequence: Bool {
         switch self {
-        case .tiffSequence, .pngSequence, .jpegSequence: return true
+        case .tiffSequence, .tiff32FloatSequence, .pngSequence, .jpegSequence: return true
         default: return false
         }
     }
     var sequenceExtension: String {
         switch self {
-        case .tiffSequence: return "tif"
+        case .tiffSequence, .tiff32FloatSequence: return "tif"
         case .pngSequence:  return "png"
         case .jpegSequence: return "jpg"
         default: return ""
@@ -40,6 +41,14 @@ enum ExportFormat: String, CaseIterable, Identifiable {
         case .movProRes:   return "mov"
         case .animatedGIF: return "gif"
         default: return sequenceExtension
+        }
+    }
+
+    /// Bit depth implied by the format. PNG and JPEG ignore this.
+    var bitDepth: ImageTexture.BitDepth {
+        switch self {
+        case .tiff32FloatSequence: return .float32
+        default: return .uint16
         }
     }
 }
@@ -118,7 +127,7 @@ enum Exporter {
             )
             let baseName = frame.sourceURL.deletingPathExtension().lastPathComponent
             let outURL = folder.appendingPathComponent("\(baseName)_proc.\(options.format.sequenceExtension)")
-            try ImageTexture.write(texture: processed, to: outURL)
+            try ImageTexture.write(texture: processed, to: outURL, bitDepth: options.format.bitDepth)
             progress(.writing(done: i + 1, total: frames.count))
         }
     }
