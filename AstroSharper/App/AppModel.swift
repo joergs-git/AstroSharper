@@ -99,6 +99,13 @@ final class AppModel: ObservableObject {
     /// disk read on every toggle.
     @Published var lastStackedSourceThumbnail: NSImage? = nil
 
+    /// Block A.5 v1 — chronologically-ordered per-frame XY shifts (in
+    /// pixels) from the most recent stabilizer run. The PreviewStatsHUD
+    /// renders a sparkline tracing the magnitude over time so the user
+    /// can see at a glance how much atmospheric drift the registration
+    /// step had to absorb. nil until the first Stabilize completes.
+    @Published var lastStabilizerShifts: [SIMD2<Float>]? = nil
+
     // Job status for batch runs
     @Published var jobStatus: JobStatus = .idle
 
@@ -983,6 +990,10 @@ final class AppModel: ObservableObject {
                     return PlaybackFrame(id: res.id, sourceURL: res.url,
                                          texture: res.texture, appliedOps: trail)
                 }
+                // A.5 v1 — surface per-frame XY shifts to the HUD for the
+                // sparkline. Reference frame is (0,0); other frames carry
+                // the chronological alignment trail.
+                self.lastStabilizerShifts = result.shifts
                 self.playback.currentIndex = 0
                 self.playback.isPlaying = false
                 // Land the user on MEMORY tab so they immediately see the

@@ -625,6 +625,23 @@ struct ToneCurveSection: View {
             }
             .help("0 = grayscale, 1 = unchanged, 2 = double saturation. Applied after the tone curve.")
             Divider().padding(.vertical, 4)
+
+            // Section-wide reset (mirror of the STEP 1 button). Restores
+            // every Step 2 control — auto-WB, chromatic alignment,
+            // brightness / contrast, highlights / shadows, saturation,
+            // tone-curve points — to the factory `ToneCurveSettings()`
+            // initialiser. Section ends up OFF afterward so the next
+            // engagement is intentional.
+            HStack {
+                Button("Reset Step 2 to defaults") {
+                    app.toneCurve = ToneCurveSettings()
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11))
+                .help("Restore every Step 2 control (auto-WB, chromatic alignment, brightness, contrast, highlights, shadows, saturation, tone curve) to its factory default. The section ends up OFF afterward — re-enable it via the title-bar switch when ready.")
+                Spacer()
+            }
+
             LuckyRunButton(
                 disabled: false,
                 title: "Apply Tone Curve",

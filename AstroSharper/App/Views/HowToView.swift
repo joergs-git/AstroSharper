@@ -111,6 +111,19 @@ struct HowToView: View {
                               text: "Double-click = reset to fit + center.")
                     BulletRow(icon: "command", color: .purple,
                               text: "⌘+ zoom in 25% · ⌘- zoom out 25% · ⌘0 fit · ⌘1 1:1 · ⌘2 1:2 · ⌘3 1:4 · ⌘4 1:8.")
+                    BulletRow(icon: "rectangle.split.2x1", color: .cyan,
+                              text: "B = toggle Compare side panel. Top thumbnail = the current displayed file (no manipulations); bottom = the source SER's first frame (populated when Lucky Stack runs). Default 2× zoom, linked pinch + drag, double-click any thumb to reset.")
+
+                    Divider().padding(.vertical, 4)
+
+                    Text("Resetting & comparing")
+                        .font(.system(size: 14, weight: .heavy))
+                    BulletRow(icon: "arrow.counterclockwise.circle", color: .orange,
+                              text: "Step 1 + Step 2 each have a 'Reset to defaults' button at the bottom of the section. Restores every control to factory and turns the section OFF — for when experimental tweaks drifted beyond recovery.")
+                    BulletRow(icon: "scribble.variable", color: .yellow,
+                              text: "After Stabilize, the HUD shows a Drift sparkline + peak shift in pixels — quick read on how much atmospheric motion the registration absorbed.")
+                    BulletRow(icon: "scope", color: .pink,
+                              text: "Median HFR (half-flux radius) joins the Jitter row in the HUD after a Calculate Video Quality scan. Lower = sharper / more concentrated PSF.")
 
                     Divider().padding(.vertical, 4)
 

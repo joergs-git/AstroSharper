@@ -33,6 +33,8 @@ final class Pipeline {
     private let stackPSO:   MTLComputePipelineState
     private let subPSO:     MTLComputePipelineState
     private let waddPSO:    MTLComputePipelineState
+    private let gammaEncodePSO: MTLComputePipelineState
+    private let gammaDecodePSO: MTLComputePipelineState
 
     // Texture pool (per pipeline instance). Protected by `poolLock` since
     // process() may run on a background queue while other code paths also
@@ -80,6 +82,8 @@ final class Pipeline {
         self.stackPSO   = make("stack_accumulate")
         self.subPSO     = make("subtract_textures")
         self.waddPSO    = make("weighted_add")
+        self.gammaEncodePSO = make("gamma_encode")
+        self.gammaDecodePSO = make("gamma_decode")
     }
 
     private func makeComputePSO(function name: String) -> MTLComputePipelineState {
@@ -403,6 +407,33 @@ final class Pipeline {
             current = result
         }
 
+        // Gamma-encode the tone-block input so subsequent ops (LUT,
+        // B+C, H+S, Saturation) operate in perceptual sRGB space —
+        // a slider midpoint then lands at the perceived midtone the
+        // user sees, not at linear 0.5 (≈ perceptual 0.73). The
+        // matching decode at the END of the tone block returns the
+        // texture to linear before downstream stages (display chain
+        // / file write) re-apply their own encoding. Skipped when no
+        // tone op will run — saves a redundant pair of dispatches on
+        // every preview frame in the no-tone case.
+        let toneOpsActive = (toneCurve.enabled && toneCurveLUT != nil)
+            || (toneCurve.enabled && !bcIsIdentity)
+            || (toneCurve.enabled && (abs(toneCurve.highlights) > 1e-4 || abs(toneCurve.shadows) > 1e-4))
+            || (toneCurve.enabled && abs(toneCurve.saturation - 1.0) > 1e-4)
+        if toneOpsActive {
+            let result = borrow(width: w, height: h, format: input.pixelFormat)
+            borrowed.append(result)
+            if let enc = finalCmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(gammaEncodePSO)
+                enc.setTexture(current, index: 0)
+                enc.setTexture(result, index: 1)
+                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: gammaEncodePSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            current = result
+        }
+
         if toneCurve.enabled, let lut = toneCurveLUT {
             let result = borrow(width: w, height: h, format: input.pixelFormat)
             borrowed.append(result)
@@ -478,6 +509,24 @@ final class Pipeline {
                 var p = SaturationParamsCPU(saturation: Float(toneCurve.saturation))
                 enc.setBytes(&p, length: MemoryLayout<SaturationParamsCPU>.stride, index: 0)
                 let (tgC, tgS) = dispatchThreadgroups(for: result, pso: satPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            current = result
+        }
+
+        // Closing decode: undo the gamma encode we did before the LUT
+        // so downstream stages (display chain, file writer) see linear
+        // values again. Mirror of the entry-side gating above so we
+        // don't decode something we never encoded.
+        if toneOpsActive {
+            let result = borrow(width: w, height: h, format: input.pixelFormat)
+            borrowed.append(result)
+            if let enc = finalCmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(gammaDecodePSO)
+                enc.setTexture(current, index: 0)
+                enc.setTexture(result, index: 1)
+                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: gammaDecodePSO)
                 enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
                 enc.endEncoding()
             }

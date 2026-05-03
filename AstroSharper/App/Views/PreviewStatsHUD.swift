@@ -14,6 +14,10 @@ struct PreviewStatsHUD: View {
     /// True while a scan is running — HUD shows a spinner instead of the
     /// button so the user gets immediate feedback that the click landed.
     var isScanning: Bool = false
+    /// A.5 v1 — chronological per-frame XY shifts from the most recent
+    /// stabilizer run. nil before any Stabilize has completed; the HUD
+    /// hides the sparkline row in that case.
+    var stabilizerShifts: [SIMD2<Float>]? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -137,6 +141,27 @@ struct PreviewStatsHUD: View {
                     }
                 }
             }
+            // A.5 v1 — XY-shift sparkline. Renders the chronological
+            // per-frame alignment magnitudes from the most recent
+            // Stabilize run as a tiny line graph. Hidden until at
+            // least one Stabilize has completed (or when only one
+            // frame's worth of data is available — the sparkline
+            // needs at least two points to draw a segment).
+            if let shifts = stabilizerShifts, shifts.count >= 2 {
+                Divider().background(Color.white.opacity(0.15)).padding(.vertical, 2)
+                HStack(spacing: 6) {
+                    Image(systemName: "scribble.variable")
+                        .foregroundColor(.secondary)
+                    Text("Drift")
+                        .foregroundColor(.secondary)
+                    XYShiftSparkline(shifts: shifts)
+                        .frame(width: 100, height: 14)
+                    Text(Self.formatPeakShift(shifts))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                .help("Per-frame XY-shift magnitude (px) from the most recent Stabilize run. Sparkline shows chronological order across the kept frames; the trailing number is the peak. Higher peak = more atmospheric drift the registration had to absorb.")
+            }
         }
         .font(.system(size: 11, design: .monospaced))
         .foregroundColor(.white)
@@ -196,5 +221,47 @@ struct PreviewStatsHUD: View {
             return String(format: "%.2e", v)
         }
         return String(format: "%.4f", v)
+    }
+
+    /// Peak shift magnitude across the chronological shift sequence —
+    /// renders alongside the sparkline so the user gets one number for
+    /// "how bad was the worst frame" without reading the chart.
+    fileprivate static func formatPeakShift(_ shifts: [SIMD2<Float>]) -> String {
+        let peak = shifts.map { sqrtf($0.x * $0.x + $0.y * $0.y) }.max() ?? 0
+        return String(format: "%.1f px", peak)
+    }
+}
+
+// MARK: - XY-shift sparkline (A.5 v1)
+
+/// Compact line plot of the shift magnitudes (sqrt(dx² + dy²)) across
+/// the kept frames. Auto-scales y to the peak so the visual range is
+/// always [0 … peak] regardless of capture quality. Drawn entirely in
+/// Path math — no animation, no caching needed for the typical
+/// 50…1000-point series.
+struct XYShiftSparkline: View {
+    let shifts: [SIMD2<Float>]
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                Path { path in
+                    let mags = shifts.map { sqrtf($0.x * $0.x + $0.y * $0.y) }
+                    let peak = max(mags.max() ?? 1, 0.5)   // floor avoids divide-by-tiny
+                    let n = max(mags.count, 2)
+                    let stepX = geo.size.width / CGFloat(n - 1)
+                    for (i, m) in mags.enumerated() {
+                        let x = stepX * CGFloat(i)
+                        let y = geo.size.height * (1.0 - CGFloat(m / peak))
+                        if i == 0 {
+                            path.move(to: CGPoint(x: x, y: y))
+                        } else {
+                            path.addLine(to: CGPoint(x: x, y: y))
+                        }
+                    }
+                }
+                .stroke(Color.yellow.opacity(0.85), lineWidth: 1)
+            }
+        }
     }
 }

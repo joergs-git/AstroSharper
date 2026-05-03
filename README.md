@@ -55,6 +55,21 @@ The headline feature for v0.4. **AutoNuke** is a single master toggle in the Luc
 - Multi-AP + AutoAP helps vs no-multi-AP on **5/6** fixtures (the 6th hits the gate and falls through to single-shift).
 - Wall-clock overhead **1.16×** baseline.
 
+### Auto-PSF cascade · Auto tile size · Compare side panel — *new (post-v0.4)*
+
+A second wave of "automate the parameter most users get wrong" landed on top of v0.4:
+
+- **AutoPSF auto-ROI cascade (C.2)** — when the planetary limb estimator bails (lunar / textured / cropped), a slanted-edge LSF estimator finds the strongest robust step edge anywhere in the frame and measures σ from its perpendicular line-spread function. Conservative gates (peak contrast, direction stability, single-peak alignment, σ ∈ [0.5, 5.0], confidence ≥ 3) bail to bare-stack rather than over-deconvolve. Off by default (`--auto-psf-roi` / GUI sub-toggle); the bail-out memory is unambiguous about wrong σ being worse than nothing. Empirical lunar bracket: gentle Wiener, no ringing — confidence-gate is doing its job.
+- **Auto tile size from scope formula (C.4)** — three new fields (focal length mm, pixel pitch µm, Barlow) drive the BiggSky-documented `tileSize = focal / pixel × barlow` formula. Wins over AutoAP's subject-driven heuristic when scope params are supplied. CLI: `--auto-tile-size --focal-length-mm 2000 --pixel-pitch-um 5 --barlow 1`.
+- **Median HFR readout (A.5)** — the SER quality scan now also computes per-frame half-flux radius and surfaces the median in the HUD beneath the existing jitter row. Lower HFR = sharper PSF concentration. Same scan budget — no extra UI clicks.
+- **XY-shift sparkline (A.5 v1)** — after Stabilize, the HUD shows a tiny sparkline of per-frame alignment magnitudes plus the peak shift. Direct "how bad was the worst frame" readout without scrubbing.
+- **Compare side panel** — toolbar `B` toggles a 200 px column with two thumbnails: top = current displayed file (no manipulations applied), bottom = source SER frame 0 (populated automatically when Lucky Stack runs). Default 2× zoom, linked pinch + drag across both thumbs, double-click resets. Replaces the old in-place Before/After flip — main view always shows manipulated state, side panel does the comparison.
+- **Tone curve / B+C / H+S / Saturation in perceptual sRGB space** — the editing block is now wrapped in a gamma-encode → ops → gamma-decode pair so slider midpoints land at perceptual midtone (≈ linear 0.214) instead of linear 0.5. Existing presets carry forward; user-tuned values may want a one-time re-bracket because the slider semantics changed.
+- **AP-cell quilting on solar Hα fixed** — the rank sigmoid that selects per-AP keep weights now uses 20 % of frame count as transition width (was 10 %). Neighbouring APs share more frames → less per-pixel brightness drift across cell boundaries → wavelet-sharpening can't amplify the cellular pattern any more.
+- **Reset Step 1 / Step 2 to defaults** — small button at the bottom of each section. Restores every control to factory `SharpenSettings()` / `ToneCurveSettings()` and turns the section OFF. For when experimental tweaks have drifted output beyond recovery.
+- **SER playback LRU cache + 4-frame prefetcher** — 16-slot RAM cache keyed by `(url, frameIndex)` plus background-queue look-ahead. NAS-based playback now hits cache instead of disk on most ticks; the prefetcher keeps the next 4 frames warm.
+- **AVI smoke test** — pipeline works for AVFoundation-supported formats; SharpCap raw mono AVI (`codec=rawvideo` + `pal8` + zeroed FourCC) is the documented blocker. Error message now points users to the ffmpeg one-liner workaround (`ffmpeg -i in.avi -c:v prores -profile:v 4 out.mov`). Native rawvideo decoder on the roadmap.
+
 ### Smart Auto-PSF + Radial Fade Filter (RFF)
 
 - **One toggle, three planets, zero parameters.** AutoPSF measures Gaussian PSF σ from the planetary limb's line-spread function — no manual sigma, no tile grid.

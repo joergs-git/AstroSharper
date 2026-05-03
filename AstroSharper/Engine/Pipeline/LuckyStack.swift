@@ -979,7 +979,10 @@ enum LuckyStack {
                             }
                         }
                     } else {
-                        NSLog("AutoPSF: estimation skipped (planetary + auto-ROI both bailed); bare stack written, dual-stage denoise also skipped since it wraps the deconv it has nothing to do without")
+                        let cascadeNote = options.useAutoPSFAutoROI
+                            ? "planetary + auto-ROI both bailed"
+                            : "planetary bailed (auto-ROI cascade not enabled — pass --auto-psf-roi or toggle GUI sub-switch to try the lunar / textured fallback)"
+                        NSLog("AutoPSF: estimation skipped (%@); bare stack written, dual-stage denoise also skipped since it wraps the deconv it has nothing to do without", cascadeNote)
                     }
                 }
 
@@ -2221,14 +2224,21 @@ private final class LuckyRunner {
         // keepFractionPerAP keeps its meaning as the 50%-point of the
         // sigmoid centred at that rank: best-ranked frames pull
         // toward weight 1, frames well past the rank pull toward 0.
-        // Transition width = 10% of frameCount so the taper is
-        // selective but not abrupt — the per-AP "luckiness" survives
-        // without the visual artifacts.
+        // Transition width = 20% of frameCount so neighbouring APs'
+        // keep weights overlap heavily — the prior 10% width was too
+        // narrow on solar Hα, where adjacent APs picked nearly-disjoint
+        // top-N% subsets and wavelet-sharpening then amplified the
+        // per-pixel brightness differences as a visible cellular
+        // pattern at the AP grid boundaries (user report 2026-05-01).
+        // Wider sigmoid → more shared frames between neighbours → the
+        // per-AP "luckiness" still survives because the rank centre is
+        // unchanged, but the cell-to-cell brightness drift is smoothed
+        // out by the larger overlap.
         let perAPRaw = perAPBuf.contents().assumingMemoryBound(to: Float.self)
         let perAPScores = Array(UnsafeBufferPointer(start: perAPRaw, count: apCount * frameCount))
         let perAPKeepCount = max(1, Int((Double(frameCount) * max(0.01, min(1.0, keepFractionPerAP))).rounded(.up)))
         let kSoft = Float(perAPKeepCount)
-        let widthSoft = max(1.0, Float(frameCount) * 0.1)
+        let widthSoft = max(1.0, Float(frameCount) * 0.2)
 
         // Adaptive AP rejection (Block B.3). Compute a single "average
         // sharpness" score per AP cell by averaging perAPScores across

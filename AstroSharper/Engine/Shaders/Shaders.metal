@@ -525,6 +525,42 @@ kernel void apply_saturation(
     output.write(float4(mixed, c.a), gid);
 }
 
+// MARK: - Gamma encode / decode (perceptual sRGB tone-op wrappers)
+//
+// Wraps the tone-curve / B+C / H+S / Saturation block so the user's
+// slider deltas behave on the perceptual axis the user is looking at,
+// not on the linear axis the rest of the pipeline lives in. The
+// midtone of a slider should land at perceptual ≈ 0.5, which is
+// linear ≈ 0.214 — the prior linear-space behaviour put 50 % slider
+// at linear 0.5, perceptually past the upper-mid range.
+//
+// Approximation: pow(x, 1/2.2) and pow(x, 2.2). Close enough to true
+// sRGB for slider semantics; the small error near 0 (sRGB has a small
+// linear segment below 0.0031308) is irrelevant on user-tuned tone
+// adjustments. Alpha is preserved.
+
+kernel void gamma_encode(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    float3 enc = pow(max(c.rgb, float3(0.0)), float3(1.0 / 2.2));
+    output.write(float4(enc, c.a), gid);
+}
+
+kernel void gamma_decode(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    float3 dec = pow(max(c.rgb, float3(0.0)), float3(2.2));
+    output.write(float4(dec, c.a), gid);
+}
+
 // MARK: - Sub-pixel shift (stabilization)
 
 struct ShiftParams {

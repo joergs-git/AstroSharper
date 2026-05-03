@@ -66,6 +66,11 @@ enum Stabilizer {
     struct Result {
         let aligned: [(id: UUID, url: URL, texture: MTLTexture)]
         let outputSize: (w: Int, h: Int)
+        /// Per-frame XY shift (in source pixels) the stabilizer applied,
+        /// in chronological order. Reference frame is `(0, 0)`. Surfaced
+        /// for UI consumers (HUD sparkline) so the user can see the
+        /// magnitude of the alignment work after the stabilize run.
+        let shifts: [SIMD2<Float>]
     }
 
     enum Progress {
@@ -242,7 +247,15 @@ enum Stabilizer {
             }
 
             await onProgress(.finished)
-            await completion(Result(aligned: aligned, outputSize: cropSize))
+            // Emit the chronological shift sequence for the HUD sparkline.
+            // `aligned` is built in input order, so the index there matches
+            // chronological position; pulling shifts out by entry id keeps
+            // the alignment robust to any future reordering.
+            let chronoShifts: [SIMD2<Float>] = aligned.map { entry in
+                let s = shifts[entry.id] ?? AlignShift(dx: 0, dy: 0)
+                return SIMD2<Float>(s.dx, s.dy)
+            }
+            await completion(Result(aligned: aligned, outputSize: cropSize, shifts: chronoShifts))
         }
     }
 }

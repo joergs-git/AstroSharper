@@ -42,7 +42,8 @@ struct PreviewView: View {
                         onCalculateVideoQuality: currentEntryIsSER && app.previewStats.totalFrames > 1
                             ? { app.calculateVideoQualityForCurrentFile() }
                             : nil,
-                        isScanning: app.isCalculatingVideoQuality
+                        isScanning: app.isCalculatingVideoQuality,
+                        stabilizerShifts: app.lastStabilizerShifts
                     )
                     .transition(.opacity)
                 }
@@ -275,6 +276,12 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     // Video Quality" because at full source resolution it spent 5-30 ms on
     // every file/frame switch and made browsing large SERs feel laggy.
     private let qualityScanner = SerQualityScanner()
+
+    /// LRU + 4-frame look-ahead cache for SER playback. Hits the cache
+    /// instead of disk on the timer's hot tick path; the prefetch
+    /// keeps the next 4 upcoming frames warm so NAS-based SERs don't
+    /// freeze on per-frame I/O.
+    private let serPrefetcher = SerFramePrefetcher(device: MetalDevice.shared.device)
 
     /// Texture pixel dimensions of the currently-shown preview, exposed so
     /// the ZoomableMTKView can compute fit-scale for anchored zooming.
@@ -935,11 +942,32 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         // backwards relative to the slider.
         let dispatchedID = id
         let dispatchedFrameIndex = frameIndex
+        // SER hot path: synchronous cache hit returns inline (no
+        // background dispatch needed) so the timer-driven playback
+        // doesn't pay the GCD round-trip on a cache hit. Miss falls
+        // through to the background load below. Prefetch is fired
+        // immediately so the next 4 frames warm up regardless of
+        // whether the current frame was a hit or miss.
+        if isSER {
+            serPrefetcher.setURL(url)
+            serPrefetcher.prefetch(after: frameIndex, totalFrames: app.previewSerFrameCount)
+            if let cached = serPrefetcher.cachedFrame(at: frameIndex) {
+                let flippedHit: MTLTexture? = flipped
+                    ? RotateTexture.rotate180(cached, device: MetalDevice.shared.device)
+                    : cached
+                self.applyLoadedSerFrame(
+                    tex: flippedHit, dispatchedID: dispatchedID,
+                    dispatchedFrameIndex: dispatchedFrameIndex,
+                    frameIndex: frameIndex
+                )
+                return
+            }
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             var tex: MTLTexture?
             if isSER {
-                tex = try? SerFrameLoader.loadFrame(url: url, frameIndex: frameIndex, device: MetalDevice.shared.device)
+                tex = self.serPrefetcher.loadFrameSync(at: frameIndex)
             } else {
                 // AVI — instantiate a lightweight reader per scrub. The
                 // generator caches under the hood so consecutive frame-N
@@ -954,45 +982,61 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             // frames must stay snappy. The HUD's currentSharpness goes blank
             // during scrub; the "Calculate Video Quality" button populates
             // the sampled distribution when the user opts in.
+            let texFinal = tex
             DispatchQueue.main.async {
-                guard self.app.previewFileID == dispatchedID else { return }
-                // During SER playback the timer typically advances faster
-                // than the disk read finishes (especially on NAS). The
-                // strict index-match check used to drop EVERY decoded
-                // frame as "stale" — leaving the user staring at a frozen
-                // texture while the frame counter ticked through. During
-                // playback we accept any successful decode; when NOT
-                // playing back we keep the strict guard so fast scrubbing
-                // doesn't paint stale frames in the wrong order.
-                if !self.app.serPlaybackActive {
-                    guard self.app.previewSerFrameIndex == dispatchedFrameIndex else { return }
-                }
-                guard let tex else { return }
-                // Drop the stale sharpened texture so the raw frame paints
-                // immediately. Without this the user stares at the previous
-                // frame's "after" texture until the sharpen / tone-curve
-                // pipeline finishes for the new frame — which is what made
-                // scrubbing feel laggy. The pipeline still runs and replaces
-                // afterTex when it lands.
-                self.afterTex = nil
-                self.beforeTex = tex
-                self.app.previewStats.currentFrame = frameIndex + 1
-                self.app.previewStats.currentSharpness = nil
-                // SER playback path: skip the percentile recompute AND
-                // the full reprocess() pipeline. Each tick gets a fresh
-                // NAS frame; running Wiener / sharpen / tone-curve per
-                // frame at 18 fps blocks the timer cadence and drops
-                // visible frames. The auto-range stays at whatever was
-                // computed for the first frame — fine for playback since
-                // consecutive SER frames have near-identical histograms.
-                if !self.app.serPlaybackActive {
-                    self.refreshDisplayAutoRange()
-                }
-                self.view?.needsDisplay = true
-                if !self.app.serPlaybackActive {
-                    self.reprocess()
-                }
+                self.applyLoadedSerFrame(
+                    tex: texFinal,
+                    dispatchedID: dispatchedID,
+                    dispatchedFrameIndex: dispatchedFrameIndex,
+                    frameIndex: frameIndex
+                )
             }
+        }
+    }
+
+    /// Commit a freshly-loaded SER / AVI frame to the preview state.
+    /// Shared by:
+    ///   - the cache-hit fast path in `loadCurrentSerFrame` (no GCD
+    ///     hop, no disk read)
+    ///   - the disk-load slow path (background queue → main hop)
+    /// Stale-load guard: dispatchedID must still match `previewFileID`.
+    /// During active SER playback the index-match guard is relaxed so
+    /// the timer keeps painting frames even when disk I/O lags behind
+    /// the cadence.
+    private func applyLoadedSerFrame(
+        tex: MTLTexture?,
+        dispatchedID: UUID,
+        dispatchedFrameIndex: Int,
+        frameIndex: Int
+    ) {
+        guard app.previewFileID == dispatchedID else { return }
+        if !app.serPlaybackActive {
+            guard app.previewSerFrameIndex == dispatchedFrameIndex else { return }
+        }
+        guard let tex else { return }
+        // Drop the stale sharpened texture so the raw frame paints
+        // immediately. Without this the user stares at the previous
+        // frame's "after" texture until the sharpen / tone-curve
+        // pipeline finishes for the new frame — which is what made
+        // scrubbing feel laggy. The pipeline still runs and replaces
+        // afterTex when it lands.
+        afterTex = nil
+        beforeTex = tex
+        app.previewStats.currentFrame = frameIndex + 1
+        app.previewStats.currentSharpness = nil
+        // SER playback path: skip the percentile recompute AND
+        // the full reprocess() pipeline. Each tick gets a fresh
+        // NAS frame; running Wiener / sharpen / tone-curve per
+        // frame at 18 fps blocks the timer cadence and drops
+        // visible frames. The auto-range stays at whatever was
+        // computed for the first frame — fine for playback since
+        // consecutive SER frames have near-identical histograms.
+        if !app.serPlaybackActive {
+            refreshDisplayAutoRange()
+        }
+        view?.needsDisplay = true
+        if !app.serPlaybackActive {
+            reprocess()
         }
     }
 

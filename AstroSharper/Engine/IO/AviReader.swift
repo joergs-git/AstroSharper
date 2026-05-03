@@ -17,11 +17,33 @@ import CoreVideo
 import Foundation
 import Metal
 
-enum AviReaderError: Error {
+enum AviReaderError: Error, CustomStringConvertible {
     case cannotOpen(URL)
+    /// AVFoundation found no decodable video track. Most common cause:
+    /// the AVI uses an uncompressed `rawvideo` stream with a zeroed
+    /// FourCC tag — the dominant SharpCap mono-camera format.
+    /// AVFoundation only recognises tracks with a known FourCC, so the
+    /// "tracks(withMediaType: .video)" call returns an empty array.
+    /// Workaround until a native rawvideo decoder lands: re-encode the
+    /// AVI via QuickTime Player or ffmpeg to ProRes / H.264 in MOV /
+    /// MP4. ffmpeg one-liner:
+    ///   ffmpeg -i in.avi -c:v prores -profile:v 4 out.mov
     case noVideoTrack
     case unknownDuration
     case decodeFailed(frame: Int)
+
+    var description: String {
+        switch self {
+        case .cannotOpen(let url):
+            return "cannot open \(url.lastPathComponent)"
+        case .noVideoTrack:
+            return "no AVFoundation-decodable video track (SharpCap-style rawvideo / pal8 AVIs need re-encoding to ProRes or H.264 first; see ffmpeg one-liner in source comments)"
+        case .unknownDuration:
+            return "container reports zero / invalid duration"
+        case .decodeFailed(let f):
+            return "frame \(f) decode failed"
+        }
+    }
 }
 
 final class AviReader {
