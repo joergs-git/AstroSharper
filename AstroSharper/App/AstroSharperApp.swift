@@ -34,6 +34,10 @@ struct AstroSharperApp: App {
     @State private var showingAbout = false
     @State private var showingSplash = false
     @State private var showingRatingPrompt = false
+    /// Pending update info — set by UpdateChecker when a newer
+    /// release is available and not user-skipped. Drives the
+    /// .alert below; cleared on response.
+    @State private var pendingUpdate: LatestReleaseInfo?
     /// Set true the first time a stack job starts within this launch
     /// so the coffee prompt fires once per stacking session, not once
     /// per file in a batch.
@@ -43,86 +47,27 @@ struct AstroSharperApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environmentObject(appModel)
-                .frame(minWidth: 1100, minHeight: 700)
-                .onAppear {
-                    setWindowTitle()
-                    showSplashIfNeeded()
-                    checkRatingPromptOnLaunch()
-                }
-                .onReceive(NotificationCenter.default.publisher(for: .openCommunityFeed)) { _ in
-                    openWindow(id: "community-feed")
-                }
-                .onReceive(NotificationCenter.default.publisher(for: .openHowto)) { _ in
-                    openWindow(id: "howto")
-                }
-                .onChange(of: appModel.jobStatus) { _, newStatus in
-                    // Coffee prompt fires while the user is waiting on
-                    // a stack job — gives them a natural moment to
-                    // read it without interrupting interaction.
-                    //
-                    // GATED OFF until first public release (2026-05-02):
-                    // we don't want the prompt firing on the user's own
-                    // dev / test runs. Flip `coffeePromptEnabled = true`
-                    // when v0.4.x ships publicly.
-                    let coffeePromptEnabled = false
-                    if coffeePromptEnabled,
-                       case .running = newStatus,
-                       !coffeeShownThisSession {
-                        coffeeShownThisSession = true
-                        // Small delay so the prompt doesn't fire at
-                        // the exact instant the run button is clicked.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            CoffeeSupportDialog.presentIfDue(
-                                currentLaunchCount: launchTracker.launchCount
-                            )
-                        }
-                    }
-                }
-                .sheet(isPresented: $showingSplash) {
-                    SplashView { showingSplash = false }
-                }
-                .sheet(isPresented: $showingAbout) {
-                    AboutView { showingAbout = false }
-                }
-                .alert("Enjoying AstroSharper?", isPresented: $showingRatingPrompt) {
-                    Button("Rate on App Store") {
-                        NSWorkspace.shared.open(AppLinks.appStoreReview)
-                        launchTracker.recordRatingResponse(.yes)
-                    }
-                    Button("Not now") { launchTracker.recordRatingResponse(.no) }
-                    Button("Later") { launchTracker.recordRatingResponse(.later) }
-                } message: {
-                    Text("You've launched AstroSharper \(launchTracker.launchCount) times. A short review on the App Store helps a lot — thanks!")
-                }
-                .alert(
-                    "Upload community thumbnail?",
-                    isPresented: Binding(
-                        get: { appModel.pendingCommunityShare != nil },
-                        set: { if !$0 { appModel.pendingCommunityShare = nil } }
-                    ),
-                    presenting: appModel.pendingCommunityShare
-                ) { share in
-                    Button("Yes, upload") {
-                        CommunityShare.upload(
-                            stackedURL: share.stackedURL,
-                            target: share.target,
-                            frameCount: share.frameCount,
-                            elapsedSec: share.elapsedSec
-                        )
-                        appModel.pendingCommunityShare = nil
-                    }
-                    Button("No") {
-                        appModel.pendingCommunityShare = nil
-                    }
-                    Button("Always off") {
-                        appModel.setCommunityShareEnabled(false)
-                        appModel.pendingCommunityShare = nil
-                    }
-                } message: { _ in
-                    Text("Share a small thumbnail of this stack with the community? Only the JPEG (max 800 px), the target keyword, the frame count and a random per-machine UUID are uploaded. No filenames, no hostnames, no personal data. You can disable community share globally via the bottom-bar icon.")
-                }
+            // Wrapped in a dedicated View so each modifier chain
+            // (sheets, alerts, observers) gets its own type-check
+            // budget. Inlining everything in this WindowGroup body
+            // hits the SwiftUI generic-resolver's "expression too
+            // complex" limit once you have ≥3 alerts + ≥2 sheets +
+            // multiple .onReceive in one chain.
+            RootContent(
+                appModel: appModel,
+                launchTracker: launchTracker,
+                openWindow: openWindow,
+                showingAbout: $showingAbout,
+                showingSplash: $showingSplash,
+                showingRatingPrompt: $showingRatingPrompt,
+                pendingUpdate: $pendingUpdate,
+                coffeeShownThisSession: $coffeeShownThisSession,
+                runUpdateCheck: runUpdateCheck,
+                updateAlertTitle: updateAlertTitle,
+                showSplashIfNeeded: showSplashIfNeeded,
+                checkRatingPromptOnLaunch: checkRatingPromptOnLaunch,
+                setWindowTitle: setWindowTitle
+            )
         }
 
         // Non-blocking floating Howto window — opens via the toolbar button
@@ -211,6 +156,7 @@ struct AstroSharperApp: App {
                 }
                 .keyboardShortcut("c", modifiers: [.command, .shift])
                 Divider()
+                Button("Check for updates…") { runUpdateCheck() }
                 Button("AstroSharper on GitHub") { NSWorkspace.shared.open(AppLinks.github) }
                 Button("Example images on AstroBin") { NSWorkspace.shared.open(AppLinks.astrobinProfile) }
                 Button("Buy me a coffee ☕️")    { CoffeeSupportDialog.presentNow() }
@@ -236,6 +182,35 @@ struct AstroSharperApp: App {
         }
     }
 
+    /// Update check at launch — fetches the manifest from
+    /// raw.githubusercontent.com, compares against the running
+    /// version, and surfaces an alert when a newer release exists
+    /// (and the user hasn't explicitly skipped that version). 5 s
+    /// timeout in UpdateChecker so a flaky network can't delay
+    /// anything; failures are silent (NSLog only).
+    private func runUpdateCheck() {
+        Task {
+            let result = await UpdateChecker.checkForUpdate()
+            await MainActor.run {
+                switch result {
+                case .available(let info):
+                    pendingUpdate = info
+                case .upToDate:
+                    NSLog("UpdateCheck: up to date (running v%@).", AppVersion.marketing)
+                case .skipped(let info):
+                    NSLog("UpdateCheck: v%@ available but user skipped.", info.latestVersion)
+                case .fetchFailed(let msg):
+                    NSLog("UpdateCheck: fetch failed — %@", msg)
+                }
+            }
+        }
+    }
+
+    private var updateAlertTitle: String {
+        guard let info = pendingUpdate else { return "Update available" }
+        return "AstroSharper \(info.latestVersion) is available"
+    }
+
     /// Rating prompt fires at launch, NOT during stacking — it's a
     /// "you've used this enough to know if it's good" moment, distinct
     /// from the coffee prompt which is meant to land while the user is
@@ -245,6 +220,169 @@ struct AstroSharperApp: App {
             if launchTracker.shouldShowRatingPrompt {
                 showingRatingPrompt = true
             }
+        }
+    }
+}
+
+// MARK: - Root content wrapper
+
+/// Hosts the ContentView + every modifier chain (sheets, alerts,
+/// observers, onAppear). Lives in a dedicated View so the SwiftUI
+/// type-checker can resolve each chain piecewise — inlining all of
+/// this in the `WindowGroup` body of `AstroSharperApp` blew the
+/// "expression too complex" budget once the update-check alert
+/// landed (3 alerts + 2 sheets + 3 observers in one chain).
+private struct RootContent: View {
+    @ObservedObject var appModel: AppModel
+    @ObservedObject var launchTracker: LaunchTracker
+    let openWindow: OpenWindowAction
+
+    @Binding var showingAbout: Bool
+    @Binding var showingSplash: Bool
+    @Binding var showingRatingPrompt: Bool
+    @Binding var pendingUpdate: LatestReleaseInfo?
+    @Binding var coffeeShownThisSession: Bool
+
+    let runUpdateCheck: () -> Void
+    let updateAlertTitle: String
+    let showSplashIfNeeded: () -> Void
+    let checkRatingPromptOnLaunch: () -> Void
+    let setWindowTitle: () -> Void
+
+    var body: some View {
+        ContentView()
+            .environmentObject(appModel)
+            .frame(minWidth: 1100, minHeight: 700)
+            .onAppear {
+                setWindowTitle()
+                showSplashIfNeeded()
+                checkRatingPromptOnLaunch()
+                runUpdateCheck()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openCommunityFeed)) { _ in
+                openWindow(id: "community-feed")
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openHowto)) { _ in
+                openWindow(id: "howto")
+            }
+            .onChange(of: appModel.jobStatus) { _, newStatus in
+                handleJobStatusChange(newStatus)
+            }
+            .sheet(isPresented: $showingSplash) {
+                SplashView { showingSplash = false }
+            }
+            .sheet(isPresented: $showingAbout) {
+                AboutView { showingAbout = false }
+            }
+            .alert("Enjoying AstroSharper?", isPresented: $showingRatingPrompt) {
+                ratingPromptButtons
+            } message: {
+                Text("You've launched AstroSharper \(launchTracker.launchCount) times. A short review on the App Store helps a lot — thanks!")
+            }
+            .alert(
+                "Upload community thumbnail?",
+                isPresented: communityShareBinding,
+                presenting: appModel.pendingCommunityShare
+            ) { share in
+                communityShareButtons(share)
+            } message: { _ in
+                Text("Share a small thumbnail of this stack with the community? Only the JPEG (max 800 px), the target keyword, the frame count and a random per-machine UUID are uploaded. No filenames, no hostnames, no personal data. You can disable community share globally via the bottom-bar icon.")
+            }
+            .alert(
+                updateAlertTitle,
+                isPresented: updateAlertBinding,
+                presenting: pendingUpdate
+            ) { info in
+                updateAlertButtons(info)
+            } message: { info in
+                Text("AstroSharper \(info.latestVersion) is available (released \(info.releaseDate)). You're on \(AppVersion.marketing). Open the release page for the changelog + download, grab the DMG directly, or skip this version (we won't bug you again until the next release).")
+            }
+    }
+
+    // MARK: - Bindings (extracted so the alert calls stay type-checkable)
+
+    private var communityShareBinding: Binding<Bool> {
+        Binding(
+            get: { appModel.pendingCommunityShare != nil },
+            set: { if !$0 { appModel.pendingCommunityShare = nil } }
+        )
+    }
+
+    private var updateAlertBinding: Binding<Bool> {
+        Binding(
+            get: { pendingUpdate != nil },
+            set: { if !$0 { pendingUpdate = nil } }
+        )
+    }
+
+    // MARK: - Button groups
+
+    @ViewBuilder
+    private var ratingPromptButtons: some View {
+        Button("Rate on App Store") {
+            NSWorkspace.shared.open(AppLinks.appStoreReview)
+            launchTracker.recordRatingResponse(.yes)
+        }
+        Button("Not now") { launchTracker.recordRatingResponse(.no) }
+        Button("Later") { launchTracker.recordRatingResponse(.later) }
+    }
+
+    @ViewBuilder
+    private func communityShareButtons(_ share: PendingCommunityShare) -> some View {
+        Button("Yes, upload") {
+            CommunityShare.upload(
+                stackedURL: share.stackedURL,
+                target: share.target,
+                frameCount: share.frameCount,
+                elapsedSec: share.elapsedSec
+            )
+            appModel.pendingCommunityShare = nil
+        }
+        Button("No") {
+            appModel.pendingCommunityShare = nil
+        }
+        Button("Always off") {
+            appModel.setCommunityShareEnabled(false)
+            appModel.pendingCommunityShare = nil
+        }
+    }
+
+    @ViewBuilder
+    private func updateAlertButtons(_ info: LatestReleaseInfo) -> some View {
+        Button("Open release page") {
+            if let url = URL(string: info.releaseNotesURL) {
+                NSWorkspace.shared.open(url)
+            }
+            pendingUpdate = nil
+        }
+        Button("Direct download") {
+            if let url = URL(string: info.downloadURL) {
+                NSWorkspace.shared.open(url)
+            }
+            pendingUpdate = nil
+        }
+        Button("Skip this version") {
+            UpdateChecker.recordSkipped(info.latestVersion)
+            pendingUpdate = nil
+        }
+        Button("Later", role: .cancel) {
+            pendingUpdate = nil
+        }
+    }
+
+    // MARK: - Job status (coffee popup gate)
+
+    private func handleJobStatusChange(_ newStatus: JobStatus) {
+        // GATED OFF until first public release (2026-05-02).
+        let coffeePromptEnabled = false
+        guard coffeePromptEnabled,
+              case .running = newStatus,
+              !coffeeShownThisSession else { return }
+        coffeeShownThisSession = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            CoffeeSupportDialog.presentIfDue(
+                currentLaunchCount: launchTracker.launchCount
+            )
         }
     }
 }

@@ -65,6 +65,16 @@ ships opt-out anonymous telemetry + a community thumbnail feed.
 - **Supabase shared with AstroBlink** — single project (`bpngramreznwvtssrcbe`)
   distinguished by `app` discriminator column on every table. See
   `supabase/DEPLOY.md` for migration + edge function deployment.
+- **In-app update checker** (`App/UpdateChecker.swift`) — fetches a
+  small JSON manifest from `raw.githubusercontent.com/joergs-git/
+  AstroSharper/main/latest-release.json` on every launch + on demand
+  via Help → "Check for updates…". Compares semver to the running
+  `MARKETING_VERSION`; surfaces an alert with **Open release page**
+  / **Direct download** / **Skip this version** / **Later** when a
+  newer release exists. "Skip" remembers per-version in UserDefaults
+  so a NEW release re-unblocks the prompt automatically. 5 s timeout,
+  silent on failure. Anonymous GET — no machine UUID, no telemetry.
+  See `memory/project_release_workflow.md` for the release procedure.
 - **`docs/wiki/AutoAP-and-AutoNuke.md`** — full algorithm walkthrough +
   empirical regression results.
 

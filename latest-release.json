@@ -1,0 +1,8 @@
+{
+  "_comment": "AstroSharper update-check manifest. Hosted at https://raw.githubusercontent.com/joergs-git/AstroSharper/main/latest-release.json — fetched by App/UpdateChecker.swift on every launch. Bump `latestVersion` + the URL paths every release. See memory/project_release_workflow.md for the full procedure.",
+  "latestVersion": "0.3.0",
+  "releaseDate": "2026-04-26",
+  "releaseNotesURL": "https://github.com/joergs-git/AstroSharper/releases/tag/v0.3.0",
+  "downloadURL": "https://github.com/joergs-git/AstroSharper/releases",
+  "minVersion": "0.1.0"
+}
