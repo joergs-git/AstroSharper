@@ -127,7 +127,15 @@ final class SerReader {
         precondition(offset + bpf <= data.count,
                      "SER file truncated at frame \(index): need \(offset + bpf) bytes, have \(data.count)")
         return try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> R in
-            let base = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
+            // Guard the baseAddress force-unwrap — an empty mmap (zero-
+            // byte file slipped past the header validation, or a file
+            // that vanished after open) would otherwise hard-crash here
+            // with a useless trap. preconditionFailure surfaces the
+            // file name so the failure is debuggable.
+            guard let rawBase = raw.baseAddress else {
+                preconditionFailure("SerReader: empty memory-mapped buffer for \(url.lastPathComponent)")
+            }
+            let base = rawBase.assumingMemoryBound(to: UInt8.self)
             return try body(base.advanced(by: offset), bpf)
         }
     }
