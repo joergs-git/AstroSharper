@@ -373,8 +373,10 @@ private struct RootContent: View {
     // MARK: - Job status (coffee popup gate)
 
     private func handleJobStatusChange(_ newStatus: JobStatus) {
-        // GATED OFF until first public release (2026-05-02).
-        let coffeePromptEnabled = false
+        // Enabled with v0.4.0 (first public release, 2026-05-03). Cadence
+        // is gated by CoffeeSupportDialog.presentIfDue itself (every Nth
+        // launch + min-interval), so this stays on going forward.
+        let coffeePromptEnabled = true
         guard coffeePromptEnabled,
               case .running = newStatus,
               !coffeeShownThisSession else { return }
