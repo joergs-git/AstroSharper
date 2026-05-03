@@ -4,21 +4,30 @@ A running record of where we are, what's done, and what's next. Update at the en
 
 ## Suggested next-session focus
 
-End-of-2026-05-03 state: AutoAP shipped (6/6 beats preset on regression set), AutoNuke master toggle in GUI, target picker chips, splash + coffee/rate prompts (coffee gated off until release), Preset extended via `LuckyPresetDetails`, **Supabase telemetry + community share endpoints LIVE** (shared `bpngramreznwvtssrcbe` project with AstroBlink, `app` discriminator column — see `memory/project_supabase_shared.md`). Priority order from here:
+End-of-2026-05-03 (late): **v0.4.0 shipped + tagged on GitHub** with notarized DMG (`https://github.com/joergs-git/AstroSharper/releases/tag/v0.4.0`), coffee popup enabled, **LuckyRunner refactor (E.1) merged** — AVI / MOV / MP4 / M4V lucky-stack now flows through `SourceReader`-driven runner, SER fast path byte-identical on 6/6 BiggSky regression. `project.yml` pinned to arm64 so Release / Archive can't try to compile `Float16` on x86_64 slices.
 
-0a. **Re-enable coffee popup at first public release.** Gated OFF behind `coffeePromptEnabled = false` in `AstroSharperApp.swift` (around line ~52). Flip to `true` when v0.4.x ships publicly so dev/test runs don't trigger the prompt.
+**Top of stack for next session:**
 
-0b. **DONE 2026-05-03 — Supabase telemetry + community share endpoints.** Migration `20260503_astrosharper_extension.sql` ran cleanly on the shared AstroBlink project. Both edge functions (`stack-completed`, `community-thumbnail`) deployed + smoke-tested HTTP 201. `SupabaseConfig.networkEnabled = true` in the Swift client. Two smoke-test rows sit in `stack_telemetry` + `community_thumbnails` with `machine_uuid='smoketest-from-astrosharper-side-2026-05-03'` — clean via dashboard when convenient. **Followups:**
-   - **Stack-time leaderboard window.** Mirror AstroTriage's `BenchmarkLeaderboardWindow.swift` pattern against `stack_telemetry` (`elapsed_sec / frame_count` ranking). 1 session.
-   - **Privacy summary page.** Splash screen + Help menu item linking to a one-page "What we collect" doc. ~30 min.
-   - **Disk-backed retry queue.** Currently fire-and-forget; if real telemetry shows lossy networks dominating, add a small queue keyed by event UUID. Not needed until data shows it.
-   - **AutoAP / AutoPSF feedback loop.** After ~500 opt-out events accumulate, re-fit the closed-form constants (patchHalf coefficient, RFF knee, multi-AP gate threshold) against the population data. The whole point of the telemetry — ship the better defaults in a follow-up release.
+1. **C.2 PSF from auto-ROI** (deferred from this session — needs a fresh window). Extends AutoPSF beyond planetary discs (currently auto-bails on lunar / textured / cropped subjects per `feedback_autopsf_lunar_bail.md`). Real research-grade work: needs algorithm design (find the strongest step edge anywhere in the frame, measure perpendicular LSF, fit Gaussian σ), CPU-side implementation, brackets on real lunar SERs to validate σ accuracy, then integration with downstream RFF / Wiener which both assume planetary disc geometry. The bail-out memory is unambiguous — a wrong σ is worse than nothing, so any v0 must be conservatively gated (default off until brackets confirm). Multi-hour, one focused session. **Recommended approach:** start with `Engine/Pipeline/AutoPSF.swift`, branch into a new `AutoPSFAutoROI.swift` so the planetary path stays untouched, route the chosen σ through the existing `LuckyStack.applyAutoPSF` Wiener call, gate behind a confidence score that bails to bare-stack when ROI search finds no edge above threshold.
 
-1. **C.2 PSF from auto-ROI** — extends AutoPSF beyond planetary discs (currently auto-bails on lunar / textured / cropped subjects per `feedback_autopsf_lunar_bail.md`). Real research-grade work: needs algorithm design (find the strongest step edge anywhere in the frame, measure perpendicular LSF, fit Gaussian σ), CPU-side implementation, brackets on real lunar SERs to validate σ accuracy, then integration with downstream RFF / Wiener which both assume planetary disc geometry. The bail-out memory is unambiguous — a wrong σ is worse than nothing, so any v0 must be conservatively gated (default off until brackets confirm). Multi-hour, one focused session.
-2. **G.1 + G.2 derotation** — Jupiter / Saturn warp each kept frame back to a reference rotation epoch using SER timestamps + ellipsoid projection. Auto-engage when capture window > 3 min. ~600 lines new `Engine/Pipeline/Derotation.swift` + LuckyRunner integration. 1–2 days, plus needs a long capture in TESTIMAGES to validate.
-3. **LuckyRunner refactor** (unblocks E.1 AVI lucky-stack + FITS lucky-stack input). Multi-day refactor of the heavy runner; defer until a real user demand surfaces.
+2. **AVI lucky-stack smoke test** — refactor compiles + SER unchanged, but no real AVI fixture in TESTIMAGES today. First time someone drops a SharpCap AVI into the GUI, validate the path runs through end-to-end. Likely zero-touch but worth eyeballing the result once.
+
+3. **G.1 + G.2 derotation** — Jupiter / Saturn warp each kept frame back to a reference rotation epoch using SER timestamps + ellipsoid projection. Auto-engage when capture window > 3 min. ~600 lines new `Engine/Pipeline/Derotation.swift` + LuckyRunner integration. 1–2 days, plus needs a long capture in TESTIMAGES to validate.
+
 4. **F3 v1.4 polish**: drop more reference images into TESTIMAGES so RMSE fires on more baselines (only 4/7 today); add unit tests for the PSS cascade and drizzle AA pre-filter; bracket-script convenience subcommand.
+
 5. **B.6 polish** (auto-engage FWHM/2.4 trigger + float scales), **D.1 polish** (folder-scan master-frame builder), **C.4 tile-size auto-calc**, **A.5 HFR + sparkline**, **A.2 two-stage quality**, **A.3 Strehl supplement** — small wins; none individually session-sized.
+
+**Telemetry follow-ups (deferred until ~500 opt-out events accumulate):**
+- **Stack-time leaderboard window.** Mirror AstroTriage's `BenchmarkLeaderboardWindow.swift` pattern against `stack_telemetry` (`elapsed_sec / frame_count` ranking).
+- **Privacy summary page.** Splash screen + Help menu item linking to a one-page "What we collect" doc.
+- **Disk-backed retry queue.** Currently fire-and-forget; only add if real telemetry shows lossy networks dominating.
+- **AutoAP / AutoPSF feedback loop.** After ~500 events, re-fit the closed-form constants (patchHalf coefficient, RFF knee, multi-AP gate threshold) against population data.
+
+**Done this session (post-v0.4.0 tag):**
+- 0a: Coffee popup re-enabled (`coffeePromptEnabled = true`).
+- 3: LuckyRunner refactor (E.1) — `SerReader` → `SourceReader` migration; AVI / MOV / MP4 / M4V accepted by CLI.
+- arm64-only lock in `project.yml` so Release builds can't fail on `Float16` for x86_64.
 
 ## Current state (v0.4.0 — released 2026-05-03)
 
@@ -239,7 +248,7 @@ End-of-2026-05-03 state: AutoAP shipped (6/6 beats preset on regression set), Au
 
 ## Known limitations
 
-- AVI lucky-stack support is stubbed — engine is SerReader-coupled
+- AVI lucky-stack untested on real captures (E.1 refactor merged 2026-05-03; SER byte-identical on regression set, AVI fixture pending in TESTIMAGES)
 - MPSGraph FFT path is disabled (vDSP CPU path is active and working)
 - Multi-AP grid >12×12 may exceed threadgroup memory on older Apple Silicon
 - Centroid alignment requires the disc to be brighter than ~25 % of max luminance — overexposed shots without a clear background fail

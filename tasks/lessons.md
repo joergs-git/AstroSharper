@@ -2,6 +2,16 @@
 
 Patterns and gotchas captured from this project. Read at session start; append after every correction.
 
+## [2026-05-03] — Pin `ARCHS=arm64` in `project.yml`, not just at the xcodebuild invocation
+- **Mistake:** During the v0.4.0 release pipeline, the first Release-config build failed with `Float16` errors because Xcode tried to compile both arm64 and x86_64 slices. The arm64-only rule existed in memory (`feedback_arm64_only.md`) but only as a per-invocation flag — XcodeGen-generated targets had no architecture lock baked in.
+- **Rule:** Bake architecture lock into `project.yml` `settings.base` (`ARCHS / ONLY_ACTIVE_ARCH / VALID_ARCHS / EXCLUDED_ARCHS`) so any subsequent `xcodebuild ... archive` cannot accidentally cross-compile the unsupported slice. A flag the human has to remember every time is a flag they will forget every other time.
+- **Applies to:** Any project where one architecture has compile-only language features (e.g. `Float16`, NEON intrinsics, Apple-Silicon-only Metal types) — pin in `project.yml`, not in the build scripts.
+
+## [2026-05-03] — Probe common `notarytool` keychain profile names instead of asking
+- **Mistake:** First attempted `notarytool submit --keychain-profile AstroSharper` (matching the project name) and got "No Keychain password item found for profile" — was about to ask the user. Trying common patterns (`AC_PASSWORD`, `notarytool`, project / brand names) takes <5 s per probe and `xcrun notarytool history --keychain-profile <name>` fails fast for wrong names.
+- **Rule:** When a credential profile name is unknown, probe a short list of common patterns (`AC_PASSWORD` is the Apple-docs default) before bouncing back to the user. Each failed probe costs ~1 s; user round-trip costs minutes.
+- **Applies to:** `notarytool / altool / xcrun` keychain profiles, `aws --profile`, `gh auth token` lookups, any tool with a named credential set.
+
 ## [2026-05-03] — `Color.clear.frame(width:)` defaults to fill all available height
 - **Mistake:** Used `Color.clear.frame(width: 260)` as a right-side balancer in BrandHeader to keep the target picker centered. Without an explicit `height:`, Color claimed all available vertical space — the brand bar inflated to ~150 pt of empty grey.
 - **Rule:** Any `Color.clear` placeholder used as a layout spacer needs an explicit `height: N` (use `1` for a near-zero footprint). Combine with `.frame(height:)` on the outer container as a hard cap — child intrinsic sizes can never push past it.
