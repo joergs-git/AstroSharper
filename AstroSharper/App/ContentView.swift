@@ -118,12 +118,8 @@ private struct ToolbarView: View {
 
             Spacer()
 
-            Button { openWindow(id: "howto") } label: {
-                Label("Howto", systemImage: "questionmark.circle")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("Open the workflow guide in a movable, non-blocking window — keep it on screen while you work.")
+            // Howto button moved to BrandHeader's right slot 2026-05-03
+            // (alongside Community) so the toolbar is less crowded.
 
             // Display Auto-Range — auto-computes a per-texture gain so dim
             // captures (Ha SER, low-gain lunar, deep-sky) land at sensible

@@ -11,6 +11,10 @@ extension Notification.Name {
     /// to open the Community Stacks floating window. Listened for in
     /// the WindowGroup body via `.onReceive`.
     static let openCommunityFeed = Notification.Name("AstroSharper.openCommunityFeed")
+    /// Posted by the headline-bar Howto button to open the workflow
+    /// guide window. Mirrors the openCommunityFeed pattern so the
+    /// BrandHeader doesn't need direct access to `openWindow`.
+    static let openHowto = Notification.Name("AstroSharper.openHowto")
 }
 
 enum PreviewZoomCommand {
@@ -49,6 +53,9 @@ struct AstroSharperApp: App {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .openCommunityFeed)) { _ in
                     openWindow(id: "community-feed")
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .openHowto)) { _ in
+                    openWindow(id: "howto")
                 }
                 .onChange(of: appModel.jobStatus) { _, newStatus in
                     // Coffee prompt fires while the user is waiting on

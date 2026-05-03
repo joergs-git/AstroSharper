@@ -9,14 +9,22 @@ struct SettingsPanel: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // Workflow order: capture → stack → align → sharpen → tone → save.
+                // Workflow order: capture → stack → STEP 1 sharpen →
+                // STEP 2 tone+colour → optional Stabilize → save.
+                // Stabilize sits AT THE BOTTOM (below the post-stack
+                // STEPs) since most lucky-imaging users never need
+                // it — it's only relevant when processing multi-frame
+                // timelapses or aligning already-stacked frames into
+                // a sequence. Putting it below STEP 2 demotes it
+                // from "next thing in the workflow" to "extra tool
+                // for those who need it".
                 LuckyStackSection()
-                Divider()
-                StabilizeSection()
                 Divider()
                 SharpeningSection()
                 Divider()
                 ToneCurveSection()
+                Divider()
+                StabilizeSection()
                 Divider()
                 OutputFolderSection()
                 Spacer(minLength: 0)
@@ -475,49 +483,39 @@ struct ToneCurveSection: View {
             // Auto WB / ACDC are conceptually 'colour and levels' — they
             // sit BEFORE the user's tone curve in the pipeline and operate
             // independently of the curve toggle. Pulled OUT of the Tone
-            // Curve SectionContainer so the section's `disabled(!isOn)`
-            // doesn't grey them out: the user shouldn't need to drag curve
-            // points just to fix the OSC green cast.
+            // STEP 2: TONE CURVE & COLOUR — the two AWB / ACDC
+            // checkboxes were a separate "STEP 2: COLOUR & LEVELS"
+            // block until 2026-05-03; merged here per user request
+            // since that block had nothing else and was visually
+            // unbalanced. They follow the section's enable/disable
+            // (when Tone Curve is off the user is in "raw output"
+            // mode, so AWB + ACDC also off makes sense). The engine
+            // still treats them as independent flags — no behavior
+            // change beyond UI grouping. Preset save/load unchanged
+            // because both fields live on the same `toneCurve`
+            // struct that Preset already serialises.
             //
-            // Auto Stretch was removed 2026-04-29: histogram recovery is
-            // now always-on at the end of the LuckyStack post-pass (1%/99%
-            // percentile linear remap into [0, 0.97], no gamma) — it's no
-            // longer a user-facing toggle since mean-stacking always
-            // compresses dynamic range and the recovery just undoes that.
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Image(systemName: "slider.horizontal.below.rectangle")
-                        .foregroundColor(.accentColor)
-                    Text("STEP 2: COLOUR & LEVELS")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.primary)
-                }
-                Toggle("Auto White Balance (gray-world)", isOn: $app.toneCurve.autoWB)
-                    .help("Computes a per-channel offset+scale so the three channels share a neutral mean. Critical for OSC stacks — Bayer green is naturally amplified by 2× photosite count, so post-stack OSC images otherwise look greenish once saturation > 1. Mono / pre-balanced sources are unaffected.")
-                Toggle("Atmospheric Chromatic Dispersion Correction", isOn: $app.toneCurve.chromaticAlignment)
-                    .help("Phase-correlates R and B against G on the post-stack output and applies sub-pixel shifts so the three channels re-align (G stays anchored). Atmospheric refraction shifts blue more than red, so OSC planets at low altitude show coloured limb fringes; ACDC removes them. No-op on mono / pre-aligned sources because the offsets come out near zero.")
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(
-                // Two-layer fill: the soft secondary tint stays on as the
-                // section's visual identity; the accent overlay fades in
-                // while the colourLevels stage is executing in the live
-                // preview. Same animation parameters as SectionContainer.
-                ZStack {
-                    RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.06))
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.accentColor.opacity(app.activePreviewStage == .colourLevels ? 0.18 : 0.0))
-                        .animation(.easeInOut(duration: 0.18), value: app.activePreviewStage)
-                }
-            )
-
+            // Auto Stretch was removed 2026-04-29: histogram recovery
+            // is now always-on at the end of the LuckyStack post-pass
+            // (1%/99% percentile linear remap into [0, 0.97], no
+            // gamma) — it's no longer a user-facing toggle since
+            // mean-stacking always compresses dynamic range and the
+            // recovery just undoes that.
             SectionContainer(
-                title: "STEP 3: TONE CURVE",
+                title: "STEP 2: TONE CURVE & COLOUR",
                 icon: "waveform.path.ecg",
                 isOn: $app.toneCurve.enabled,
-                highlight: app.activePreviewStage == .toneCurve
+                highlight: app.activePreviewStage == .toneCurve || app.activePreviewStage == .colourLevels
             ) {
+            // Colour & levels — at the top of the section because they
+            // affect the data the curve editor histogram below will
+            // visualise. AWB-corrected histogram = the right histogram
+            // to drag curve points against.
+            Toggle("Auto White Balance (gray-world)", isOn: $app.toneCurve.autoWB)
+                .help("Computes a per-channel offset+scale so the three channels share a neutral mean. Critical for OSC stacks — Bayer green is naturally amplified by 2× photosite count, so post-stack OSC images otherwise look greenish once saturation > 1. Mono / pre-balanced sources are unaffected.")
+            Toggle("Atmospheric Chromatic Dispersion Correction", isOn: $app.toneCurve.chromaticAlignment)
+                .help("Phase-correlates R and B against G on the post-stack output and applies sub-pixel shifts so the three channels re-align (G stays anchored). Atmospheric refraction shifts blue more than red, so OSC planets at low altitude show coloured limb fringes; ACDC removes them. No-op on mono / pre-aligned sources because the offsets come out near zero.")
+            Divider().padding(.vertical, 4)
             ToneCurveEditor(
                 points: $app.toneCurve.controlPoints,
                 histogram: app.previewHistogram,
@@ -717,14 +715,25 @@ private struct SectionContainer<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                // Whole title row toggles collapse. The .contentShape on
-                // the inner HStack means clicks anywhere from the chevron
-                // through the title hit the button. Chevron sized up to
-                // 12pt bold + 16pt frame so it's a real target instead of
-                // a hairline (user feedback 2026-04-29).
+                // Whole title row is the engagement target.
+                // Behaviour (user spec 2026-05-03):
+                //   - Section OFF → click title → turn ON + expand
+                //     (the user is engaging with this section, so make
+                //     it usable in one click rather than two).
+                //   - Section ON  → click title → just collapse /
+                //     uncollapse, never disable. The pure switch
+                //     widget on the right still toggles on/off.
+                // The .contentShape on the inner HStack means clicks
+                // anywhere from the chevron through the title hit the
+                // button.
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) {
-                        userExpanded = !expanded
+                        if !isOn {
+                            isOn = true
+                            userExpanded = true
+                        } else {
+                            userExpanded = !expanded
+                        }
                     }
                 } label: {
                     HStack(spacing: 8) {

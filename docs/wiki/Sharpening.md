@@ -13,7 +13,8 @@ same kind. The UI enforces this via a dual-picker design (since
    └──────────────────────────┘  └────────────────────────────────┘
                           + Noise Reduction (orthogonal toggle)
 
-   STEP 2: COLOUR & LEVELS  →  STEP 3: TONE CURVE  →  Save
+   STEP 2: TONE CURVE & COLOUR  →  Save
+   (AWB + ACDC live at the top of STEP 2; the curve editor sits below)
 ```
 
 ## Why two families and not one stack-everything UI
@@ -182,14 +183,16 @@ In the Sharpening section. Two contexts:
   (stabilize / tone disabled), writes `<name>_sharp.tif` to
   OUTPUTS.
 
-## What about pipeline order across the three STEPs?
+## What about pipeline order across the STEPs?
 
 The order matters and is enforced by the engine:
 
 ```
-STEP 1: SHARPEN  →  STEP 2: COLOUR & LEVELS  →  STEP 3: TONE CURVE
-   (deconv → boost → NR)   (auto WB + ACDC)        (curve + B/C / sat)
+STEP 1: SHARPEN  →  STEP 2: TONE CURVE & COLOUR
+   (deconv → boost → NR)   (auto WB + ACDC → curve + B/C / sat)
 ```
+
+(Colour & Levels was a separate STEP 2 until 2026-05-03; merged into Tone Curve since it had nothing else.)
 
 - Auto WB / ACDC must run before sharpening to avoid coloured
   halos (Bayer green is naturally amplified — the sharpener would

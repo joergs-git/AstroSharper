@@ -145,11 +145,13 @@ A deeper walk-through lives in [`docs/WORKFLOW.md`](docs/WORKFLOW.md), and the i
 
 ## Sharpening pipeline order
 
-The post-stack workflow is three labelled STEPs in the settings panel — order matters because it's physically enforced by the math, not just convention:
+The post-stack workflow is two labelled STEPs in the settings panel — order matters because it's physically enforced by the math, not just convention:
 
 ```
-STEP 1: SHARPEN   →   STEP 2: COLOUR & LEVELS   →   STEP 3: TONE CURVE
+STEP 1: SHARPEN   →   STEP 2: TONE CURVE & COLOUR
 ```
+
+(Colour & Levels was a separate STEP 2 until 2026-05-03; merged into Tone Curve since it had nothing else.)
 
 **STEP 1 has two independent pickers** because there are two distinct families of "sharpening":
 
@@ -169,7 +171,7 @@ You can stack **one method from each family** — that's the classic PixInsight 
 
 **Pre-gamma** appears under the Deconvolution picker when a method is selected. Match it to the gamma your capture program applied (≈ 2.0 for SharpCap / FireCapture defaults; 1.0 for already-linear sources). Same role as WaveSharp's `PreGamma` loader option.
 
-**Why STEP 2 (Colour) before STEP 3 (Tone):** Auto White Balance + Atmospheric Chromatic Dispersion Correction must run before the tone curve so non-linear curves don't break the per-channel statistics. The engine applies them in this order regardless of which sliders you've touched.
+**Inside STEP 2: AWB + ACDC run before the curve internally** — Auto White Balance + Atmospheric Chromatic Dispersion Correction execute before the tone curve so non-linear curves don't break the per-channel statistics. The engine applies them in that fixed order regardless of which slider you touched first.
 
 Full reference: [`docs/wiki/Sharpening.md`](docs/wiki/Sharpening.md).
 

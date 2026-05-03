@@ -42,7 +42,7 @@ struct HowToView: View {
                     StepCard(
                         number: 3,
                         title: "Sharpen + tone (in this order)",
-                        detail: "The stacked TIFF lands in OUTPUTS automatically. Three labelled steps shape it from there: STEP 1: SHARPEN — pick ONE Deconvolution method (Wiener / Lucy-Richardson) AND/OR ONE Boost method (Unsharp / Wavelet à-trous). The picker prevents Wiener+LR or Unsharp+Wavelet (same-category stacking compounds artifacts). STEP 2: COLOUR & LEVELS — Auto White Balance + Atmospheric Chromatic Dispersion Correction for OSC. STEP 3: TONE CURVE — histogram editor with click-to-add control points + B/C / saturation / shadows / highlights."
+                        detail: "The stacked TIFF lands in OUTPUTS automatically. Two labelled steps shape it from there: STEP 1: SHARPEN — pick ONE Deconvolution method (Wiener / Lucy-Richardson) AND/OR ONE Boost method (Unsharp / Wavelet à-trous). The picker prevents Wiener+LR or Unsharp+Wavelet (same-category stacking compounds artifacts). STEP 2: TONE CURVE & COLOUR — Auto White Balance + Atmospheric Chromatic Dispersion Correction for OSC, plus the histogram editor with click-to-add control points + B/C / saturation / shadows / highlights. (Colour & Levels was a separate STEP 2 until 2026-05-03; merged into Tone Curve since it had nothing else.)"
                     )
                     StepCard(
                         number: 4,

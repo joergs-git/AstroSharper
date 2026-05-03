@@ -35,50 +35,93 @@ struct BrandHeader: View {
             Spacer(minLength: 12)
 
             // Right-side balancer matches the brand block's width so
-            // the picker stays visually centered. The community
-            // button sits trailing-aligned within it; the rest is
-            // empty 1pt-tall clear space so the bar height stays
-            // capped (without explicit height, Color.clear defaults
-            // to "fill all available vertical space").
-            HStack {
+            // the picker stays visually centered. Two violet pills
+            // sit trailing-aligned within it: Howto + Community.
+            // Both two-line labels so they can be a bit taller and
+            // more visible without dominating the bar.
+            HStack(spacing: 8) {
                 Spacer()
-                Button {
-                    // Posts a Notification that the WindowGroup body
-                    // observes and translates into `openWindow(id:)`.
-                    // Avoid the `NSWorkspace.shared.open(URL(string:
-                    // "astrosharper://...")!)` route — without a
-                    // registered URL scheme it triggers the macOS
-                    // "no app handles this URL" dialog.
-                    NotificationCenter.default.post(
-                        name: .openCommunityFeed, object: nil
-                    )
-                } label: {
-                    Label("Community", systemImage: "person.2.fill")
-                        .font(.system(size: 11, weight: .medium))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                }
-                .buttonStyle(.plain)
-                .background(
-                    Capsule().fill(LinearGradient(
-                        colors: [
-                            Color(red: 0.55, green: 0.34, blue: 0.92),
-                            Color(red: 0.40, green: 0.20, blue: 0.78),
-                        ],
-                        startPoint: .leading, endPoint: .trailing
-                    ))
-                )
-                .foregroundColor(.white)
-                .help("Show other peoples' stack thumbnails — opens the Community Stacks window.")
+                howtoButton
+                communityButton
             }
-            .frame(width: 260, height: 36)
+            .frame(width: 260, height: 46)
         }
         // Hard height so the bar can't grow regardless of child
-        // intrinsics. 50pt fits the 42pt-tall chips + 4pt breathing
-        // room above and below.
-        .frame(height: 50)
+        // intrinsics. Bumped 50→54pt 2026-05-03 to fit the two-line
+        // Howto + Community pills with breathing room.
+        .frame(height: 54)
         .padding(.horizontal, 12)
         .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    /// Howto button — moved here from the secondary toolbar 2026-05-03.
+    /// Same violet pill styling as Community for visual cohesion.
+    private var howtoButton: some View {
+        Button {
+            NotificationCenter.default.post(name: .openHowto, object: nil)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "questionmark.circle.fill")
+                    .font(.system(size: 16))
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Howto")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    Text("workflow guide")
+                        .font(.system(size: 9, weight: .medium))
+                        .opacity(0.85)
+                }
+            }
+            .foregroundColor(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+        }
+        .buttonStyle(.plain)
+        .background(
+            Capsule().fill(LinearGradient(
+                colors: [
+                    Color(red: 0.55, green: 0.34, blue: 0.92),
+                    Color(red: 0.40, green: 0.20, blue: 0.78),
+                ],
+                startPoint: .leading, endPoint: .trailing
+            ))
+        )
+        .help("Open the workflow guide in a movable, non-blocking window — keep it on screen while you work.")
+    }
+
+    /// Community button — two-line label (2026-05-03) so the meaning is
+    /// clearer than just "Community". Same NotificationCenter trigger
+    /// as before, no URL-scheme fallback (would cause the macOS
+    /// "no app handles this URL" dialog).
+    private var communityButton: some View {
+        Button {
+            NotificationCenter.default.post(name: .openCommunityFeed, object: nil)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "person.2.fill")
+                    .font(.system(size: 16))
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Community")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    Text("stacked thumbs")
+                        .font(.system(size: 9, weight: .medium))
+                        .opacity(0.85)
+                }
+            }
+            .foregroundColor(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+        }
+        .buttonStyle(.plain)
+        .background(
+            Capsule().fill(LinearGradient(
+                colors: [
+                    Color(red: 0.55, green: 0.34, blue: 0.92),
+                    Color(red: 0.40, green: 0.20, blue: 0.78),
+                ],
+                startPoint: .leading, endPoint: .trailing
+            ))
+        )
+        .help("Show other peoples' stack thumbnails — opens the Community Stacks window.")
     }
 }
 

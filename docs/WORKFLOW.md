@@ -89,9 +89,9 @@ After running Stabilize from Inputs:
 
 You can stabilize again from the Memory tab — AstroSharper reuses the current memory textures (no re-load from disk), so prior sharpening is preserved. A pre-flight confirm asks before re-aligning over edited frames.
 
-## Sharpening pipeline order (STEP 1 → 2 → 3)
+## Sharpening pipeline order (STEP 1 → 2)
 
-Three labelled STEPs in the Settings panel, applied in that visual top-to-bottom order:
+Two labelled STEPs in the Settings panel, applied in that visual top-to-bottom order. (Colour & Levels was a separate STEP 2 until 2026-05-03; merged into Tone Curve since it had nothing else.)
 
 ```
 STEP 1: SHARPEN
@@ -101,12 +101,10 @@ STEP 1: SHARPEN
    │  + Pre-gamma    │    │  / Wavelet │
    └─────────────────┘    └─────────┘
 
-STEP 2: COLOUR & LEVELS
+STEP 2: TONE CURVE & COLOUR
    ┌─ Auto White Balance (gray-world)
-   └─ Atmospheric Chromatic Dispersion Correction
-
-STEP 3: TONE CURVE
-   ┌─ Histogram editor + B-spline curve
+   ├─ Atmospheric Chromatic Dispersion Correction
+   ├─ Histogram editor + B-spline curve
    ├─ Brightness / Contrast / Saturation
    └─ Highlights / Shadows
 ```
@@ -114,7 +112,7 @@ STEP 3: TONE CURVE
 Two key rules the dual-picker enforces:
 
 1. **One method per family.** Deconvolution (Wiener / LR) and Boost (Unsharp / Wavelet) are independent picks — you can stack one of each (classic pro pipeline) but not two of the same kind (Wiener+LR or Unsharp+Wavelet both compound artifacts).
-2. **Engine reorders correctly.** Auto WB + ACDC actually run *before* sharpening internally (otherwise channel imbalance becomes coloured halos) — the step labels are written in workflow order, not pipeline order.
+2. **Engine reorders correctly.** Auto WB + ACDC actually run *before* sharpening internally (otherwise channel imbalance becomes coloured halos) — and inside STEP 2 they run before the curve. The step labels are written in workflow order, not pipeline order.
 
 Recommended starting points:
 
