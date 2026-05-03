@@ -2,6 +2,31 @@
 
 Patterns and gotchas captured from this project. Read at session start; append after every correction.
 
+## [2026-05-03] — `Color.clear.frame(width:)` defaults to fill all available height
+- **Mistake:** Used `Color.clear.frame(width: 260)` as a right-side balancer in BrandHeader to keep the target picker centered. Without an explicit `height:`, Color claimed all available vertical space — the brand bar inflated to ~150 pt of empty grey.
+- **Rule:** Any `Color.clear` placeholder used as a layout spacer needs an explicit `height: N` (use `1` for a near-zero footprint). Combine with `.frame(height:)` on the outer container as a hard cap — child intrinsic sizes can never push past it.
+- **Applies to:** `App/Views/BrandHeader.swift` and any future SwiftUI bar / strip layout that needs invisible spacers.
+
+## [2026-05-03] — `JSONEncoder` omits nil optional keys; some servers require them present-with-null
+- **Mistake:** `TelemetryEvent` and `CommunityShareMetadata` used default Codable synthesis with `Optional<T>` fields. Swift's encoder OMITS the key entirely when nil; the Supabase edge functions' validators required the key present (with `null`) and returned HTTP 400 for missing keys.
+- **Rule:** When the wire format requires `"field": null` for absent values (e.g. strict server validators, or downstream consumers that compute over a fixed schema), provide a manual `encode(to:)` that uses `container.encode(value, forKey:)` — that path emits null for nil values. The default synthesised version uses `encodeIfPresent` which skips them.
+- **Applies to:** Any future Codable struct on the network boundary. Server-side: tolerate both forms (`null` and missing) defensively to avoid this kind of round-trip failure.
+
+## [2026-05-03] — Sandboxed app needs `com.apple.security.network.client` to even resolve DNS
+- **Mistake:** Added telemetry + community share HTTP POSTs without updating the entitlements file. The app sandbox blocked `mDNSResponder` on first network call → URLSession returned `-1003 ServiceNotRunning` → "Telemetry POST failed: A server with the specified hostname could not be found."
+- **Rule:** Adding ANY outbound HTTP to a sandboxed app requires `com.apple.security.network.client = true` in the entitlements file. Without it the failure is misleading (looks like DNS, is actually sandbox blocking the resolver). The Sandbox `deny network-outbound /private/var/run/mDNSResponder` log line is the definitive smoking gun.
+- **Applies to:** `AstroSharper/AstroSharper.entitlements`. The entitlement is the FIRST step before any URLSession code, not an afterthought.
+
+## [2026-05-03] — Nested SwiftUI View body has a finite type-check budget
+- **Mistake:** Inlining the third alert (update checker) into the existing `WindowGroup` body that already had 2 sheets + 2 alerts + 3 observers triggered SwiftUI's "expression too complex" compile error. Symptom is a build failure on a body that LOOKS reasonable; root cause is the generic resolver giving up on the modifier chain.
+- **Rule:** Whenever a `body` chain accumulates ≥3 `.alert` / `.sheet` calls or has multiple `Binding(get:set:)` constructions, extract into a dedicated wrapper View with its own `body`. Per-button `@ViewBuilder` helper methods further reduce per-call complexity. The compile failure is reversible by refactoring; don't disable `-Xfrontend` flags as escape hatches.
+- **Applies to:** `App/AstroSharperApp.swift::RootContent` is the canonical extraction pattern. Re-use for any future top-level App view.
+
+## [2026-05-03] — Don't inject tone manipulation into "preview thumbnail" exports
+- **Mistake:** Added 1%/99% percentile auto-stretch + γ 2.2 to `CommunityShare.makeThumbnailJPEG` to make bare-accumulator outputs visible in the feed. On properly-toned outputs (lunar surface stacks), the stretch crushed natural midtones and the community feed showed high-contrast over-processed "negatives" of what the user actually saved.
+- **Rule:** A "thumbnail" of a saved file should be a faithful downscale of the saved bytes — never re-tone, never re-balance. If the source is dark, the thumbnail is dark; that's the truth. Push the tone decision to the saved-file pipeline (Bake-in / Auto-tone toggles), not to the export step.
+- **Applies to:** `App/CommunityShare.swift::makeThumbnailJPEG`. Same principle for any future "send a preview elsewhere" path.
+
 ## [2026-04-27] — Lucky-stack accumulator must be 32-bit float, not half-precision
 - **Mistake:** Used `rgba16Float` for the stacked-output accumulator (and the drizzle accumulator). With ~10 bits of mantissa in the 0..1 mid-range, weighted-mean accumulation across hundreds of frames + a final unsharp+wavelet pass surfaced as visible colour banding on smooth Jupiter cloud detail. Existing comments warned about this for the sigma-clip Welford state, but the standard / two-stage / drizzle paths missed the upgrade.
 - **Rule:** Any pipeline stage that *accumulates* across many frames must use `rgba32Float` (single precision). Half-precision is fine for pass-through textures (per-frame sharpen output, display blits) but never for the running mean / weighted sum / variance state. Memory cost: 2× per accumulator — negligible on Apple Silicon.

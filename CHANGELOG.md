@@ -3,7 +3,7 @@
 Notable changes per release. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows semantic versioning once it leaves 0.x.
 
-## [0.4.0] — unreleased (in development on `feature/v1-foundation`)
+## [0.4.0] — 2026-05-03
 
 The "engine decides everything" release. Replaces hand-tuned per-target presets
 with empirical content-aware resolution, adds a Mac-native UX overhaul, and

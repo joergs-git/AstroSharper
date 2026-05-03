@@ -20,12 +20,12 @@ End-of-2026-05-03 state: AutoAP shipped (6/6 beats preset on regression set), Au
 4. **F3 v1.4 polish**: drop more reference images into TESTIMAGES so RMSE fires on more baselines (only 4/7 today); add unit tests for the PSS cascade and drizzle AA pre-filter; bracket-script convenience subcommand.
 5. **B.6 polish** (auto-engage FWHM/2.4 trigger + float scales), **D.1 polish** (folder-scan master-frame builder), **C.4 tile-size auto-calc**, **A.5 HFR + sparkline**, **A.2 two-stage quality**, **A.3 Strehl supplement** — small wins; none individually session-sized.
 
-## Current state (v0.3.0 — released 2026-04-26)
+## Current state (v0.4.0 — released 2026-05-03)
 
 - Public GitHub repo: https://github.com/joergs-git/AstroSharper
-- Latest release: **v0.3.0** notarized + stapled, available on GitHub Releases
-- Mac App Store submission: deferred ("another time" per user)
-- All Apple infra in place for next notarized GH release: Developer ID cert installed, `notarytool` keychain profile configured, auto-managed provisioning profile present
+- Latest release: **v0.4.0** — AutoNuke + AutoAP + telemetry + community feed + in-app update checker
+- All Apple infra in place: Developer ID cert installed, `notarytool` keychain profile configured, auto-managed provisioning profile present
+- In-app update checker live: every launch fetches `latest-release.json` from `main` and prompts users on a newer version. See `memory/project_release_workflow.md`.
 
 ## Current state (v0.2.0 + unreleased)
 
