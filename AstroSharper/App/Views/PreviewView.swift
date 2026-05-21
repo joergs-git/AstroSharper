@@ -397,6 +397,12 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             .removeDuplicates()
             .sink { [weak self] _ in self?.view?.needsDisplay = true }
             .store(in: &cancellables)
+        // Highlight-clipped overlay toggle (LSW 8.8) — purely visual,
+        // just nudges the MTKView to redraw with the new uniform.
+        app.$highlightClipped
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.view?.needsDisplay = true }
+            .store(in: &cancellables)
         // displayGain slider: redraw on every change. Throttle so a
         // continuous drag doesn't thrash the GPU (display path is cheap
         // but the shader recompiles uniform buffers per frame anyway).
@@ -1173,6 +1179,12 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         var autoGamma: Float
         var displayGain: Float
         var autoRangeOn: UInt32
+        // Highlight-clipped overlay (LSW 8.8). Mirrors the same-named
+        // fields on the Metal-side struct in Shaders.metal — must stay
+        // in sync field-for-field, or `setFragmentBytes` will pack the
+        // values into the wrong shader slots.
+        var clipOverlayOn: UInt32
+        var clipThreshold: Float
     }
 
     // Cached auto-range params. Recomputed only when beforeTex changes
@@ -1268,7 +1280,9 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             autoScale: sc,
             autoGamma: gm,
             displayGain: user,
-            autoRangeOn: autoOn ? 1 : 0
+            autoRangeOn: autoOn ? 1 : 0,
+            clipOverlayOn: app.highlightClipped ? 1 : 0,
+            clipThreshold: 0.995
         )
         // One-shot diagnostic: log the exact uniforms whenever they
         // CHANGE. Frequent draws don't spam the log because the values

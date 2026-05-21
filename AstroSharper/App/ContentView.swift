@@ -187,6 +187,18 @@ private struct ToolbarView: View {
             .toggleStyle(.button)
             .keyboardShortcut("b", modifiers: [])
             .help("Show / hide the comparison side panel (B). Top thumbnail = the displayed file (no manipulations). Bottom thumbnail = the source SER's first frame, populated when Lucky Stack runs.")
+
+            // Highlight clipped pixels (C) — LSW 8.8 parity. Pure
+            // diagnostic overlay that turns any pixel at/above 0.995
+            // (per-channel, post-display-chain) solid red so the user
+            // can see at a glance which features are blowing out after
+            // sharpen / deconv / tone-curve. Saved files unaffected.
+            Toggle(isOn: $app.highlightClipped) {
+                Label("Clipped", systemImage: app.highlightClipped ? "flashlight.on.fill" : "flashlight.off.fill")
+            }
+            .toggleStyle(.button)
+            .keyboardShortcut("c", modifiers: [])
+            .help("Highlight clipped pixels (C): tint per-channel ≥ 99.5% values solid red over the live preview. Useful for spotting blown-out planet limbs or Wiener overshoot. Saved files are never affected.")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)

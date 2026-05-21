@@ -451,18 +451,27 @@ enum AutoPSFAutoROI {
 
 // MARK: - cascade entry point
 
-/// Unified result from the planetary → auto-ROI cascade. LuckyStack
-/// branches on the case to decide whether to apply the radial-fade
-/// filter (planetary only — RFF assumes disc geometry that doesn't
-/// exist for an arbitrary interior edge).
+/// Unified result from the planetary → auto-ROI → synthetic cascade.
+/// LuckyStack branches on the case to decide whether to apply the
+/// radial-fade filter (planetary only — RFF assumes disc geometry
+/// that doesn't exist for an arbitrary interior edge or a guess).
 enum AutoPSFEstimate {
     case planetary(AutoPSF.Result)
     case autoROI(AutoPSFAutoROI.Result)
+    /// Seeing-index-driven synthetic PSF (LSW 3.2.1 "Synthetic PSF"
+    /// parity at the cascade tail). Engaged when both measured
+    /// estimators bail — instead of skipping Wiener entirely we apply
+    /// a conservative σ derived from the seeing index so lunar /
+    /// textured material still gets a deconv pass. RFF + tiled-deconv
+    /// are SKIPPED in this case: there's no disc geometry and no
+    /// per-tile PSF support.
+    case synthetic(sigma: Float, seeingIndex: Float)
 
     var sigma: Float {
         switch self {
-        case .planetary(let r): return r.sigma
-        case .autoROI(let r):   return r.sigma
+        case .planetary(let r):    return r.sigma
+        case .autoROI(let r):      return r.sigma
+        case .synthetic(let s, _): return s
         }
     }
 
@@ -470,34 +479,63 @@ enum AutoPSFEstimate {
         switch self {
         case .planetary(let r): return r.confidence
         case .autoROI(let r):   return r.confidence
+        // Synthetic has no measured confidence — return a sentinel
+        // (1.0) that indicates "intentional guess" rather than the
+        // 0/nil that callers might interpret as "estimator failed".
+        case .synthetic:        return 1.0
         }
     }
 }
 
 extension AutoPSF {
+
+    /// Map a Meteoblue-style seeing index (1 = poor, 5 = excellent) to
+    /// a synthetic Gaussian σ in pixels. The linear ramp
+    ///   σ = 4.5 - 0.6 · seeing
+    /// gives σ ∈ {3.9, 3.3, 2.7, 2.1, 1.5} for index ∈ {1, 2, 3, 4, 5}
+    /// — bracketed against the empirical [0.7, 2.5] band that the
+    /// planetary limb-LSF returns on real BiggSky Jupiter SERs, with
+    /// extra headroom at the low end for genuinely poor seeing. Out-
+    /// of-range indices clamp to the [1, 5] domain rather than
+    /// extrapolating past the validated bracket.
+    static func syntheticSigma(seeingIndex: Float) -> Float {
+        let clamped = max(1.0, min(5.0, seeingIndex))
+        return 4.5 - 0.6 * clamped
+    }
+
     /// Try the planetary limb-LSF estimator first; on bail, optionally
-    /// fall through to the auto-ROI estimator. Returns nil when
-    /// neither produces a clean σ.
+    /// fall through to the auto-ROI estimator; on bail again, optionally
+    /// fall through to a seeing-index-driven synthetic PSF. Returns
+    /// nil only when none of the enabled paths produces a σ.
     ///
-    /// The fallback is gated by `autoROIFallback` because the auto-ROI
-    /// estimator is conservatively designed but still less robust than
-    /// the planetary path on planetary inputs (which the planetary
-    /// path catches first anyway). Default OFF; opted in by callers
-    /// that have validated their pipeline against `feedback_autopsf_lunar_bail.md`.
+    /// The auto-ROI fallback is gated by `autoROIFallback` because the
+    /// auto-ROI estimator is conservatively designed but still less
+    /// robust than the planetary path on planetary inputs (which the
+    /// planetary path catches first anyway).
+    ///
+    /// The synthetic fallback is gated by `syntheticFallback` because
+    /// it can apply a wrong σ to subjects the cascade truly can't
+    /// estimate — but a conservatively-picked σ tied to the user's
+    /// chosen seeing index almost always improves on a bare un-
+    /// deconvolved stack. Default ON in `LuckyStackOptions`.
     static func estimateCascade(
         texture: MTLTexture,
         device: MTLDevice,
-        autoROIFallback: Bool
+        autoROIFallback: Bool,
+        syntheticFallback: Bool = false,
+        syntheticSeeingIndex: Float = 3.0
     ) -> AutoPSFEstimate? {
         if let planetary = estimate(texture: texture, device: device) {
             return .planetary(planetary)
         }
-        guard autoROIFallback else { return nil }
-        guard let (luma, W, H) = readLuminance(texture: texture, device: device) else {
-            return nil
-        }
-        if let roi = AutoPSFAutoROI.estimate(luminance: luma, width: W, height: H) {
+        if autoROIFallback,
+           let (luma, W, H) = readLuminance(texture: texture, device: device),
+           let roi = AutoPSFAutoROI.estimate(luminance: luma, width: W, height: H) {
             return .autoROI(roi)
+        }
+        if syntheticFallback {
+            let sigma = syntheticSigma(seeingIndex: syntheticSeeingIndex)
+            return .synthetic(sigma: sigma, seeingIndex: syntheticSeeingIndex)
         }
         return nil
     }

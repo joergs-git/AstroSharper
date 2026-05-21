@@ -338,6 +338,31 @@ struct ToneCurveSettings: Equatable, Codable {
     /// gate also rejects any offset > 5 px as obviously wrong.
     var chromaticAlignment: Bool = false
 
+    /// Channel-Normalize (LSW 7.2.1 parity). Per-channel histogram
+    /// stretch so the per-channel [p1, p99] windows align on a common
+    /// range (the reference channel's, green by default). Gray-world
+    /// `autoWB` aligns MEANS; this fills the remaining gap that
+    /// shows up as greenish highlights / blue shadows on OSC bayer
+    /// frames. Runs AFTER auto-WB so the WB step gets the first
+    /// shot at neutralising the green cast.
+    /// Default OFF; OscDefaults turns it on for OSC sources where
+    /// the per-channel p99 spread is > 30%.
+    var channelNormalize: Bool = false
+
+    /// Purple-fringe suppression (LSW 7.1 parity). Hue-targeted
+    /// desaturation around the 290° purple band so OSC bayer
+    /// chromatic-aberration fringes near bright planetary limbs /
+    /// lunar terminators get blended toward their per-pixel luma.
+    /// Other hues pass through unchanged. Auto-engages on OSC
+    /// sources where ≥ 0.5% of sampled pixels fall in the purple
+    /// band; mono sources never need it.
+    var reducePurpleFringe: Bool = false
+
+    /// 0.0 = pass-through, 1.0 = full desaturation to grayscale
+    /// inside the band. Default 0.5 = halfway, matching LSW's
+    /// empirical "Reduce Purple" sweet spot.
+    var purpleFringeStrength: Double = 0.5
+
     // MARK: - Codable
     /// Backwards-compatible decoder so older preset JSON keeps loading. The
     /// synthesised encoder is fine — new files always carry the field.
@@ -352,6 +377,9 @@ struct ToneCurveSettings: Equatable, Codable {
         self.saturation         = try c.decodeIfPresent(Double.self, forKey: .saturation)         ?? 1.0
         self.autoWB             = try c.decodeIfPresent(Bool.self,   forKey: .autoWB)             ?? false
         self.chromaticAlignment = try c.decodeIfPresent(Bool.self,   forKey: .chromaticAlignment) ?? false
+        self.channelNormalize   = try c.decodeIfPresent(Bool.self,   forKey: .channelNormalize)   ?? false
+        self.reducePurpleFringe   = try c.decodeIfPresent(Bool.self,   forKey: .reducePurpleFringe)   ?? false
+        self.purpleFringeStrength = try c.decodeIfPresent(Double.self, forKey: .purpleFringeStrength) ?? 0.5
         self.brightness         = try c.decodeIfPresent(Double.self, forKey: .brightness)         ?? 0.0
         self.contrast           = try c.decodeIfPresent(Double.self, forKey: .contrast)           ?? 1.0
         self.highlights         = try c.decodeIfPresent(Double.self, forKey: .highlights)         ?? 0.0
@@ -368,6 +396,9 @@ struct ToneCurveSettings: Equatable, Codable {
         saturation: Double = 1.0,
         autoWB: Bool = false,
         chromaticAlignment: Bool = false,
+        channelNormalize: Bool = false,
+        reducePurpleFringe: Bool = false,
+        purpleFringeStrength: Double = 0.5,
         brightness: Double = 0.0,
         contrast: Double = 1.0,
         highlights: Double = 0.0,
@@ -378,6 +409,9 @@ struct ToneCurveSettings: Equatable, Codable {
         self.saturation = saturation
         self.autoWB = autoWB
         self.chromaticAlignment = chromaticAlignment
+        self.channelNormalize = channelNormalize
+        self.reducePurpleFringe = reducePurpleFringe
+        self.purpleFringeStrength = purpleFringeStrength
         self.brightness = brightness
         self.contrast = contrast
         self.highlights = highlights

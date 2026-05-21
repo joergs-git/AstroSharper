@@ -593,6 +593,12 @@ struct LuckyStackSection: View {
                         .controlSize(.small)
                     }
                     .help("Wavelet soft-threshold applied after the Wiener restore. Suppresses residual ringing and amplified noise from the deconvolution. BiggSky-typical 75. Set to 1 for low-noise sources.")
+                    // Pre-sharpen highlight suppression is engine-side
+                    // auto-engaged (p99 ≥ 0.98 on the bare stack). No
+                    // GUI toggle on purpose — the user filter is
+                    // "minimal user-action needed"; the CLI escape
+                    // hatch `--no-pre-sharpen-suppression` covers
+                    // empirical regression testing.
 
                     // Block C.3 — tiled deconv with green/yellow/red mask.
                     HStack(spacing: 4) {

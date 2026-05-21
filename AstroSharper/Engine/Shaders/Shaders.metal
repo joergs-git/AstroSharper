@@ -27,6 +27,14 @@ struct DisplayUniforms {
     float  autoGamma;
     float  displayGain;
     uint   autoRangeOn;
+    // Highlight-clipped overlay (LSW 8.8 parity). When `clipOverlayOn`
+    // is 1, pixels whose POST-display-chain luma sits at or above
+    // `clipThreshold` (default 0.995) get tinted toward solid red so
+    // the user can see at a glance which features are blowing out
+    // after sharpen / deconv / tone-curve. Pure diagnostic — no
+    // pipeline impact, no file impact. Default off.
+    uint   clipOverlayOn;
+    float  clipThreshold;
 };
 
 struct DisplayVertexOut {
@@ -117,7 +125,120 @@ fragment float4 display_fragment(
     } else {
         col.rgb = clamp(col.rgb, 0.0, 1.0);
     }
+    // Clipping overlay (after the entire display chain so the user
+    // sees exactly the pixels they would also see clipped on the
+    // saved file at default tone). Any channel at/above the threshold
+    // → tint toward solid red. Threshold defaults to 0.995 — i.e. the
+    // top 0.5% of the encoded range — to match LSW 8.8 semantics.
+    if (u.clipOverlayOn != 0u) {
+        bool clipped = (col.r >= u.clipThreshold) ||
+                       (col.g >= u.clipThreshold) ||
+                       (col.b >= u.clipThreshold);
+        if (clipped) {
+            col.rgb = float3(1.0, 0.0, 0.0);
+        }
+    }
     return col;
+}
+
+// MARK: - Purple-fringe suppression (LSW 7.1 parity)
+//
+// Mixes pixels in the purple hue band (centred at 290°, ±30° width)
+// toward their per-pixel Rec. 709 luma. Pixels outside the band pass
+// through unchanged. Pure-Swift reference implementation lives in
+// PurpleFringe.swift — keep the math in sync.
+
+struct PurpleFringeParams {
+    float strength;     // 0 = no change, 1 = full desaturation
+};
+
+inline float purple_hue_degrees(float r, float g, float b) {
+    float cmax = max(r, max(g, b));
+    float cmin = min(r, min(g, b));
+    float delta = cmax - cmin;
+    if (delta < 1e-6) return 0.0;
+    float h;
+    if (cmax == r) {
+        h = 60.0 * fmod((g - b) / delta, 6.0);
+    } else if (cmax == g) {
+        h = 60.0 * ((b - r) / delta + 2.0);
+    } else {
+        h = 60.0 * ((r - g) / delta + 4.0);
+    }
+    return h < 0.0 ? h + 360.0 : h;
+}
+
+inline float purple_saturation(float r, float g, float b) {
+    float cmax = max(r, max(g, b));
+    if (cmax < 1e-6) return 0.0;
+    float cmin = min(r, min(g, b));
+    return (cmax - cmin) / cmax;
+}
+
+kernel void reduce_purple_fringe(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    constant PurpleFringeParams& params [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    float r = c.r, g = c.g, b = c.b;
+    float s = purple_saturation(r, g, b);
+    if (s < 0.05) { output.write(c, gid); return; }
+    float h = purple_hue_degrees(r, g, b);
+    float d = abs(h - 290.0);
+    if (d > 180.0) d = 360.0 - d;
+    const float bandwidth = 30.0;
+    if (d > bandwidth) { output.write(c, gid); return; }
+    float t = cos((d / bandwidth) * 3.14159265 / 2.0);
+    float f = params.strength * t * t;
+    float luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    float3 mixed = mix(float3(r, g, b), float3(luma), f);
+    output.write(float4(mixed, c.a), gid);
+}
+
+// MARK: - Pre-sharpen highlight suppression (LSW 3.1.3 parity)
+//
+// Soft-clips the luma of bright pixels via a hue-preserving roll-off so
+// the downstream sharpening / deconv stage cannot push them past 1.0
+// and create the polar / limb overexposure the user observed on
+// stacked Jupiter output (see tasks/todo.md "Upper-half over-exposure").
+//
+// Curve:
+//   f(L) = L                                       if L ≤ knee
+//   f(L) = knee + (1 - knee) · tanh((L - knee) / (1 - knee))    if L > knee
+//
+// f'(knee-) = 1 = f'(knee+), so the curve is C¹-continuous at the knee
+// and below the knee it's a strict identity (nothing dimmer than the
+// knee is ever touched). For knee=0.85: f(1.0) ≈ 0.964, f(0.95) ≈ 0.937.
+//
+// To preserve hue we scale RGB by f(L)/L rather than per-channel
+// clipping. Pixels with L < 1e-4 are passed through (avoids div-by-0
+// on black sky).
+
+struct HighlightSuppressParams {
+    float knee;
+};
+
+kernel void suppress_highlights(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    constant HighlightSuppressParams& params [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    const float L = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    const float knee = params.knee;
+    if (L <= knee || L < 1e-4) {
+        output.write(c, gid);
+        return;
+    }
+    const float head = 1.0 - knee;
+    const float Lnew = knee + head * tanh((L - knee) / head);
+    const float scale = Lnew / L;
+    output.write(float4(c.rgb * scale, c.a), gid);
 }
 
 // MARK: - Unsharp mask

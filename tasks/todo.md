@@ -4,7 +4,31 @@ A running record of where we are, what's done, and what's next. Update at the en
 
 ## Suggested next-session focus
 
-End-of-2026-05-03 (latest): **C.2 + C.4 + A.5 (v0+v1) + sRGB tone + Hα fix + LRU prefetch + AVI smoke + Step1/2 reset + Compare side panel all shipped on `feature/v1-foundation`.** AutoPSF cascades to `AutoPSFAutoROI` for lunar / textured (default OFF, validated end-to-end on 13 GB lunar SER — gentle Wiener, no ringing, conservative gate doing its job). Scope-formula tile size live (`--auto-tile-size --focal-length-mm N --pixel-pitch-um N [--barlow N]`). HUD now shows median HFR + Drift sparkline after Stabilize. Tone-op block runs in perceptual sRGB (gamma-encode → ops → gamma-decode wrap). AP-cell quilting on solar Hα fixed (rank sigmoid 10 % → 20 %). SER LRU + 4-frame prefetch via `SerFramePrefetcher`. Compare side panel (toolbar `B`) shows current file + source SER thumbnails at default 2× zoom with linked pinch + drag. Step 1 + Step 2 reset buttons. AVI pipeline confirmed working on AVFoundation-supported video; SharpCap raw AVI documented as the open codec gap. **All 301 unit tests + 6/6 F3 baselines still byte-identical (default-off flags ensure no behaviour drift).**
+**End-of-2026-05-21:** LSW 6.21.1 parity wave shipped on `feature/v1-foundation` — five features matching LuckyStackWorker's User Manual against AstroSharper's gap matrix, all gated by the "Quality + Speed + minimal user-action" filter:
+
+1. **Highlight-clipped overlay** (LSW 8.8) — toolbar toggle (shortcut `C`), red overlay on per-channel ≥ 0.995 pixels. Pure display-side; saved files unaffected.
+2. **Pre-sharpen highlight suppression** (LSW 3.1.3) — hue-preserving tanh roll-off above knee=0.85 fires automatically in `LuckyStack.run` AutoPSF post-pass when bare-stack p99 ≥ 0.98. Default ON; fixes the long-open "upper-half over-exposure on Jupiter" bug. CLI `--no-pre-sharpen-suppression`, `--pre-sharpen-knee N`.
+3. **Channel-Normalize** (LSW 7.2.1) — per-channel histogram stretch aligning [p1, p99] windows on the green reference. Default OFF; auto-engaged for OSC sources via `OscDefaults.applyDefaults` (sibling of `autoWB`). Reuses the existing `apply_white_balance` Metal kernel.
+4. **Synthetic-PSF cascade fallback** (LSW 3.2.1) — extends `AutoPSF.estimateCascade` with `.synthetic(sigma, seeingIndex)` after planetary + auto-ROI both bail. Default OFF per `feedback_autopsf_lunar_bail.md` (wrong σ is worse than nothing). CLI `--synthetic-psf --seeing-index N`. Seeing-index 1–5 (Meteoblue) maps to σ ∈ [3.9, 1.5] px.
+5. **Purple-fringe auto-suppression** (LSW 7.1) — hue-targeted desaturation around the 290° band with cos² falloff over ±30°. Auto-engaged on OSC sources alongside `autoWB` + `channelNormalize` (third leg of the OSC defaults trio). Pure-Swift math mirrored by `reduce_purple_fringe` Metal kernel.
+
+**Test gates:** 327/327 unit tests grün (was 320; +35 across `HighlightSuppressionTests` 7 + `ChannelNormalizeTests` 6 + `AutoPSFSyntheticTests` 5 + `PurpleFringeTests` 7 + `OscDefaultsTests` expanded by 4). F3 regression baselines unchanged — defaults preserve the existing pipeline behaviour where it matters (lunar / solar baselines were tested with synthetic-PSF default OFF; Pipeline.process-only kernels don't fire in the CLI stack path).
+
+**Top of stack for next session:**
+
+1. **Native AVI rawvideo decoder** — SharpCap's typical mono capture (`codec=rawvideo` + `pal8` + zero FourCC) is invisible to AVFoundation; the AviReader returns "noVideoTrack" with a now-clear error pointing to the ffmpeg one-liner workaround. Real fix is a small native parser that reads the AVI container manually + decodes the rawvideo stream. ~500–800 lines, multi-day. Most-requested gap once non-power users run into it.
+
+2. **Visual bracket of the LSW-parity wave on real captures.** Each new feature has unit-test coverage but the empirical behaviour on the user's TESTIMAGES needs an eyeball pass before declaring v1-quality. Specifically: (a) pre-sharpen suppression on a Jupiter capture with visible polar overexposure — confirm the polar plateau is gone; (b) channel-normalize on the OSC Saturn SER — confirm greenish highlights are neutralised; (c) purple-fringe on a Jupiter limb — confirm fringe is gone WITHOUT desaturating the cloud-band hues; (d) synthetic-PSF on a lunar full-disc with `--synthetic-psf --seeing-index 3` — confirm visible improvement without ringing halos.
+
+3. **C.2 cascade tightening** — lunar bracket showed conf=3.15 (gate=3) on the terminator → marginal Wiener nudge with no visible improvement. v1 should tighten the gate (5 instead of 3, or stricter dirStd ≤ 8°) to either deliver a clear sharpness win or bail. Needs more sample lunar captures to bracket.
+
+4. **G.1 + G.2 derotation** — Jupiter / Saturn warp each kept frame back to a reference rotation epoch using SER timestamps + ellipsoid projection. Auto-engage when capture window > 3 min. ~600 lines new `Engine/Pipeline/Derotation.swift` + LuckyRunner integration. 1–2 days, plus needs a long capture in TESTIMAGES to validate.
+
+5. **F3 v1.4 polish** & **B.6 / D.1 / A.2 / A.3** as before.
+
+---
+
+**Previous suggested-focus block (kept for context):** C.2 + C.4 + A.5 (v0+v1) + sRGB tone + Hα fix + LRU prefetch + AVI smoke + Step1/2 reset + Compare side panel all shipped on `feature/v1-foundation`. AutoPSF cascades to `AutoPSFAutoROI` for lunar / textured (default OFF, validated end-to-end on 13 GB lunar SER — gentle Wiener, no ringing, conservative gate doing its job). Scope-formula tile size live (`--auto-tile-size --focal-length-mm N --pixel-pitch-um N [--barlow N]`). HUD now shows median HFR + Drift sparkline after Stabilize. Tone-op block runs in perceptual sRGB (gamma-encode → ops → gamma-decode wrap). AP-cell quilting on solar Hα fixed (rank sigmoid 10 % → 20 %). SER LRU + 4-frame prefetch via `SerFramePrefetcher`. Compare side panel (toolbar `B`) shows current file + source SER thumbnails at default 2× zoom with linked pinch + drag. Step 1 + Step 2 reset buttons. AVI pipeline confirmed working on AVFoundation-supported video; SharpCap raw AVI documented as the open codec gap. **All 301 unit tests + 6/6 F3 baselines still byte-identical (default-off flags ensure no behaviour drift).**
 
 **Top of stack for next session:**
 

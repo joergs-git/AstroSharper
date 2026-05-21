@@ -86,6 +86,16 @@ final class AppModel: ObservableObject {
     // Replaced the old Before/After main-view flip toggle (2026-05-03).
     @Published var compareSidePanelVisible: Bool = false
 
+    /// Highlight-clipped overlay (LSW 8.8 parity). When on, the preview
+    /// shader tints every pixel that reaches the display's max output
+    /// (per-channel ≥ 0.995 after the full display chain) solid red so
+    /// the user can see at a glance which features are blowing out
+    /// after sharpen / deconv / tone-curve. Purely diagnostic — never
+    /// touches the pipeline or the saved file. Toggled from the toolbar
+    /// (keyboard shortcut "C"). Default OFF so first-time users aren't
+    /// startled by a red planet limb.
+    @Published var highlightClipped: Bool = false
+
     /// URL of the source SER that produced the most recent
     /// lucky-stack output. Set by `runNextLuckyStackItem` and read by
     /// the compare side panel for the "before stack" thumbnail.

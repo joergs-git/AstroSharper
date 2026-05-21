@@ -57,6 +57,20 @@ enum Stack {
         // `feedback_autopsf_lunar_bail.md`. Only meaningful when
         // `--auto-psf` is also passed.
         var useAutoPSFAutoROI = false
+        // Synthetic-PSF fallback (LSW 3.2.1 parity at the cascade
+        // tail). Default OFF per the lunar-bail lesson — a guess σ
+        // can over-sharpen or halo subjects where AutoPSF correctly
+        // refused to measure. Opt in with `--synthetic-psf` once you
+        // have a feel for whether your subject benefits.
+        var useAutoPSFSyntheticFallback: Bool = false
+        var syntheticPSFSeeingIndex: Double = 3.0
+        // Pre-sharpen highlight suppression (LSW 3.1.3 parity). Default
+        // ON because the bare-stack p99 ≥ 0.98 gate ensures it only
+        // engages when there's a real about-to-clip risk. CLI escape
+        // hatch `--no-pre-sharpen-suppression` for empirical regression
+        // bracketing.
+        var preSharpenSuppression: Bool = true
+        var preSharpenSuppressKnee: Double = 0.85
         var useAutoKeep = false
         var keepWasExplicit = false
         var denoisePrePercent: Int = 0
@@ -394,6 +408,33 @@ enum Stack {
                 // estimation runs first regardless.
                 useAutoPSFAutoROI = true
                 i += 1
+            case "--synthetic-psf":
+                useAutoPSFSyntheticFallback = true
+                i += 1
+            case "--no-synthetic-psf":
+                useAutoPSFSyntheticFallback = false
+                i += 1
+            case "--seeing-index":
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v >= 1.0, v <= 5.0
+                else {
+                    cliStderr("stack: --seeing-index requires a value in [1, 5] (Meteoblue scale — 1 = poor, 5 = excellent)")
+                    return 64
+                }
+                syntheticPSFSeeingIndex = v
+                i += 2
+            case "--no-pre-sharpen-suppression":
+                preSharpenSuppression = false
+                i += 1
+            case "--pre-sharpen-knee":
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v >= 0.5, v < 1.0
+                else {
+                    cliStderr("stack: --pre-sharpen-knee requires a value in [0.5, 1.0) — 0.85 default, lower = stronger compression")
+                    return 64
+                }
+                preSharpenSuppressKnee = v
+                i += 2
             case "--auto-psf-snr":
                 guard i + 1 < args.count, let v = Double(args[i + 1]),
                       v.isFinite, v > 0
@@ -681,12 +722,16 @@ enum Stack {
             options.useAutoPSF = useAutoPSF
             options.autoPSFSNR = autoPSFSNR
             options.useAutoPSFAutoROI = useAutoPSFAutoROI
+            options.useAutoPSFSyntheticFallback = useAutoPSFSyntheticFallback
+            options.syntheticPSFSeeingIndex = syntheticPSFSeeingIndex
             options.autoTileSizeFromScope = autoTileSizeFromScope
             options.scopeFocalLengthMM = scopeFocalLengthMM
             options.scopePixelPitchUm = scopePixelPitchUm
             options.scopeBarlowMagnification = scopeBarlowMagnification
             options.captureGamma = captureGamma
             options.processLuminanceOnly = processLuminanceOnly
+            options.preSharpenSuppression = preSharpenSuppression
+            options.preSharpenSuppressKnee = preSharpenSuppressKnee
             options.borderCropPixels = borderCropPixels
             options.outputWhiteCap = outputWhiteCap
             options.disableOutputRemap = disableOutputRemap

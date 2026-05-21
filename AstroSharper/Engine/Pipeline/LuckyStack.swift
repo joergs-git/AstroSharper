@@ -268,6 +268,35 @@ struct LuckyStackOptions {
     /// geometry-free.
     var useAutoPSFAutoROI: Bool = false
 
+    /// Seeing-index-driven synthetic PSF fallback (LSW 3.2.1 parity).
+    /// When `useAutoPSF` is on AND both the planetary limb-LSF and the
+    /// auto-ROI step-edge estimators bail, the cascade falls through
+    /// to a synthetic Gaussian with σ chosen by the seeing index
+    /// (Meteoblue scale 1–5). RFF + tiled-deconv are skipped under
+    /// the synthetic case — no disc geometry, no per-tile PSF support.
+    ///
+    /// Default OFF per `feedback_autopsf_lunar_bail.md`: a wrong σ is
+    /// worse than no deconv at all, and a "guess" σ from the user's
+    /// chosen seeing index IS a guess. CLI `--synthetic-psf` opts
+    /// in; pair with `--seeing-index N` to pick the σ. The defaults
+    /// make this safe for the F3 regression set (BiggSky planetary
+    /// fixtures pass through the planetary estimator, lunar / solar
+    /// fixtures land at "bare stack" exactly as the baselines expect).
+    var useAutoPSFSyntheticFallback: Bool = false
+    var syntheticPSFSeeingIndex: Double = 3.0
+
+    /// Pre-sharpen highlight suppression (LSW 3.1.3 parity). When the
+    /// bare stack has p99 ≥ 0.98, soft-clips the brightest 5-15% via a
+    /// hue-preserving tanh roll-off BEFORE Wiener so the deconv can't
+    /// push already-bright pixels past clipping. Fixes the
+    /// "upper-half over-exposure on Jupiter" bug logged in tasks/todo.md
+    /// (polar regions reaching ~1.0 luma after Wiener restored high-
+    /// frequency energy on top of already-bright peaks).
+    /// Default ON. Set `preSharpenSuppressKnee` to 0 (or any value
+    /// outside [0.5, 0.99]) to fully disable.
+    var preSharpenSuppression: Bool = true
+    var preSharpenSuppressKnee: Double = 0.85
+
     /// Capture-gamma compensation around the auto-PSF + Wiener post-pass
     /// (Block C.6). 1.0 = no correction (data assumed linear). Typical
     /// SharpCap / FireCapture defaults apply gamma 2.0 by default; pre-
@@ -805,7 +834,9 @@ enum LuckyStack {
                     let psfPreflight = AutoPSF.estimateCascade(
                         texture: final,
                         device: device,
-                        autoROIFallback: options.useAutoPSFAutoROI
+                        autoROIFallback: options.useAutoPSFAutoROI,
+                        syntheticFallback: options.useAutoPSFSyntheticFallback,
+                        syntheticSeeingIndex: Float(options.syntheticPSFSeeingIndex)
                     )
 
                     if let psfEst = psfPreflight {
@@ -829,6 +860,16 @@ enum LuckyStack {
                             NSLog("AutoPSF: auto-ROI σ=%.2f conf=%.2f dirStd=%.1f° stepC=%.3f at (%.0f, %.0f) — RFF skipped (no disc geometry)",
                                   r.sigma, r.confidence, r.dirStdDeg, r.stepContrast,
                                   r.edgePoint.x, r.edgePoint.y)
+                        case .synthetic(let s, let seeing):
+                            // Treat like auto-ROI for downstream gating:
+                            // no disc geometry → no RFF (which assumes
+                            // planetary disc), and downstream tiled-deconv
+                            // also skipped under `psfIsAutoROI` so we
+                            // route through the same code path.
+                            psfIsAutoROI = true
+                            psfPlanetary = nil
+                            NSLog("AutoPSF: synthetic σ=%.2f from seeing-index=%.1f — RFF + tiled-deconv skipped (no measured geometry)",
+                                  s, seeing)
                         }
 
                         // Stage 1: pre-denoise (Block C.5 first half).
@@ -840,6 +881,39 @@ enum LuckyStack {
                                 device: device
                             ) {
                                 final = denoised
+                            }
+                        }
+
+                        // Stage 1.5: pre-sharpen highlight suppression
+                        // (LSW 3.1.3 parity). Soft-clips luma above the
+                        // knee BEFORE Wiener fires so deconvolution can't
+                        // push already-bright pixels past clipping —
+                        // fixes the upper-half overexposure on stacked
+                        // Jupiter output that the symmetric percentile
+                        // remap can't recover from at the saved-file
+                        // stage. Auto-engages only when the bare stack
+                        // has p99 ≥ 0.98 (genuine about-to-clip
+                        // highlights); lunar / solar frames with
+                        // well-distributed bright pixels are passed
+                        // through unchanged so the kernel never softens
+                        // the wide-range cases the auto-recovery wants
+                        // to see at full dynamic range.
+                        if options.preSharpenSuppression {
+                            if let pts = pipeline.computeLumaPercentiles(
+                                input: final,
+                                lowPercentile: 0.01,
+                                highPercentile: 0.99
+                            ), HighlightSuppression.shouldEngage(highlightP99: pts.white) {
+                                if let suppressed = HighlightSuppression.apply(
+                                    input: final,
+                                    knee: Float(options.preSharpenSuppressKnee),
+                                    pipeline: pipeline,
+                                    device: device
+                                ) {
+                                    NSLog("Pre-sharpen highlight suppression: p99=%.3f knee=%.2f engaged",
+                                          pts.white, options.preSharpenSuppressKnee)
+                                    final = suppressed
+                                }
                             }
                         }
 
@@ -979,9 +1053,18 @@ enum LuckyStack {
                             }
                         }
                     } else {
-                        let cascadeNote = options.useAutoPSFAutoROI
-                            ? "planetary + auto-ROI both bailed"
-                            : "planetary bailed (auto-ROI cascade not enabled — pass --auto-psf-roi or toggle GUI sub-switch to try the lunar / textured fallback)"
+                        // Cascade landed at nil — which means at least
+                        // one fallback was disabled. Surface which one
+                        // so the user knows whether to enable the auto-
+                        // ROI or synthetic path next time.
+                        var notes: [String] = []
+                        if !options.useAutoPSFAutoROI {
+                            notes.append("auto-ROI cascade not enabled — pass --auto-psf-roi for lunar / textured fallback")
+                        }
+                        if !options.useAutoPSFSyntheticFallback {
+                            notes.append("synthetic fallback disabled — re-enable for a seeing-index σ when measurement bails")
+                        }
+                        let cascadeNote = notes.isEmpty ? "all cascade paths bailed" : notes.joined(separator: "; ")
                         NSLog("AutoPSF: estimation skipped (%@); bare stack written, dual-stage denoise also skipped since it wraps the deconv it has nothing to do without", cascadeNote)
                     }
                 }
