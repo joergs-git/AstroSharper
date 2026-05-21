@@ -179,12 +179,66 @@ struct PreviewView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: app.previewError)
+            // Preemptive "pick a target" banner. Appears any time the user
+            // has SER input loaded but hasn't picked a target preset —
+            // before they press Run Lucky Stack and bounce off the
+            // .error("Pick a target first") status-bar message that was
+            // too easy to miss (low contrast text in the menubar). Big +
+            // red + dead centre over the preview makes the next step
+            // unmistakable. Auto-clears the moment the user clicks a
+            // target chip; never blocks the preview itself (lower z).
+            .overlay(alignment: .top) {
+                if needsTargetPickWarning {
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.white)
+                            .font(.system(size: 22, weight: .bold))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Pick a target first")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundColor(.white)
+                            Text("Click one of the planet / Sun / Moon chips at the top of the window before Run Lucky Stack.")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.white.opacity(0.92))
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
+                    .frame(maxWidth: 620)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.red.opacity(0.85))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.30), lineWidth: 1)
+                    )
+                    .padding(.top, 56)   // sit below the previewError banner if both fire
+                    .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .allowsHitTesting(false)   // never block the preview underneath
+                }
+            }
+            .animation(.easeInOut(duration: 0.22), value: needsTargetPickWarning)
             // Mini-map overlay was disabled — pan/zoom recomputed it on
             // every drag tick, and the user found it slow without
             // commensurate value. The view + computation helpers stay in
             // the codebase (PreviewMiniMap.swift, publishViewport()) for
             // future revival.
             .environmentObject(app)
+    }
+
+    /// True when the user has SER input visible (Inputs section + at
+    /// least one .ser in the catalog) but no target preset is active.
+    /// The Lucky Stack run will reject in that state — surface it
+    /// preemptively so the user can fix it before pressing Run.
+    private var needsTargetPickWarning: Bool {
+        guard app.displayedSection == .inputs else { return false }
+        guard app.presets.activeID == nil else { return false }
+        return app.catalog.files.contains { $0.isSER }
     }
 
     private func jobOverlayLabel(processed: Int, total: Int) -> String {
@@ -1374,13 +1428,18 @@ final class ZoomableMTKView: MTKView {
         guard isPanDragging else { return }
 
         let current = toDrawable(convert(event.locationInWindow, from: nil))
-        // Hand-tool pan — image follows the cursor on BOTH axes.
-        // Subtracting the Y delta makes the image follow the hand
-        // (the shader's panPx.y convention is inverted from what one
-        // would naively expect; this empirical sign matches the X
-        // axis behaviour).
+        // Hand-tool pan — image follows the cursor on both axes.
+        // X: AppKit and shader agree on direction (right is +). Drag
+        //    right → see more of left side → cx decreases → panPx.x
+        //    must go negative → subtract the positive delta.
+        // Y: AppKit Y is bottom-up (+ = mouse moved up), but the shader's
+        //    `cy = 0.5 - panPx.y / …` interprets a NEGATIVE panPx.y as
+        //    "shift content up". Earlier subtract-on-both-axes was the
+        //    bug: dragging up made the image drift down (user-reported
+        //    2026-05-21). Subtract on X, ADD on Y → hand-tool follow on
+        //    both axes.
         c.panPx.x = panStartOffset.x - Float(current.x - panDragStart.x)
-        c.panPx.y = panStartOffset.y - Float(current.y - panDragStart.y)
+        c.panPx.y = panStartOffset.y + Float(current.y - panDragStart.y)
         needsDisplay = true
     }
 

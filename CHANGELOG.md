@@ -6,6 +6,43 @@ the project follows semantic versioning once it leaves 0.x.
 ## [Unreleased]
 
 ### Added
+- **LSW 6.21.1 parity wave** (2026-05-21) — five LuckyStackWorker User Manual
+  gaps closed under the Quality + Speed + minimal-user-action filter:
+  - **Highlight-clipped overlay** (LSW 8.8). Toolbar toggle, keyboard shortcut
+    `C`. Tints per-channel ≥ 0.995 pixels solid red over the preview so polar
+    overexposure / Wiener overshoot is visible at a glance. Saved files
+    unaffected.
+  - **Pre-sharpen highlight suppression** (LSW 3.1.3). Hue-preserving tanh
+    roll-off above knee 0.85 fires in the AutoPSF post-pass when the bare
+    stack's p99 ≥ 0.98. Default ON; fixes the long-open upper-half
+    over-exposure on stacked Jupiter output. CLI `--no-pre-sharpen-suppression`
+    + `--pre-sharpen-knee N`.
+  - **Channel-Normalize** (LSW 7.2.1). Per-channel histogram stretch aligning
+    [p1, p99] windows on the green reference. Auto-engaged for OSC sources
+    via `OscDefaults.applyDefaults` as a sibling of `autoWB`.
+  - **Synthetic-PSF cascade fallback** (LSW 3.2.1). `AutoPSF.estimateCascade`
+    gains a seeing-index-driven Gaussian fall-through after planetary +
+    auto-ROI both bail. Default OFF per the lunar-bail lesson; opted in via
+    CLI `--synthetic-psf --seeing-index N` (Meteoblue 1–5 scale).
+  - **Purple-fringe auto-suppression** (LSW 7.1). Hue-targeted desaturation
+    around 290° with cos² falloff over ±30°. Auto-engaged on OSC sources
+    alongside autoWB + channelNormalize.
+
+### Fixed
+- **Output tab post-Apply lands on the newest file** instead of the
+  alphabetically-first one. `scanOutputFolder` now sorts by
+  `contentModificationDate` so Apply Sharpen / Apply Tone Curve runs select
+  + preview the file the batch just wrote, not a leftover from an earlier
+  session.
+- **Mouse-pan Y-axis inversion**. Dragging up no longer drives the image
+  down. AppKit's bottom-up `+Y` mouse delta now pairs with the shader's
+  top-down UV via `panPx.y = startOffset.y + delta.y` (X stays
+  `- delta.x`); hand-tool semantics restored on both axes.
+- **`batchTargetIDs` preview-file fallback**. Run Lucky Stack no longer
+  requires an extra click when a single file is already shown in the
+  preview — `previewFileID` is treated as the implicit target if nothing
+  is marked or selected. Precedence stays `marked > selected > preview`.
+
 - **AVI / MOV / MP4 / M4V lucky-stack** (E.1 SourceReader-driven LuckyRunner).
   `LuckyRunner` now consumes the `SourceReader` protocol instead of being
   hard-wired to `SerReader`. SER captures keep the zero-copy mmap fast path
@@ -21,6 +58,11 @@ the project follows semantic versioning once it leaves 0.x.
 ### Changed
 - CLI `astrosharper stack` accepts `.avi / .mov / .mp4 / .m4v` in addition
   to `.ser`.
+- **"Pick a target first" warning** moved from the small status-bar error
+  to a big red banner over the preview. Auto-engages whenever SER input is
+  loaded but no target preset is active; auto-clears the moment a target
+  chip is clicked. `allowsHitTesting(false)` so it never blocks the
+  preview underneath.
 
 ### Internal
 - `project.yml` pins `ARCHS = arm64` + `EXCLUDED_ARCHS = x86_64`. Engine

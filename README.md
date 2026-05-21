@@ -70,6 +70,18 @@ A second wave of "automate the parameter most users get wrong" landed on top of 
 - **SER playback LRU cache + 4-frame prefetcher** — 16-slot RAM cache keyed by `(url, frameIndex)` plus background-queue look-ahead. NAS-based playback now hits cache instead of disk on most ticks; the prefetcher keeps the next 4 frames warm.
 - **AVI smoke test** — pipeline works for AVFoundation-supported formats; SharpCap raw mono AVI (`codec=rawvideo` + `pal8` + zeroed FourCC) is the documented blocker. Error message now points users to the ffmpeg one-liner workaround (`ffmpeg -i in.avi -c:v prores -profile:v 4 out.mov`). Native rawvideo decoder on the roadmap.
 
+### LSW 6.21.1 parity wave — *new (2026-05-21)*
+
+A targeted comparison against the LuckyStackWorker User Manual surfaced five gaps worth closing under the Quality + Speed + minimal-user-action filter. All five shipped automatic by default where it's safe; mono / non-OSC sources stay numerically unchanged.
+
+- **Highlight-clipped overlay** (LSW 8.8 parity) — toolbar toggle, keyboard shortcut `C`. Tints per-channel ≥ 99.5 % pixels solid red over the live preview so polar overexposure / Wiener overshoot is visible at a glance. Pure diagnostic — saved files unaffected.
+- **Pre-sharpen highlight suppression** (LSW 3.1.3 parity) — hue-preserving tanh roll-off above luma 0.85 fires automatically in the AutoPSF post-pass when the bare stack's p99 ≥ 0.98. Lets Wiener restore high-frequency detail without driving already-bright pixels past clipping. Default ON. Fixes the long-standing upper-half over-exposure on stacked Jupiter output that the symmetric percentile remap couldn't recover from.
+- **Channel-Normalize** (LSW 7.2.1 parity) — per-channel histogram stretch aligning the R / G / B [p1, p99] windows on the green channel's range. Catches the greenish-highlight skew that gray-world WB leaves behind on OSC bayer captures (WB aligns means; this aligns ranges). Auto-engaged for OSC sources alongside autoWB.
+- **Purple-fringe auto-suppression** (LSW 7.1 parity) — hue-targeted desaturation around the 290° purple band with cos² falloff over ±30°. Cleans up the violet fringe around bright planetary limbs / lunar terminators that OSC bayer chromatic aberration leaves behind. Other hues pass through unchanged. Auto-engaged on OSC alongside autoWB + channelNormalize.
+- **Synthetic-PSF cascade fallback** (LSW 3.2.1 parity at the cascade tail) — when both the planetary limb-LSF and auto-ROI step-edge estimators bail (lunar / textured / cropped subjects), the cascade can fall through to a seeing-index-driven Gaussian σ instead of skipping deconv entirely. Default OFF per the lunar-bail lesson (a wrong σ is worse than nothing); opt in via CLI `--synthetic-psf --seeing-index N` (Meteoblue 1 = poor → 5 = excellent → σ ∈ [3.9, 1.5] px).
+
+Same session also picked up four UX bugs surfaced during testing: output tab post-Apply now lands on the newest file (not the alphabetically-first leftover), `batchTargetIDs` falls back to the previewed file when nothing is marked / selected (no extra-click needed when only one file is loaded), "Pick a target first" moved from the easy-to-miss status bar to a big red banner over the preview, and mouse pan no longer inverts the Y axis (drag up actually moves the image up).
+
 ### Smart Auto-PSF + Radial Fade Filter (RFF)
 
 - **One toggle, three planets, zero parameters.** AutoPSF measures Gaussian PSF σ from the planetary limb's line-spread function — no manual sigma, no tile grid.

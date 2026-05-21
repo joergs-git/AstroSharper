@@ -26,6 +26,12 @@ A running record of where we are, what's done, and what's next. Update at the en
 
 5. **F3 v1.4 polish** & **B.6 / D.1 / A.2 / A.3** as before.
 
+**UX fixes shipped same session (post-`15b3c40`):**
+- Output tab after Apply Sharpen / Apply Tone now selects the newest-mtime file (was alphabetically-first → frequently landed on a stale 2026-02 leftover).
+- `batchTargetIDs` falls back to `previewFileID` when nothing is marked / selected — single-file workflows no longer require an extra click on the only visible file.
+- "Pick a target first" warning moved to a big red banner over the preview (was barely-visible status-bar text); preemptive, auto-clears on target click.
+- Mouse pan Y-axis inversion fixed — drag up now moves image up (was inverted; X was always correct). AppKit's `+Y` mouse-up motion now pairs with `+ delta` on `panPx.y` while X stays `- delta.x`.
+
 ---
 
 **Previous suggested-focus block (kept for context):** C.2 + C.4 + A.5 (v0+v1) + sRGB tone + Hα fix + LRU prefetch + AVI smoke + Step1/2 reset + Compare side panel all shipped on `feature/v1-foundation`. AutoPSF cascades to `AutoPSFAutoROI` for lunar / textured (default OFF, validated end-to-end on 13 GB lunar SER — gentle Wiener, no ringing, conservative gate doing its job). Scope-formula tile size live (`--auto-tile-size --focal-length-mm N --pixel-pitch-um N [--barlow N]`). HUD now shows median HFR + Drift sparkline after Stabilize. Tone-op block runs in perceptual sRGB (gamma-encode → ops → gamma-decode wrap). AP-cell quilting on solar Hα fixed (rank sigmoid 10 % → 20 %). SER LRU + 4-frame prefetch via `SerFramePrefetcher`. Compare side panel (toolbar `B`) shows current file + source SER thumbnails at default 2× zoom with linked pinch + drag. Step 1 + Step 2 reset buttons. AVI pipeline confirmed working on AVFoundation-supported video; SharpCap raw AVI documented as the open codec gap. **All 301 unit tests + 6/6 F3 baselines still byte-identical (default-off flags ensure no behaviour drift).**

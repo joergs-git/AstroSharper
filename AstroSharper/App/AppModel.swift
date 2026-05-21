@@ -414,8 +414,20 @@ final class AppModel: ObservableObject {
     }
 
     // Which file IDs are the actual batch target right now.
+    //
+    // Precedence: marked > selected > implicit-preview-fallback. The
+    // fallback covers the "I only have one file and it's already
+    // showing in the preview" case — selecting it explicitly is then
+    // a redundant click. We only apply the fallback when nothing else
+    // is selected AND the previewed file is part of the current catalog
+    // (so the fallback never picks a stale ID after a section switch).
     var batchTargetIDs: Set<FileEntry.ID> {
-        markedFileIDs.isEmpty ? selectedFileIDs : markedFileIDs
+        if !markedFileIDs.isEmpty { return markedFileIDs }
+        if !selectedFileIDs.isEmpty { return selectedFileIDs }
+        if let id = previewFileID, catalog.files.contains(where: { $0.id == id }) {
+            return Set([id])
+        }
+        return []
     }
 
     var canApply: Bool {
@@ -2024,17 +2036,41 @@ final class AppModel: ObservableObject {
 
     /// Scan an output folder and add every supported file we find to the
     /// OUTPUTS section (replacing any prior contents from the same root).
+    ///
+    /// Picks the NEWEST file (by modification date) as preview / selection
+    /// rather than the alphabetically-first one. When this runs after a
+    /// fresh Apply Sharpen / Apply Tone Curve batch the user expects the
+    /// file the run just wrote — `FileCatalog` itself sorts alphabetically
+    /// so `.files.first` would otherwise surface a stale 2026-02 file
+    /// from an earlier session instead of today's just-written TIFF.
     private func scanOutputFolder(_ folder: URL, autoSwitch: Bool) {
         outputsRootURL = folder
         var newCat = FileCatalog()
         newCat.load(from: folder)
 
+        let newestID = newCat.files
+            .max(by: { (a, b) in
+                let ma = (try? a.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let mb = (try? b.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return ma < mb
+            })?.id
+        let previewID = newestID ?? newCat.files.first?.id
+        let selection = previewID.map { Set([$0]) } ?? []
+
         if displayedSection == .outputs {
             catalog = newCat
-            previewFileID = newCat.files.first?.id
+            previewFileID = previewID
+            // Mirror the selection onto the just-written file so the
+            // row is highlighted in the file list AND a follow-up Apply
+            // / Lucky Stack action picks the same file without a click.
+            selectedFileIDs = selection
+            markedFileIDs.removeAll()
         } else {
             var stash = stashedStates[.outputs] ?? CatalogSectionState()
             stash.catalog = newCat
+            stash.preview = previewID
+            stash.selected = selection
+            stash.marked = []
             stashedStates[.outputs] = stash
         }
         for entry in newCat.files {
