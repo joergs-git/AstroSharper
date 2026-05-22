@@ -25,11 +25,16 @@ struct ContentView: View {
             SettingsPanel()
                 .frame(minWidth: 280, idealWidth: 320, maxWidth: 400)
 
+            // VSplitView gives a draggable divider between the preview and
+            // the file list — drag it to rebalance. Defaults favour the
+            // preview (large idealHeight) over the file list (compact
+            // idealHeight) so the image gets the room by default; the user
+            // drags the divider down to see more files when needed.
             VSplitView {
                 VStack(spacing: 0) {
                     HStack(spacing: 0) {
                         PreviewView()
-                            .frame(minHeight: 240)
+                            .frame(minHeight: 200)
                         if app.compareSidePanelVisible {
                             Divider()
                             CompareSidePanel()
@@ -44,11 +49,12 @@ struct ContentView: View {
                         TransportBar()
                     }
                 }
+                .frame(minHeight: 200, idealHeight: 520)
                 VStack(spacing: 0) {
                     SectionToggleBar()
                     FileListView()
                 }
-                .frame(minHeight: 180, idealHeight: 280)
+                .frame(minHeight: 90, idealHeight: 170)
             }
             .frame(minWidth: 500)
         }

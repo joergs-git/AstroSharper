@@ -897,6 +897,8 @@ enum Stack {
             break  // top-level reports the URL + elapsed
         case .error(let message):
             cliStderr("[stack] ERROR: \(message)")
+        case .cancelled:
+            cliStderr("[stack] cancelled")
         }
     }
 

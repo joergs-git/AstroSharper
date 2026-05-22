@@ -37,7 +37,7 @@ struct HowToView: View {
                     StepCard(
                         number: 2,
                         title: "Flip AutoNuke ON, hit Run",
-                        detail: "Open the Lucky Stack section, toggle AutoNuke. The engine then picks AP grid + patchHalf + multi-AP yes/no + auto-PSF σ + keep-% per data — all manual sliders grey out so there are no conflicting settings. Bake-in and Auto-tone stay independent (output-style choices). The Saved-file pipeline summary line under the toggles tells you exactly which paths will modify the saved TIFF."
+                        detail: "Open the Lucky Stack section, toggle AutoNuke. The engine then picks AP grid + patchHalf + multi-AP yes/no + auto-PSF σ + keep-% per data — all manual sliders grey out so there are no conflicting settings. Bake-in and Auto-tone stay independent (output-style choices). The Saved-file pipeline summary line under the toggles tells you exactly which paths will modify the saved TIFF. Note: for SOLAR surface (granulation / sunspots) the dedicated Sun presets beat AutoNuke — they run with multi-AP OFF + sigma-clip, because per-cell alignment smears low-contrast solar surface and warps the limb."
                     )
                     StepCard(
                         number: 3,
@@ -113,6 +113,10 @@ struct HowToView: View {
                               text: "⌘+ zoom in 25% · ⌘- zoom out 25% · ⌘0 fit · ⌘1 1:1 · ⌘2 1:2 · ⌘3 1:4 · ⌘4 1:8.")
                     BulletRow(icon: "rectangle.split.2x1", color: .cyan,
                               text: "B = toggle Compare side panel. Top thumbnail = the current displayed file (no manipulations); bottom = the source SER's first frame (populated when Lucky Stack runs). Default 2× zoom, linked pinch + drag, double-click any thumb to reset.")
+                    BulletRow(icon: "rectangle.stack.fill", color: .indigo,
+                              text: "SER scrub bar: drag the slider for live frame-by-frame movement (updates as you drag, not just on release), ◀ ▶ step one frame, P play/pause. The full pipeline + auto-range re-run once you stop, so fast scanning stays instant even on multi-GB captures.")
+                    BulletRow(icon: "info.circle", color: .gray,
+                              text: "i = info HUD (off by default — no longer covers the image on open). C = highlight clipped pixels red. A = display auto-range.")
 
                     Divider().padding(.vertical, 4)
 

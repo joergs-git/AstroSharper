@@ -1784,6 +1784,46 @@ kernel void compute_ap_shifts(
             return;
         }
 
+        // Aperture-problem rejection. A cell sitting on a smooth, locally-
+        // straight edge (the curved solar limb, a planetary terminator)
+        // has a SAD VALLEY along the edge tangent — the minimum is sharp
+        // perpendicular to the edge but flat ALONG it, so the depth gate
+        // above passes while the along-edge shift component is arbitrary.
+        // Neighbouring cells then shift their slice of the edge by
+        // different amounts → the edge zig-zags into the blocky "kink"
+        // seen on partial solar discs. Likewise low-contrast granulation
+        // gives a shallow rise in both axes.
+        //
+        // Require the SAD to rise by at least `minRise` (relative to the
+        // mean) when stepping ±1 px in BOTH x AND y from the winner — i.e.
+        // the cell must contain a genuine 2D feature (sunspot, crater,
+        // GRS) to earn a local shift. Edge / flat cells fall back to the
+        // global phase-corr alignment (zero local shift), which is what
+        // makes the Full-Disk/lightspeed path look cleaner on these
+        // subjects. Winners pinned to the search-window boundary can't
+        // form the rise test → rejected (boundary picks are unreliable).
+        const float minRise = 0.04;
+        bool wellPosedX = (wxi > 0 && wxi < range - 1);
+        bool wellPosedY = (wyi > 0 && wyi < range - 1);
+        if (!wellPosedX || !wellPosedY) {
+            shiftMap.write(float4(0, 0, 0, 0), uint2(apX, apY));
+            return;
+        }
+        {
+            float c  = sadGrid[wyi * range + wxi];
+            float lx = sadGrid[wyi * range + (wxi - 1)];
+            float rx = sadGrid[wyi * range + (wxi + 1)];
+            float uy = sadGrid[(wyi - 1) * range + wxi];
+            float dy = sadGrid[(wyi + 1) * range + wxi];
+            float riseX = min(lx, rx) - c;
+            float riseY = min(uy, dy) - c;
+            float thresh = minRise * meanSAD;
+            if (riseX < thresh || riseY < thresh) {
+                shiftMap.write(float4(0, 0, 0, 0), uint2(apX, apY));
+                return;
+            }
+        }
+
         // Sub-pixel parabolic refinement of the integer SAD minimum. The
         // SAD surface in a small neighbourhood of the true offset is well-
         // approximated by a 2nd-order polynomial; fitting a 1D parabola

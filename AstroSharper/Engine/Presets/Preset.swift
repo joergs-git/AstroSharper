@@ -208,13 +208,25 @@ enum BuiltInPresets {
         s.lrEnabled = false
         s.waveletEnabled = true
         s.waveletScales = [2.4, 1.6, 0.8, 0.4]   // boost finest, taper coarse
+        // Stacking retune (2026-05-22): multi-AP OFF + sigma-clip + lower
+        // keep. A 10-run headless benchmark on a LUNT partial-disc white-
+        // light SER showed dense multi-AP (12×12) was the WORST of all
+        // tested combos — it smears low-contrast granulation and warps the
+        // smooth limb (aperture problem). Scientific reference-build +
+        // global alignment + sigma-clip + keep 20% scored within a hair of
+        // the lightspeed best, with better outlier rejection. See
+        // tasks/lessons.md 2026-05-22.
+        var d = LuckyPresetDetails()
+        d.sigmaClipEnabled = true
+        d.sigmaClipThreshold = 2.5
         return Preset(
             name: "Sun — Granulation",
-            target: .sun, notes: "Fine-scale granulation. Sharp wavelet1, mild unsharp.",
+            target: .sun, notes: "Fine-scale granulation. Scientific stack, sigma-clip, NO multi-AP (it smears low-contrast solar surface).",
             isBuiltIn: true,
             sharpen: s,
-            luckyMode: .scientific, luckyKeepPercent: 30,
-            luckyMultiAPGrid: 12, luckyMultiAPPatchHalf: 24
+            luckyMode: .scientific, luckyKeepPercent: 20,
+            luckyMultiAPGrid: 0, luckyMultiAPPatchHalf: 24,
+            luckyDetails: d
         )
     }
     private static func sunFullDisk() -> Preset {
@@ -252,13 +264,22 @@ enum BuiltInPresets {
         t.enabled = true
         // Strong stretch — typical Hα off-limb workflow.
         t.controlPoints = [.init(x: 0, y: 0), .init(x: 0.05, y: 0), .init(x: 0.25, y: 0.85), .init(x: 1, y: 1)]
+        // Multi-AP OFF here too — off-limb Hα is even lower-contrast than
+        // white-light granulation, so per-cell SAD correlation is noise-
+        // dominated. Keeps the higher keep-% (40) for SNR on the faint
+        // prominences (unlike Granulation, this isn't a sharpness-limited
+        // surface target). Sigma-clip rejects the worst seeing frames.
+        var d = LuckyPresetDetails()
+        d.sigmaClipEnabled = true
+        d.sigmaClipThreshold = 2.5
         return Preset(
             name: "Sun — Hα Prominence",
-            target: .sun, notes: "Off-limb Hα prominences: strong stretch, soft sharpen.",
+            target: .sun, notes: "Off-limb Hα prominences: strong stretch, soft sharpen, sigma-clip, no multi-AP.",
             isBuiltIn: true,
             sharpen: s, toneCurve: t,
             luckyMode: .scientific, luckyKeepPercent: 40,
-            luckyMultiAPGrid: 8, luckyMultiAPPatchHalf: 32
+            luckyMultiAPGrid: 0, luckyMultiAPPatchHalf: 32,
+            luckyDetails: d
         )
     }
 

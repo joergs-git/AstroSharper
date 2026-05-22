@@ -207,6 +207,10 @@ final class AppModel: ObservableObject {
     @Published var previewSerFrameIndex: Int = 0
     @Published var previewSerFrameCount: Int = 0
 
+    /// Handle to the in-flight lucky-stack engine task, so the progress
+    /// overlay's Stop button can cancel it. nil when no stack is running.
+    var luckyStackTask: Task<Void, Never>?
+
     // In-memory playback / sequence state. Populated by "Run Stabilize" so the
     // user can scrub, play and export the aligned frames before committing
     // anything to disk. Disk export becomes a separate explicit action.
@@ -251,7 +255,9 @@ final class AppModel: ObservableObject {
     // `previewStats` is filled by PreviewCoordinator as data becomes
     // available (header → current frame → distribution).
     @Published var previewStats: PreviewStats = PreviewStats()
-    @Published var hudVisible: Bool = true
+    // Default OFF — the info overlay obscures the image on first open;
+    // the user toggles it on (the "i" button) when they want the stats.
+    @Published var hudVisible: Bool = false
 
     /// Visible viewport in normalised image coordinates (0…1, top-left
     /// origin). Mini-map overlay was disabled — kept on the model so the
@@ -445,7 +451,13 @@ final class AppModel: ObservableObject {
             return suggested
         }
         if let fallback = sandboxDefaultOutputFolder(), canWriteAt(folder: fallback) {
-            autoOutputFolder = fallback
+            // Do NOT pin the sandbox container into `autoOutputFolder`.
+            // Pinning made the fallback sticky: once it fired (e.g. a
+            // single-file open with no folder scope), every later run
+            // preferred the sandbox container even after opening a
+            // writable folder. Return it transiently instead so the next
+            // open / watch re-tries the real next-to-input location.
+            NSLog("Output folder: no writable location next to input — using sandbox container fallback")
             return fallback
         }
         return nil
@@ -1342,6 +1354,20 @@ final class AppModel: ObservableObject {
         persistWatchFolderBookmark(url)
         watchedFolderURL = url
 
+        // Land auto-stacked outputs in `<watchedFolder>/_luckystack` — the
+        // user expects them next to the captures, and we hold a read-write
+        // folder scope on the watch folder (it came from a folder picker),
+        // so the write succeeds where a single-file open's parent wouldn't.
+        // No circular-stack risk: outputs are .tif and the watcher scans
+        // only .ser non-recursively, so the subfolder is never re-ingested.
+        // An explicit user-picked output folder still wins (not overridden).
+        if pickedOutputFolder == nil {
+            let watchOut = url.appendingPathComponent("_luckystack", isDirectory: true)
+            if canWriteAt(folder: watchOut) {
+                autoOutputFolder = watchOut
+            }
+        }
+
         // Backlog snapshot — every .ser already present is treated as
         // already-handled so we only auto-stack files that ARRIVE later.
         watchSeenURLs = Set(currentSerURLs(in: url))
@@ -1731,7 +1757,7 @@ final class AppModel: ObservableObject {
             ])?.rawValue
         let autoNukeAtStart = luckyStack.autoNuke
 
-        LuckyStack.run(
+        luckyStackTask = LuckyStack.run(
             sourceURL: item.url,
             outputURL: outURL,
             options: perItemOpts,
@@ -1803,8 +1829,32 @@ final class AppModel: ObservableObject {
                 self.luckyStack.queue[nextIdx].status = .error
                 self.luckyStack.queue[nextIdx].statusText = msg
                 self.runNextLuckyStackItem(outputFolder: outputFolder, options: options)
+            case .cancelled:
+                // User pressed Stop. Drop the whole queue + reset status;
+                // do NOT advance to the next item.
+                self.luckyStack.queue.removeAll()
+                self.luckyStackTask = nil
+                self.jobStatus = .idle
             }
         }
+    }
+
+    /// Abort an in-flight lucky stack. Cancels the detached engine task
+    /// (its grading + accumulate loops poll `Task.checkCancellation()` so
+    /// it unwinds within a frame), clears the pending queue, and resets
+    /// the job status so the progress overlay closes immediately. The
+    /// engine emits `.cancelled`, which removes any partial output file.
+    func cancelLuckyStack() {
+        guard luckyStackTask != nil || !luckyStack.queue.isEmpty else { return }
+        luckyStackTask?.cancel()
+        luckyStackTask = nil
+        luckyStack.queue.removeAll()
+        // Also stop a folder-watch session from immediately auto-stacking
+        // the next ready file — the user asked to halt, so drain the
+        // ready list (watching itself stays armed; new captures still
+        // queue, but the in-flight burst is cleared).
+        watchReadyURLs.removeAll()
+        jobStatus = .idle
     }
 
     // MARK: - Presets

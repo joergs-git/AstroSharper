@@ -109,6 +109,30 @@ final class SerReader {
         guard data.count >= 178 else { throw SerReaderError.tooSmall }
         self.header = try Self.parseHeader(data)
         guard header.bytesPerFrame > 0 else { throw SerReaderError.invalidHeader }
+
+        // Diagnostic: if the OS mapped fewer bytes than the file really
+        // has, large-file frame access silently runs short — surfaces as
+        // a "dead zone" of frozen frames near the end of a multi-GB SER.
+        // Log it so the cause (header overcount vs mmap truncation) is
+        // distinguishable.
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let realSize = (attrs[.size] as? NSNumber)?.intValue,
+           realSize != data.count {
+            NSLog("SerReader: mapped %d bytes but file is %d on disk (%@) — frame access clamped to mapped size",
+                  data.count, realSize, url.lastPathComponent)
+        }
+    }
+
+    /// Frames actually present in the mapped data. Clamps a header
+    /// `frameCount` that overstates a truncated / aborted capture (or a
+    /// short mmap) so callers — scrub UI, quality scan, lucky-stack frame
+    /// loop — never index into bytes that aren't there (which would
+    /// freeze the scrubber or trip `withFrameBytes`'s precondition).
+    /// Equals `header.frameCount` for a complete file.
+    var readableFrameCount: Int {
+        let avail = data.count - frameDataOffset
+        guard avail > 0, header.bytesPerFrame > 0 else { return 0 }
+        return Swift.min(header.frameCount, avail / header.bytesPerFrame)
     }
 
     // MARK: - Frame access

@@ -448,6 +448,7 @@ enum LuckyStackProgress {
     case writing
     case finished(URL)
     case error(String)
+    case cancelled
 }
 
 enum LuckyStack {
@@ -732,13 +733,18 @@ enum LuckyStack {
         return output
     }
 
+    /// Returns the detached Task so the caller can `.cancel()` it. The
+    /// runner's grading + accumulate loops poll `Task.checkCancellation()`
+    /// per frame, so a cancel bails within one frame and reports
+    /// `.cancelled` rather than `.finished`.
+    @discardableResult
     static func run(
         sourceURL: URL,
         outputURL: URL,
         options: LuckyStackOptions,
         pipeline: Pipeline,
         onProgress: @escaping @MainActor (LuckyStackProgress) -> Void
-    ) {
+    ) -> Task<Void, Never> {
         Task.detached(priority: .userInitiated) {
             await onProgress(.opening(url: sourceURL))
 
@@ -1099,8 +1105,13 @@ enum LuckyStack {
                     )
                 }
 
+                try Task.checkCancellation()
                 try ImageTexture.write(texture: final, to: outputURL)
                 await onProgress(.finished(outputURL))
+            } catch is CancellationError {
+                // User pressed Stop — leave no partial file behind.
+                try? FileManager.default.removeItem(at: outputURL)
+                await onProgress(.cancelled)
             } catch {
                 await onProgress(.error("\(error)"))
             }
@@ -1339,7 +1350,7 @@ private final class LuckyRunner {
                   options.masterFlatURL?.lastPathComponent ?? "—")
         }
 
-        self.quality = QualityGrader(device: dev, frameCount: reader.frameCount, w: W, h: H, pso: qualityPSO)
+        self.quality = QualityGrader(device: dev, frameCount: reader.readableFrameCount, w: W, h: H, pso: qualityPSO)
     }
 
     static func makePSO(library: MTLLibrary, device: MTLDevice, fn: String) -> MTLComputePipelineState {
@@ -1525,7 +1536,7 @@ private final class LuckyRunner {
     // MARK: - Public driver
 
     func run(progress: @escaping (LuckyStackProgress) -> Void) async throws -> MTLTexture {
-        let total = reader.frameCount
+        let total = reader.readableFrameCount   // clamp to frames actually present
 
         // Stage 1: grade every frame.
         try await gradeAllFrames(progress: progress)
@@ -1737,12 +1748,17 @@ private final class LuckyRunner {
     // MARK: - Stage helpers
 
     private func gradeAllFrames(progress: @escaping (LuckyStackProgress) -> Void) async throws {
-        let total = reader.frameCount
+        let total = reader.readableFrameCount   // clamp to frames actually present
         var lastReported = -1
 
         // Streaming loop; one cmd buffer per frame, but we never wait between
         // frames except for staging slot availability.
         for frameIndex in 0..<total {
+            // Stop press during grading: break to the drain below so the
+            // staging semaphore is rebalanced before we bail. The throw
+            // happens AFTER the drain (see end of function); throwing here
+            // would dispose an unbalanced semaphore → libdispatch trap.
+            if Task.isCancelled { break }
             stagingSemaphore.wait()
             let slot = frameIndex % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -1799,6 +1815,11 @@ private final class LuckyRunner {
         // Replenish all staging slots before returning.
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
     }
 
     private func loadAndUnpack(frameIndex: Int, into existing: MTLTexture?) async throws -> MTLTexture {
@@ -1860,6 +1881,7 @@ private final class LuckyRunner {
         progress(.buildingReference(done: 0, total: indices.count))
 
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -1886,6 +1908,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         // Normalize.
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
@@ -1998,6 +2025,7 @@ private final class LuckyRunner {
         progress(.buildingReference(done: 0, total: indices.count))
 
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -2025,6 +2053,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
             enc.setComputePipelineState(normalizePSO)
@@ -2085,6 +2118,7 @@ private final class LuckyRunner {
         }
 
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -2151,6 +2185,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
             enc.setComputePipelineState(normalizePSO)
@@ -2253,6 +2292,7 @@ private final class LuckyRunner {
 
         progress(.stacking(done: 0, total: frameCount * 2))
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -2291,6 +2331,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         // CPU: per-AP CONTINUOUS quality weights.
         //
@@ -2390,6 +2435,7 @@ private final class LuckyRunner {
         let wtTex = Self.makeFloatBuffer(device: device, w: W, h: H, format: .rgba32Float)
 
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -2429,6 +2475,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         // Final per-pixel divide.
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
@@ -2507,6 +2558,7 @@ private final class LuckyRunner {
 
         progress(.stacking(done: 0, total: indices.count))
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -2560,6 +2612,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         // Per-pixel divide: out = accum / weight.
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
@@ -2611,6 +2668,7 @@ private final class LuckyRunner {
         // ---- Pass 1: Welford ----
         progress(.stacking(done: 0, total: indices.count * 2))
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -2647,6 +2705,11 @@ private final class LuckyRunner {
         // Drain in-flight slots so the Welford state is fully realised.
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         // ---- Pass 2: Clipped accumulate ----
         let keptScores = indices.map { scores[$0] }
@@ -2661,6 +2724,7 @@ private final class LuckyRunner {
 
         let frameCount = UInt32(indices.count)
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -2702,6 +2766,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         // ---- Pass 3: per-pixel divide ----
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
@@ -2798,7 +2867,7 @@ private final class LuckyRunner {
         let input = AutoAPInput(
             imageWidth: lumaW,
             imageHeight: lumaH,
-            frameCount: reader.frameCount,
+            frameCount: reader.readableFrameCount,
             targetType: targetType,
             referenceLuminance: luma,
             priorGrid: options.multiAPGrid,

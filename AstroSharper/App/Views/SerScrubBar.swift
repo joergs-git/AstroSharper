@@ -48,28 +48,24 @@ struct SerScrubBar: View {
             .disabled(!usable || app.previewSerFrameIndex <= 0)
             .keyboardShortcut(.leftArrow, modifiers: [])
 
-            // PERFORMANCE: do NOT pass `step:` here. SwiftUI maps a
-            // discrete-step Slider to NSSlider with numberOfTickMarks
-            // == range/step + 1, and AppKit then renders every tick on
-            // every layout pass via -[NSSliderTickMarks drawRect:].
-            // For a 5000-frame SER that's 5000 tick marks redrawing on
-            // every window resize tick — confirmed via `sample` profile
-            // 2026-05-02 (resize was 161/4058 main-thread samples in
-            // tick-mark draw alone). The Int conversion in `set:` is
-            // sufficient to snap the value to whole frames; no visual
-            // ticks are needed.
-            Slider(
-                value: Binding(
-                    get: {
-                        let v = Double(app.previewSerFrameIndex)
-                        return min(max(0, v), safeUpper)
-                    },
-                    set: { app.previewSerFrameIndex = Int($0) }
-                ),
-                in: 0...safeUpper
+            // Custom drag-gesture scrubber instead of SwiftUI `Slider`.
+            // A SwiftUI Slider wraps NSSlider, whose drag runs a modal
+            // `-[NSSliderCell trackMouse:]` loop in NSEventTrackingRunLoop-
+            // Mode. CoreAnimation does NOT commit / present the preview's
+            // CAMetalLayer during that modal loop, so scrubbed frames
+            // stayed frozen on screen until release — no amount of
+            // synchronous redraw helped. A `DragGesture` runs through
+            // SwiftUI's normal event path (no modal loop), so the
+            // @Published index updates AND the Metal preview presents
+            // live while dragging. (Bonus: also sidesteps the 5000-tick-
+            // mark layout cost the old Slider had.)
+            ScrubTrack(
+                frameIndex: $app.previewSerFrameIndex,
+                frameCount: frameCount
             )
-            .controlSize(.small)
+            .frame(height: 18)
             .disabled(!usable)
+            .opacity(usable ? 1 : 0.4)
 
             Button {
                 let last = max(0, app.previewSerFrameCount - 1)
@@ -89,5 +85,54 @@ struct SerScrubBar: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(Color(NSColor.underPageBackgroundColor))
+    }
+}
+
+/// Drag-gesture frame scrubber. Maps the cursor's x-position along the
+/// track to a frame index and writes it to the binding continuously
+/// during the drag. Uses `DragGesture(minimumDistance: 0)` so a single
+/// click also seeks. Crucially this runs through SwiftUI's event path
+/// rather than NSSlider's modal `trackMouse:` loop, so the Metal preview
+/// presents new frames LIVE while dragging (the modal loop blocks
+/// CoreAnimation commits, freezing the preview until release).
+private struct ScrubTrack: View {
+    @Binding var frameIndex: Int
+    let frameCount: Int
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = max(1, geo.size.width)
+            let upper = max(1, frameCount - 1)
+            let frac = Double(min(max(0, frameIndex), upper)) / Double(upper)
+            let knobX = CGFloat(frac) * w
+
+            ZStack(alignment: .leading) {
+                // Track groove.
+                Capsule()
+                    .fill(Color.secondary.opacity(0.25))
+                    .frame(height: 4)
+                // Filled portion up to the knob.
+                Capsule()
+                    .fill(Color.accentColor.opacity(0.7))
+                    .frame(width: knobX, height: 4)
+                // Knob.
+                Circle()
+                    .fill(Color.white)
+                    .overlay(Circle().stroke(Color.secondary.opacity(0.4), lineWidth: 0.5))
+                    .frame(width: 13, height: 13)
+                    .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
+                    .offset(x: knobX - 6.5)
+            }
+            .frame(maxHeight: .infinity, alignment: .center)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let f = min(max(0, value.location.x / w), 1)
+                        let idx = Int((Double(f) * Double(upper)).rounded())
+                        if idx != frameIndex { frameIndex = idx }
+                    }
+            )
+        }
     }
 }
