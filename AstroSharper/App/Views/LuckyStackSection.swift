@@ -463,6 +463,15 @@ struct LuckyStackSection: View {
                 }
                 .help("Experimental: split Bayer SER into R/G/B planes, align + stack each independently. Catches per-frame chromatic dispersion at low altitudes (< 30°). Half-res extract + bilinear-upsample combine softens the output by ~1 px vs. the standard demosaic path — only enable when the chromatic-dispersion correction is actually needed. Bayer captures only. ~3× runtime cost.")
 
+                // Drift correction (opt-in) — fixes a slowly-drifting
+                // planet ghosting the stack.
+                HStack(spacing: 4) {
+                    Toggle("Drift correction (planet wandered)", isOn: $app.luckyStack.validateDrift)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                .help("Enable when a long capture's planet slowly drifted across the frame and the stack shows a ghost / double contour. Fits a robust drift trajectory through the per-frame shifts and snaps outlier frames (where alignment failed) back onto it. Default OFF — on well-tracked captures it can perturb the result, so only turn it on for a capture you can see ghosting.")
+
                 // Auto-PSF post-pass (Block C.1 v0).
                 HStack(spacing: 4) {
                     Toggle("Auto-PSF + Wiener", isOn: $app.luckyStack.autoPSF)

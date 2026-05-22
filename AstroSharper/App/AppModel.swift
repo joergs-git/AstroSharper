@@ -1642,6 +1642,7 @@ final class AppModel: ObservableObject {
         // purpose: AutoNuke is the "do everything safely" preset, and
         // auto-ROI is opt-in until the bracket validates per-subject.
         perItemOpts.useAutoPSFAutoROI = luckyStack.autoNuke ? false : luckyStack.autoPSFAutoROI
+        perItemOpts.validateDrift = luckyStack.validateDrift
         // RFF user setting → per-run options. Auto = pass nil so the
         // engine's σ-aware formula computes the fractions per disc
         // geometry. Manual = pass the user's slider values. Off = pass
@@ -2569,6 +2570,11 @@ struct LuckyStackUIState {
     /// applies because it's geometry-free. Only meaningful when
     /// `autoPSF == true`.
     var autoPSFAutoROI: Bool = false
+
+    /// Drift correction (opt-in). Snaps global-shift outliers onto a
+    /// robust drift line so a slowly-drifting planet doesn't ghost the
+    /// stack. Default OFF — perturbs well-tracked captures.
+    var validateDrift: Bool = false
 
     /// Radial Fade Filter (RFF) settings — Auto / Manual / Off. Default
     /// Auto uses the σ-aware formula. Manual exposes inner / outer

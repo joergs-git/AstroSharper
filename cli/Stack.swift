@@ -57,6 +57,10 @@ enum Stack {
         // `feedback_autopsf_lunar_bail.md`. Only meaningful when
         // `--auto-psf` is also passed.
         var useAutoPSFAutoROI = false
+        // Drift correction (opt-in). Snaps global-shift outliers onto a
+        // robust drift line — fixes a slowly-drifting planet ghosting the
+        // stack. Default off (perturbs well-tracked captures).
+        var validateDrift = false
         // Synthetic-PSF fallback (LSW 3.2.1 parity at the cascade
         // tail). Default OFF per the lunar-bail lesson — a guess σ
         // can over-sharpen or halo subjects where AutoPSF correctly
@@ -408,6 +412,9 @@ enum Stack {
                 // estimation runs first regardless.
                 useAutoPSFAutoROI = true
                 i += 1
+            case "--drift-correct":
+                validateDrift = true
+                i += 1
             case "--synthetic-psf":
                 useAutoPSFSyntheticFallback = true
                 i += 1
@@ -722,6 +729,7 @@ enum Stack {
             options.useAutoPSF = useAutoPSF
             options.autoPSFSNR = autoPSFSNR
             options.useAutoPSFAutoROI = useAutoPSFAutoROI
+            options.validateDrift = validateDrift
             options.useAutoPSFSyntheticFallback = useAutoPSFSyntheticFallback
             options.syntheticPSFSeeingIndex = syntheticPSFSeeingIndex
             options.autoTileSizeFromScope = autoTileSizeFromScope

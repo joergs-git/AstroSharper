@@ -268,6 +268,17 @@ struct LuckyStackOptions {
     /// geometry-free.
     var useAutoPSFAutoROI: Bool = false
 
+    /// Drift correction: snap per-frame global-shift outliers back onto a
+    /// robust drift trajectory before accumulation. Fixes the "planet
+    /// slowly drifted over a long capture → ghost / double contour"
+    /// failure where full-frame phase correlation fails on some frames
+    /// (small disc on dark sky, noise-dominated) and they accumulate at
+    /// the wrong position. Default OFF — on well-tracked captures the
+    /// real shift variation can exceed the outlier threshold, so always-on
+    /// perturbed the trusted F3 baselines (softer output). Opt in for a
+    /// capture you can see ghosting. CLI `--drift-correct`.
+    var validateDrift: Bool = false
+
     /// Seeing-index-driven synthetic PSF fallback (LSW 3.2.1 parity).
     /// When `useAutoPSF` is on AND both the planetary limb-LSF and the
     /// auto-ROI step-edge estimators bail, the cascade falls through
@@ -1607,6 +1618,27 @@ private final class LuckyRunner {
             referenceTex = refTex
         }
 
+        // Drift validation (Block B.4) on the global per-frame shifts.
+        // A slowly-drifting planet (mount tracking error / field rotation
+        // over a 30 s capture) makes full-frame phase correlation fail on
+        // some frames — a small bright disc on a large dark sky is noise-
+        // dominated, so the odd frame locks on the DC peak at (0,0) or a
+        // spurious offset instead of tracking the drift. Those frames then
+        // accumulate at the wrong position → a ghost / double contour.
+        // Replaying the kept frames in CHRONOLOGICAL order and replacing
+        // any shift that deviates > threshold from the linearly-
+        // extrapolated drift trajectory with the prediction snaps the
+        // outliers back onto the single drift line, killing the ghost.
+        // No-op on well-tracked captures (shifts already smooth → no
+        // outliers), so it's always-on.
+        if options.validateDrift {
+            referenceShifts = Self.validateGlobalDrift(
+                shifts: referenceShifts,
+                keptOrder: kept,
+                referenceIndex: referenceIndex
+            )
+        }
+
         // AutoAP — empirical AP-grid + patchHalf + drop-list + deconv-
         // tile-size selection from the reference luma. Runs CPU-side
         // off the reference texture we already built; cost ~50 ms
@@ -1927,6 +1959,84 @@ private final class LuckyRunner {
             cmd.waitUntilCompleted()
         }
         return accum
+    }
+
+    /// Snap drift-outlier global shifts back onto the drift trajectory.
+    /// A slowly-drifting planet (mount error / field rotation over a long
+    /// capture) makes full-frame phase correlation fail on the odd frame —
+    /// a small bright disc on dark sky is noise-dominated, so a frame locks
+    /// on the (0,0) DC peak or a spurious offset, accumulating at the wrong
+    /// position → a ghost / double contour.
+    ///
+    /// Robustly fits a LINE through (frameIndex → shift) per axis (the
+    /// drift is ~constant velocity in capture time) and replaces shifts
+    /// whose residual exceeds the threshold with the fitted value. Using
+    /// frameIndex as the abscissa makes the fit GAP-AWARE — essential
+    /// because the kept frames are a quality-sorted, non-uniformly-spaced
+    /// subset. (An earlier last-two-points extrapolation assumed uniform
+    /// spacing and false-flagged good shifts on well-tracked BiggSky
+    /// captures, softening the stack — caught by the F3 regression.)
+    /// A clean, well-tracked capture fits a near-flat line with tiny
+    /// residuals → nothing flagged → passes through unchanged.
+    static func validateGlobalDrift(
+        shifts: [Int: SIMD2<Float>],
+        keptOrder: [Int],
+        referenceIndex: Int
+    ) -> [Int: SIMD2<Float>] {
+        let chrono = keptOrder.sorted()
+        guard chrono.count >= 8 else { return shifts }   // too few to fit robustly
+
+        let xs = chrono.map { Double($0) }
+        let dxs = chrono.map { Double(shifts[$0]?.x ?? 0) }
+        let dys = chrono.map { Double(shifts[$0]?.y ?? 0) }
+
+        // Two-pass robust line fit: LSQ, drop points whose residual is
+        // > 3× the median residual, refit on the inliers. Outliers
+        // (failed correlations) can't bias the trajectory that way.
+        func robustLine(_ ys: [Double]) -> (a: Double, b: Double) {
+            func lsq(_ idx: [Int]) -> (Double, Double) {
+                let n = Double(idx.count)
+                guard n >= 2 else { return (idx.first.map { ys[$0] } ?? 0, 0) }
+                var sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0
+                for i in idx { sx += xs[i]; sy += ys[i]; sxx += xs[i]*xs[i]; sxy += xs[i]*ys[i] }
+                let denom = n*sxx - sx*sx
+                guard abs(denom) > 1e-9 else { return (sy / n, 0) }
+                let b = (n*sxy - sx*sy) / denom
+                let a = (sy - b*sx) / n
+                return (a, b)
+            }
+            let all = Array(ys.indices)
+            var (a, b) = lsq(all)
+            let resid = all.map { abs(ys[$0] - (a + b*xs[$0])) }
+            let medResid = resid.sorted()[resid.count / 2]
+            let cutoff = max(1.0, 3.0 * medResid)
+            let inliers = all.filter { abs(ys[$0] - (a + b*xs[$0])) <= cutoff }
+            if inliers.count >= 2 && inliers.count < all.count { (a, b) = lsq(inliers) }
+            return (a, b)
+        }
+
+        let fx = robustLine(dxs)
+        let fy = robustLine(dys)
+
+        // Residual threshold in full-res px. Well-tracked seeing jitter
+        // sits well under this; a drift-ghost outlier (0,0 vs a large
+        // drift offset) blows past it.
+        let thresh = 8.0
+        var out = shifts
+        var corrected = 0
+        for (i, idx) in chrono.enumerated() {
+            let predDx = fx.a + fx.b * xs[i]
+            let predDy = fy.a + fy.b * xs[i]
+            if abs(dxs[i] - predDx) > thresh || abs(dys[i] - predDy) > thresh {
+                out[idx] = SIMD2<Float>(Float(predDx), Float(predDy))
+                corrected += 1
+            }
+        }
+        if corrected > 0 {
+            NSLog("Drift validation: corrected %d/%d outlier shift(s) — planet-drift ghost guard",
+                  corrected, chrono.count)
+        }
+        return out
     }
 
     private func alignAgainstReference(referenceTex: MTLTexture, indices: [Int]) async throws -> [Int: SIMD2<Float>] {

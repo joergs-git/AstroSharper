@@ -42,6 +42,14 @@ The **Sun presets run multi-AP OFF** (retuned 2026-05-22): a benchmark showed pe
 
 When multi-AP IS engaged, each cell only earns a local shift if its SAD minimum is well-defined in BOTH axes — a genuine 2D feature. A cell sitting on a smooth, locally-straight edge (the curved solar limb, a planetary terminator) has a SAD *valley* along the edge tangent, so the along-edge shift is arbitrary; left unchecked, neighbouring cells warp the edge into a blocky zig-zag. Such cells (and flat low-contrast cells) now fall back to the global alignment. The F3 regression set confirms Jupiter multi-AP is unaffected — only genuinely ambiguous cells are dropped.
 
+## Drift correction (opt-in)
+
+Long planetary captures sometimes drift — mount tracking error or field rotation slowly walks the planet across the frame over 20–60 s. Full-frame phase correlation can fail on the odd frame (a small bright disc on a large dark sky is noise-dominated; a frame locks on the (0,0) DC peak instead of tracking the drift), and those frames accumulate at the wrong position → a **ghost / double contour**.
+
+Enable **Drift correction (planet wandered)** in the Lucky Stack section (CLI `--drift-correct`) for such a capture. It robustly fits a drift trajectory (gap-aware least-squares line through the per-frame shifts, with a 2-pass outlier reject) and snaps shifts that deviate too far back onto the line.
+
+**Default OFF** on purpose: well-tracked captures have real shift variation that the outlier threshold can catch, so always-on perturbed the F3 reference set (softer output). Turn it on only for a capture you can see ghosting.
+
 ## Variants
 
 Run multiple stacks from one SER in one click. Each non-zero entry in the Variants section adds a labelled run that lands in its own subdirectory:
