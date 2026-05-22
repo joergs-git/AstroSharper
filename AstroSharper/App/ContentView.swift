@@ -116,6 +116,12 @@ private struct ToolbarView: View {
             .controlSize(.small)
             .help("Open folder or files (⌘O)")
 
+            // Auto-stack folder watch — placed next to Open because it's
+            // meant to be armed on an EMPTY capture folder before the
+            // session starts, which is exactly when the Lucky Stack
+            // section (SER-gated) is disabled and unreachable.
+            FolderWatchToolbarButton()
+
             if app.catalog.rootURL == nil {
                 Text("No folder opened — drag a folder here or press ⌘O")
                     .font(.system(size: 11))

@@ -145,6 +145,13 @@ final class AppModel: ObservableObject {
     var watchStability = WatchStabilityTracker(requiredStableSamples: 2)
     /// Files confirmed stable + waiting to be auto-stacked (FIFO).
     var watchReadyURLs: [URL] = []
+    /// Session-level community-share decision for the active watch. Set
+    /// once when the watch is armed (so the per-stack interactive prompt
+    /// never interrupts the unattended auto-stack flow). true = silently
+    /// upload each stacked thumbnail; false = never share during the
+    /// session. Ignored when no watch is active (manual stacks keep the
+    /// interactive prompt).
+    var watchSessionAutoShare: Bool = false
 
     // Job status for batch runs
     @Published var jobStatus: JobStatus = .idle
@@ -734,6 +741,15 @@ final class AppModel: ObservableObject {
             previewFileID = catalog.files.first?.id
             loadThumbnailsAsync()
         }
+
+        // Entering Inputs while folder-watch is active: merge any captures
+        // that arrived since the catalog was last built so the user sees
+        // them without re-opening the folder. Runs after displayedSection
+        // is set so the guard inside passes.
+        if section == .inputs {
+            refreshInputsFromWatch()
+            if previewFileID == nil { previewFileID = catalog.files.first?.id }
+        }
     }
 
     /// Build a virtual catalog from the in-memory aligned playback frames.
@@ -1313,9 +1329,15 @@ final class AppModel: ObservableObject {
     /// Begin watching `url` for new SER captures. Snapshots the existing
     /// `.ser` files as "seen" (backlog ignored per user choice), persists
     /// the folder bookmark, and starts the kqueue watcher + poll timer.
-    func startFolderWatch(url: URL) {
+    ///
+    /// `autoShare` is the session-level community-share decision made when
+    /// arming the watch — true uploads each stacked thumbnail silently,
+    /// false never shares. Either way the per-stack interactive prompt is
+    /// suppressed for the duration so the unattended flow isn't blocked.
+    func startFolderWatch(url: URL, autoShare: Bool = false) {
         stopFolderWatch()   // clean slate if re-pointed
 
+        watchSessionAutoShare = autoShare
         grantSecurityScope(url)
         persistWatchFolderBookmark(url)
         watchedFolderURL = url
@@ -1392,6 +1414,10 @@ final class AppModel: ObservableObject {
             }
         }
         pumpWatchQueue()
+        // Keep the Inputs list live when the user is looking at it while
+        // captures stream in (the switch-into-Inputs path is handled in
+        // switchToSection; this covers "already viewing Inputs").
+        refreshInputsFromWatch()
         updateFolderWatchStatus(
             extra: watchReadyURLs.isEmpty && watchStability.pendingCount == 0
                 ? "waiting for new captures…"
@@ -1461,6 +1487,44 @@ final class AppModel: ObservableObject {
 
     private func fileSize(_ url: URL) -> Int {
         (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+    }
+
+    /// Merge any .ser files from the watched folder that aren't yet in the
+    /// Inputs catalog into the live list — so freshly-captured files show
+    /// up without the user having to re-open the folder. Append-only (never
+    /// removes), so existing selection / marks / preview survive untouched
+    /// (FileEntry ids are per-entry UUIDs, so a full reload would lose them
+    /// — merging by URL preserves identity). No-op unless watching is active
+    /// AND the Inputs section is the one currently shown; `switchToSection`
+    /// calls it on entry to Inputs, and the poll tick calls it for the
+    /// already-open case.
+    private func refreshInputsFromWatch() {
+        guard folderWatchActive,
+              displayedSection == .inputs,
+              let folder = watchedFolderURL else { return }
+        let existing = Set(catalog.files.map { $0.url })
+        let newURLs = currentSerURLs(in: folder).filter { !existing.contains($0) }
+        guard !newURLs.isEmpty else { return }
+
+        var appended: [(id: UUID, url: URL)] = []
+        for url in newURLs {
+            let entry = FileCatalog.makeEntry(url: url)
+            catalog.files.append(entry)
+            appended.append((entry.id, entry.url))
+        }
+        // Keep the same name-sorted order `FileCatalog.load` produces.
+        catalog.files.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+
+        for (id, url) in appended {
+            Task.detached(priority: .utility) { [weak self] in
+                let img = ThumbnailLoader.load(url: url, maxDimension: 48)
+                await MainActor.run {
+                    guard let self, let idx = self.catalog.index(of: id) else { return }
+                    self.catalog.files[idx].thumbnail = img
+                }
+            }
+        }
+        NSLog("FolderWatch: merged %d new file(s) into Inputs list", newURLs.count)
     }
 
     private func persistWatchFolderBookmark(_ url: URL) {
@@ -1883,6 +1947,21 @@ final class AppModel: ObservableObject {
         frameCount: Int,
         elapsedSec: Double
     ) {
+        // During an unattended folder-watch session the per-stack prompt
+        // would block the automated flow. The share decision was made
+        // ONCE when the watch was armed: upload silently or skip — never
+        // ask per file.
+        if folderWatchActive {
+            if watchSessionAutoShare {
+                CommunityShare.upload(
+                    stackedURL: stackedURL,
+                    target: target,
+                    frameCount: frameCount,
+                    elapsedSec: elapsedSec
+                )
+            }
+            return
+        }
         guard CommunityShare.shouldPromptAfterStack else { return }
         guard pendingCommunityShare == nil else { return }   // don't queue multiple
         pendingCommunityShare = PendingCommunityShare(

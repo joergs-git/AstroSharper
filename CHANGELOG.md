@@ -5,6 +5,31 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+### Fixed
+- **Crash when fast-forwarding / scrubbing a SER whose header overstates
+  its frame count** (truncated copy or a capture still being written).
+  `SerReader.withFrameBytes` guarded truncation with a `precondition` — a
+  fatal trap that the prefetcher's `try?` can't catch — so a speculative
+  prefetch past the real end of the file killed the whole app on the
+  `serPrefetch` queue. New `SerReader.canReadFrame(at:)` does a cheap
+  data-length check and `SerFrameLoader.loadFrame` now throws a catchable
+  error for missing frames, so they're skipped instead of crashing.
+
+### Changed
+- **Folder-watch control moved to the top toolbar** (next to Open). It
+  has to be reachable on an EMPTY capture folder before the session
+  starts, but the Lucky Stack section is SER-gated and disabled when no
+  files are present — so the control lived somewhere unusable. Now a
+  compact toolbar button (Watch / green watching-capsule + stop).
+- **Folder watch no longer interrupts the unattended flow with the
+  community-share prompt.** The share decision is made ONCE when arming
+  the watch (Auto-share / Don't share), then honoured silently for the
+  session — skipped entirely when community share is globally disabled.
+- **Inputs list auto-refreshes during folder watch.** New captures merge
+  into the Inputs file list on switch-into-Inputs and live while viewing
+  it, so you no longer have to re-open the folder to see them. Append-only
+  — existing selection / marks / preview survive.
+
 ### Added
 - **Folder watch + auto-stack** (LSW 5.2 "realtime" parity, 2026-05-22).
   Point AstroSharper at a SharpCap / FireCapture capture folder and it

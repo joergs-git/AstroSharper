@@ -759,11 +759,10 @@ struct LuckyStackSection: View {
                     app.runLuckyStackOnSelection()
                 }
                 .help("Stacks every marked or selected .ser file. Output goes to the configured Output Folder.")
-
-                // Auto-stack folder watch (LSW 5.2 realtime parity) — its
-                // own sub-view to keep this section's @ViewBuilder budget
-                // in check.
-                FolderWatchControl()
+                // NB: the auto-stack folder watch control moved to the top
+                // toolbar (next to Open) 2026-05-22 — it must be reachable
+                // on an empty capture folder, but this whole section is
+                // SER-gated and disabled when no files are present.
 
                 Text(hintLine)
                     .font(.system(size: 10))
