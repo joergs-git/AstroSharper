@@ -105,6 +105,8 @@ Same session also picked up four UX bugs surfaced during testing: output tab pos
 - **Mark-as-Reference** with the **R** key. Gold-star the frame you want as anchor.
 - **Per-channel stacking** (Path B) for OSC Bayer captures — splits R / G / B into independent streams BEFORE alignment, sub-pixel-aligns each channel against its own reference, recombines on the way out. Catches per-frame atmospheric chromatic dispersion that the standard demosaic-then-stack path can't see.
 - **Drizzle** 1.5× / 2× / 3× reconstruction with AA pre-filter for the BiggSky-warned grid moiré artifact.
+- **Drift correction** (opt-in) for a planet that slowly wandered across a long capture — aligns by the disc centroid so the kept frames don't ghost. Best on a well-exposed disc; a low-contrast / bright-sky capture is data-limited (fix it capture-side).
+- **Aperture-rejection multi-AP** — local alignment cells only earn a shift when the SAD minimum is a genuine 2D feature, so the smooth solar limb (an aperture-problem valley) and flat low-contrast surface fall back to the global alignment instead of warping into a blocky ghost.
 
 ### Target picker — *new*
 
