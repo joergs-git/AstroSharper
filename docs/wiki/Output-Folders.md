@@ -12,15 +12,20 @@ This page explains the fallback chain so you always know where your files end up
 ```
    1. Picked output folder      (Settings → Output Folder section)
         └─ persisted as a security-scoped bookmark in UserDefaults
-   2. Auto folder next to input
-        └─ <input-folder>/_AstroSharper/
-   3. Sandbox container
+   2. Auto folder next to the data
+        ├─ folder watch active → <watchedFolder>/_luckystack/
+        └─ folder opened       → <openedRoot>/_AstroSharper/
+   3. Sandbox container         (TRANSIENT last resort — see note)
         └─ ~/Library/Containers/<bundle-id>/Data/Documents/AstroSharper Outputs/
 ```
 
-AstroSharper attempts each level top-down with a quick probe-write (creates a temp file, then deletes it). The first level that succeeds is used silently.
+AstroSharper attempts each level top-down with a quick probe-write (creates a temp file, then deletes it). The first level that succeeds is used silently. The status bar always shows the path that ended up being used.
 
-The status bar always shows the path that ended up being used.
+> **Open the FOLDER, not a single file.** Opening a single `.ser` grants a sandbox security scope on that *file only* — AstroSharper then can't write a subfolder next to it and falls back to the sandbox container. Open the containing folder (or arm folder-watch on it) to get a read-write *folder* scope, and outputs land next to your data. The folder-watch picker always grants folder scope, so watch sessions write to `<watchedFolder>/_luckystack/`.
+
+> **The sandbox fallback no longer "sticks" (fixed 2026-05-22).** Previously, once the container fallback fired it pinned itself as the auto folder and every later run kept using it even after you opened a writable folder. It's now returned transiently, so the next open / watch re-tries the real next-to-data location.
+
+> **No circular re-stacking.** The output subfolder lives inside the watched folder, but the watcher only scans `.ser` files non-recursively — `.tif` outputs in `_luckystack/` are never re-ingested or re-stacked.
 
 ## Picking a folder
 

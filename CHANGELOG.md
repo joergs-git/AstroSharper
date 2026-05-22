@@ -6,10 +6,46 @@ the project follows semantic versioning once it leaves 0.x.
 ## [Unreleased]
 
 ### Added
+- **Stop button in the stacking progress overlay** (2026-05-22). Aborts an
+  in-flight lucky stack — the engine polls cancellation per frame, drains
+  its staging semaphore cleanly, removes any partial output, and resets
+  the UI immediately.
+- **Resizable preview / file-list split** — drag the divider between the
+  preview and the file list; defaults now favour the preview.
 - **Stacked outputs are never overwritten** — when a file of the same
   name already exists, the new stack is numbered up (`name_1.tif`,
   `name_2.tif`, …) so repeated stacks of the same source with different
   settings sit side-by-side for comparison.
+
+### Changed
+- **SER scrubbing is now live** while dragging the frame slider (was: only
+  updated on release). The scrubber is a custom drag-gesture control — the
+  old NSSlider ran a modal tracking loop that blocked CoreAnimation from
+  presenting the Metal preview — backed by a synchronous decode + forced
+  redraw and a monotonic seq guard so fast scrubs don't flicker backwards.
+- **Info HUD defaults OFF** — the stats overlay no longer covers the image
+  on open; toggle it with the "i" button.
+- **Sun presets retuned** from a 10-run headless stacking benchmark:
+  Sun — Granulation and Sun — Hα Prominence now stack with NO multi-AP +
+  sigma-clip (Granulation also drops to keep 20%). Dense multi-AP was
+  shown to smear low-contrast solar surface and warp the limb.
+- **Outputs land next to the data.** Folder-watch writes
+  `<watchedFolder>/_luckystack`; a folder open writes
+  `<openedRoot>/_AstroSharper`. The sandbox container is now a transient
+  last-resort only (no longer "sticks").
+
+### Fixed
+- **Multi-AP smearing / blocky limb on low-contrast solar surface.** New
+  aperture-rejection gate in the AP-shift kernel: a cell earns a local
+  shift only when the SAD minimum is well-defined in BOTH axes (a real 2D
+  feature). The smooth solar limb (an aperture-problem valley) and flat
+  granulation cells fall back to global alignment. F3 confirms Jupiter
+  multi-AP unaffected.
+- **Crash stacking / scrubbing very large SERs (23–26 GB)** whose header
+  over-reports its frame count. New `SerReader.readableFrameCount` clamps
+  every frame loop (scrub, grade, accumulate, AutoAP, per-channel) to the
+  frames actually present in the mapped data; the scrubber stops at the
+  last truly-readable frame instead of freezing.
 
 ### Changed
 - **AutoNuke button reads "AutoNuke is ON" / "AutoNuke is OFF"** so the

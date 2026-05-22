@@ -25,18 +25,22 @@ Per-preset tuning (matches `BuiltInPresets`):
 
 | Preset | Grid | Patch half-size |
 | --- | --- | --- |
-| Sun — Granulation | 12×12 | 24 px |
-| Sun — Full Disk | 8×8 | 32 px |
-| Sun — Hα Prominence | 8×8 | 32 px |
+| Sun — Granulation | **off** | — |
+| Sun — Full Disk | off | — |
+| Sun — Hα Prominence | **off** | — |
 | Moon — High Detail | 10×10 | 24 px |
-| Moon — Wide Field | 8×8 | 32 px |
+| Moon — Wide Field | off | — |
 | Jupiter — Standard | 10×10 | 24 px |
 | Jupiter — Belt Detail | 10×10 | 16 px |
 | Saturn — Standard | 10×10 | 24 px |
 | Saturn — Ring Emphasis | 12×12 | 24 px |
 | Mars — Standard | 6×6 | 16 px |
 
-You can override these in the Multi-AP popup. **AutoAP** (default on) picks grid + patch from the reference frame automatically; touching the sliders or running with `--multi-ap-grid N` switches to manual. See [Presets](Presets.md) for *why* the grids differ per target.
+The **Sun presets run multi-AP OFF** (retuned 2026-05-22): a benchmark showed per-cell SAD smears low-contrast solar surface and warps the limb. You can override in the Multi-AP popup. **AutoAP** (default on) picks grid + patch from the reference frame automatically; touching the sliders or running with `--multi-ap-grid N` switches to manual. See [Presets](Presets.md) for *why* the grids differ per target.
+
+### Aperture-problem rejection (2026-05-22)
+
+When multi-AP IS engaged, each cell only earns a local shift if its SAD minimum is well-defined in BOTH axes — a genuine 2D feature. A cell sitting on a smooth, locally-straight edge (the curved solar limb, a planetary terminator) has a SAD *valley* along the edge tangent, so the along-edge shift is arbitrary; left unchecked, neighbouring cells warp the edge into a blocky zig-zag. Such cells (and flat low-contrast cells) now fall back to the global alignment. The F3 regression set confirms Jupiter multi-AP is unaffected — only genuinely ambiguous cells are dropped.
 
 ## Variants
 

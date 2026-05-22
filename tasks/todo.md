@@ -26,6 +26,16 @@ A running record of where we are, what's done, and what's next. Update at the en
 
 5. **F3 v1.4 polish** & **B.6 / D.1 / A.2 / A.3** as before.
 
+**Stability + UX + solar-quality wave 2026-05-22 (post folder-watch):**
+- SER scrub now live during drag (custom DragGesture `ScrubTrack` replacing NSSlider — the modal tracking loop blocked CoreAnimation presenting the Metal layer; root cause #3 after throttle-scheduler + needsDisplay). Synchronous decode + `view.draw()` + monotonic seq guard. Info HUD default OFF.
+- Resizable preview/file-list split (VSplitView defaults rebalanced toward preview).
+- `SerReader.readableFrameCount` (on the SourceReader protocol) clamps every frame loop to frames actually present — fixes the scrub-freeze AND the stacking crash on 23–26 GB SERs whose header over-reports frame count.
+- Stop button in the progress overlay; `LuckyStack.run` returns the Task, loops poll `Task.isCancelled` via break-then-drain (semaphore-safe — throwing mid-loop crashed libdispatch). Removes partial output on cancel.
+- **Multi-AP aperture-rejection gate** (`Shaders.metal::compute_ap_shifts`): cells only get a local shift with a well-defined 2D SAD minimum; the smooth solar limb (aperture-problem valley) + flat granulation fall back to global. F3 Jupiter unaffected.
+- **Sun presets retuned** from a 10-run headless benchmark (`~/Desktop/sun_stack_benchmark/`): Granulation + Hα now multi-AP OFF + sigma-clip; Granulation keep 30→20. Benchmark proved dense multi-AP is the worst across all grids on low-contrast solar; lightspeed/low-keep wins.
+- Output folder: watch → `<watchedFolder>/_luckystack`, folder-open → `<root>/_AstroSharper`; sandbox fallback no longer pins. Single-file open can't write next to the file (sandbox file-scope) — open the folder.
+- **Open polish:** the multi-AP aperture-gate `minRise` (0.04) + the solar keep-% split are bracket-tunable; gather more solar samples (longer focal length, resolved granulation) to confirm the gate keeps genuine-feature cells.
+
 **Folder watch + auto-stack shipped 2026-05-22 (LSW 5.2 parity):** The "realtime" feature previously listed as a Speed-only candidate (and earlier as an anti-goal "folder watching → defer unless trivial") is now live by explicit user request. `Engine/IO/FolderWatcher` (kqueue) + pure-Swift `WatchStabilityTracker` (8 unit tests). AppModel 2 s poll promotes size-stable new SERs to a ready queue and serially auto-stacks them via the existing runner (gated on "not running" so `.done` doesn't block the next). Backlog ignored (existing-files snapshot), per-file target = filename-detect → active preset → skip. Session-only, folder bookmark persisted but no auto-resume. UI = `FolderWatchControl` sub-view in the Lucky Stack section. 334/334 tests, F3 unchanged. **Open polish:** stability window is a fixed 2 polls (~4 s) — expose if real capture software flushes slower; no recursive subfolder watch yet (single folder only).
 
 **UX fixes shipped same session (post-`15b3c40`):**

@@ -23,9 +23,9 @@ There is no "Balanced" mode (older docs claimed one — that was never in the co
 
 | Preset | Mode | Keep % | Multi-AP | Sharpen chain |
 | --- | --- | --- | --- | --- |
-| **Sun — Granulation** | Scientific | 30 | 12×12, patch 24 | Unsharp r1.2 a0.6 adaptive · Wavelet [2.4, 1.6, 0.8, 0.4] |
-| **Sun — Full Disk** | Lightspeed | 50 | 8×8, patch 32 | Unsharp r2.0 a1.0 · Wavelet [1.4, 1.6, 1.4, 0.8] · mild tone S-curve |
-| **Sun — Hα Prominence** | Scientific | 40 | 8×8, patch 32 | Unsharp r2.5 a0.8 adaptive · *no wavelet* · strong tone stretch |
+| **Sun — Granulation** | Scientific | 20 | **off** + sigma-clip | Unsharp r1.2 a0.6 adaptive · Wavelet [2.4, 1.6, 0.8, 0.4] |
+| **Sun — Full Disk** | Lightspeed | 50 | off | Unsharp r2.0 a1.0 · Wavelet [1.4, 1.6, 1.4, 0.8] · mild tone S-curve |
+| **Sun — Hα Prominence** | Scientific | 40 | **off** + sigma-clip | Unsharp r2.5 a0.8 adaptive · *no wavelet* · strong tone stretch |
 | **Moon — High Detail** | Scientific | 25 | 10×10, patch 24 | Unsharp r1.5 a1.4 · Wavelet [2.0, 1.8, 1.0, 0.5] |
 | **Moon — Wide Field** | Lightspeed | 50 | 8×8, patch 32 | Unsharp r2.5 a1.0 · Wavelet [1.2, 1.4, 1.2, 0.8] |
 | **Jupiter — Standard** | Scientific | 25 | 10×10, patch 24 | Unsharp r1.4 a1.0 · Wiener σ1.5 SNR 60 · Wavelet [1.6, 1.5, 1.0, 0.6] |
@@ -45,7 +45,10 @@ There is no "Balanced" mode (older docs claimed one — that was never in the co
 Lucky imaging works because atmospheric turbulence occasionally freezes into a near-diffraction-limited moment; you keep those and discard the blurred majority. The probability of a "lucky" frame falls steeply as the aperture grows relative to the Fried coherence length r₀ (Fried 1978; Law, Mackay & Baldwin 2006). The keep-% trades **sharpness vs SNR**: stack fewer frames → each is sharper but noisier; stack more → smoother but softer.
 
 - **Planetary (20–35 %)** — small, bright, high-contrast discs. The lucky-frame statistics reward an aggressive cut; Belt Detail goes lowest (20 %) because belt structure is the highest-frequency target.
-- **Solar (30–50 %)** — extended, **low-contrast** surface. Cutting too hard throws away usable signal and the noise floor rises into the granulation. Full Disk sits at 50 % (whole-disc, less local distortion, more frames help SNR). This higher solar keep-% is established solar-imaging community practice (mirrors AutoStakkert!'s solar guidance), not a single peer-reviewed number.
+- **Solar — depends on the target.** Two regimes, not one rule:
+  - **Surface detail** (white-light granulation, sunspot fine structure) is a *sharpness*-limited lucky-imaging target → **low keep (10–20 %)** wins. A headless 10-stack benchmark on a partial-disc white-light SER (2026-05-22) confirmed keep-10 was sharpest; high keep softened the granulation. Sun — Granulation is therefore keep 20 %.
+  - **Faint / extended features** (Hα prominences off-limb) are *SNR*-limited → **high keep (30–50 %)**; cutting hard buries the faint plasma in noise. Sun — Hα stays at keep 40 %; Full Disk at 50 %.
+  This split corrects the earlier "solar wants high keep" blanket guidance.
 - **Lunar (25–50 %)** — High Detail 25 % (terminator micro-contrast is high-frequency), Wide Field 50 % (whole disc, prioritise SNR + even illumination).
 - **Mars (35 %)** — small *and* noisy at typical amateur SNR, so it keeps more frames than Jupiter to hold the noise floor down.
 
@@ -75,10 +78,10 @@ These three look similar on paper but target different physics:
 | --- | --- | --- | --- |
 | Subject | White-light surface micro-detail | Whole solar disc | Off-limb Hα prominences |
 | Mode | Scientific | Lightspeed | Scientific |
-| Keep | 30 % | 50 % | 40 % |
-| Multi-AP | 12×12 (dense) | 8×8 | 8×8 |
+| Keep | 20 % | 50 % | 40 % |
+| Multi-AP | off + sigma-clip | off | off + sigma-clip |
 | Sharpen | Fine wavelets [2.4…] | Balanced wavelets + S-curve | Soft unsharp, **no wavelet**, strong stretch |
-| Why | Granulation is the highest-frequency solar surface signal; a dense AP grid maps the cell-by-cell seeing distortion and fine wavelets pull out the cell structure | Whole disc has little *local* distortion → single-align Lightspeed; the mild S-curve lifts mid-tones for a pleasing full-disc rendition; more frames kept for even SNR across the disc | Prominences are very dark off-limb, low-contrast, noise-sensitive. Wavelets would amplify noise into the black sky, so they're off; instead a strong tone stretch reveals the faint plasma and a soft unsharp adds just enough edge |
+| Why | Granulation is sharpness-limited → low keep keeps only the lucky frames; multi-AP OFF because per-cell SAD smears low-contrast surface + warps the limb (benchmark 2026-05-22); sigma-clip rejects the worst seeing; fine wavelets pull out cell structure post-stack | Whole disc has little *local* distortion → single-align Lightspeed; the mild S-curve lifts mid-tones; more frames kept for even SNR across the disc | Faint off-limb plasma is SNR-limited → higher keep; multi-AP off (even lower contrast than granulation); strong stretch reveals the plasma, soft unsharp adds just enough edge, wavelets off so they don't amplify sky noise |
 
 In short: **Granulation = resolve fine surface texture**, **Full Disk = clean pleasing whole-disc**, **Hα = reveal faint off-limb structure without amplifying noise**.
 
@@ -92,7 +95,8 @@ The app exposes every knob; not every combination is wise. The ones worth knowin
 
 | Do | Don't | Why |
 | --- | --- | --- |
-| High keep-% (30–50 %), dense multi-AP, wavelets | **Low keep-% (planetary-style 5–15 %)** | Solar surface is low-contrast and extended — hard rejection raises the noise floor and discards usable signal |
+| **Multi-AP OFF** on surface detail (the retuned Sun presets do this) | **Dense multi-AP on low-contrast surface** | Per-cell SAD smears low-contrast granulation (noise-dominated) and warps the smooth limb (aperture problem — the SAD is a *valley* along a straight edge). A 10-stack benchmark (2026-05-22) found dense multi-AP the WORST across all grid sizes; lightspeed/global align won. An aperture-rejection gate now drops ambiguous cells to global, but for solar surface it's cleaner to leave multi-AP off entirely |
+| Surface: low keep (10–20 %). Prominences: high keep (30–50 %) | **One keep-% for all solar** | Surface granulation is sharpness-limited (lucky imaging → low keep); faint off-limb Hα is SNR-limited (→ high keep). See the keep-% section above |
 | Wavelet sharpening | **Aggressive Wiener / AutoPSF on the surface** | AutoPSF measures a PSF from a disc-on-dark-sky *limb*. A granulation / sunspot / Hα-surface close-up has no clean limb → AutoPSF bails (by design — a wrong σ is worse than none), so the deconv you expect simply doesn't happen. Use the Sun presets' wavelets instead |
 | No drizzle (solar is usually well/over-sampled) | **Drizzle a well-sampled solar capture** | Drizzle reconstructs *undersampled* data (Fruchter & Hook 2002). On already-Nyquist-sampled solar it adds no resolution, only interpolation softening + grid artefacts |
 | No derotation | **Derotation on the Sun** | Solar rotation is ~27 days — negligible over a capture. Derotation is a Jupiter / Saturn tool (≈10 h rotation) |
