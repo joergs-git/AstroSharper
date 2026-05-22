@@ -259,6 +259,61 @@ struct SerFrameBytesTests {
             #expect(stamp == UInt8((0x10 + i) & 0xFF))
         }
     }
+
+    /// `canReadFrame` must accept every in-range frame of a complete file
+    /// and reject out-of-range indices — the cheap pre-check that keeps
+    /// the speculative scrub / prefetch path off the hard precondition.
+    @Test("canReadFrame accepts in-range, rejects out-of-range")
+    func canReadFrameBounds() throws {
+        let frames = 5
+        let url = try SyntheticSER.write(
+            width: 64, height: 64, depth: 8, frameCount: frames, colorID: 0
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        let reader = try SerReader(url: url)
+        for i in 0..<frames { #expect(reader.canReadFrame(at: i) == true) }
+        #expect(reader.canReadFrame(at: -1) == false)
+        #expect(reader.canReadFrame(at: frames) == false)
+        #expect(reader.canReadFrame(at: frames + 100) == false)
+    }
+
+    /// A SER whose header overstates the frame count (truncated copy /
+    /// still-being-written capture) must report the missing tail frames
+    /// as unreadable — this is the exact condition that crashed the app
+    /// via the prefetcher's hard `precondition` before the guard landed.
+    @Test("canReadFrame rejects frames missing from a truncated file")
+    func canReadFrameTruncated() throws {
+        let frames = 6
+        let url = try SyntheticSER.write(
+            width: 64, height: 64, depth: 8, frameCount: frames, colorID: 0
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // Chop the file so only the first 3 frames' bytes survive while
+        // the header still claims 6. 178-byte header + 64*64 bytes/frame.
+        let bytesPerFrame = 64 * 64
+        let keptFrames = 3
+        let truncatedLength = 178 + bytesPerFrame * keptFrames
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(truncatedLength))
+        try handle.close()
+
+        let reader = try SerReader(url: url)
+        // Header still says 6 frames…
+        #expect(reader.header.frameCount == frames)
+        // …but only the first 3 are actually present.
+        for i in 0..<keptFrames { #expect(reader.canReadFrame(at: i) == true) }
+        for i in keptFrames..<frames {
+            #expect(reader.canReadFrame(at: i) == false, "frame \(i) should be unreadable in truncated file")
+        }
+
+        // And the loader must throw (not crash) for a missing frame.
+        #expect(throws: (any Error).self) {
+            _ = try SerFrameLoader.loadFrame(
+                url: url, frameIndex: frames - 1, device: MetalDevice.shared.device
+            )
+        }
+    }
 }
 
 // MARK: - SourceReader conformance

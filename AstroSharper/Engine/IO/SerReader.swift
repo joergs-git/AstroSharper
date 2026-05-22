@@ -120,6 +120,21 @@ final class SerReader {
     /// data is shorter than the header claims (e.g. a SER copy interrupted
     /// mid-transfer). Without this check we'd return a pointer into invalid
     /// memory. >4 GB SERs are fine — see file-level `>4 GB SER safety` note.
+    /// True when frame `index` is fully present in the mapped data.
+    /// Guards against a header `frameCount` that overstates a truncated
+    /// or still-being-written file (common with live captures + the
+    /// folder-watch auto-stack path). Cheap — no read, just offset math.
+    /// Speculative callers (playback prefetch / manual scrub) MUST check
+    /// this before `withFrameBytes` so a short file fails soft instead of
+    /// tripping the hard `precondition` and crashing the whole app —
+    /// `precondition` is fatal and not catchable by the loaders' `try?`.
+    func canReadFrame(at index: Int) -> Bool {
+        guard index >= 0, index < header.frameCount else { return false }
+        let bpf = header.bytesPerFrame
+        let offset = frameDataOffset + index * bpf
+        return offset >= 0 && offset + bpf <= data.count
+    }
+
     func withFrameBytes<R>(at index: Int, _ body: (UnsafePointer<UInt8>, Int) throws -> R) rethrows -> R {
         precondition(index >= 0 && index < header.frameCount, "frame index out of range")
         let bpf = header.bytesPerFrame

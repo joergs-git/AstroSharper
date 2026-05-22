@@ -56,6 +56,17 @@ enum SerFrameLoader {
                    frameIndex, h.frameCount)
             throw Error.decodeFailed
         }
+        // Data-length guard: the header may declare more frames than the
+        // file actually contains (truncated copy, or a capture still
+        // being written). `withFrameBytes` would otherwise trip its hard
+        // `precondition` — fatal, and uncatchable by the speculative
+        // prefetch / scrub callers' `try?`. Fail soft here instead so a
+        // short file just yields a missing frame rather than a crash.
+        guard reader.canReadFrame(at: frameIndex) else {
+            os_log("SerFrameLoader: frame %d not fully present in %{public}@ — truncated or still being written",
+                   log: log, type: .error, frameIndex, url.lastPathComponent)
+            throw Error.decodeFailed
+        }
 
         let isBayer = h.colorID.isBayer
         let isRGB = h.colorID.isRGB
