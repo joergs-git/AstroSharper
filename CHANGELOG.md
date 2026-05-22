@@ -6,6 +6,18 @@ the project follows semantic versioning once it leaves 0.x.
 ## [Unreleased]
 
 ### Added
+- **Folder watch + auto-stack** (LSW 5.2 "realtime" parity, 2026-05-22).
+  Point AstroSharper at a SharpCap / FireCapture capture folder and it
+  stacks each new SER the moment its capture finishes — leave it running
+  overnight and wake up to stacked TIFFs. New `Engine/IO/FolderWatcher`
+  (kqueue `DispatchSource` on the folder fd) + pure-Swift
+  `WatchStabilityTracker` (size-stable completion detection, so half-
+  written SERs are never stacked). Existing files at start are snapshotted
+  as "seen" (backlog ignored); each new file is auto-stacked one-at-a-time
+  through the existing lucky-stack queue with its target auto-detected from
+  the filename (falling back to the active preset). Session-only —
+  explicit Start / Stop, no auto-resume on launch. UI lives in the Lucky
+  Stack section (`FolderWatchControl`).
 - **LSW 6.21.1 parity wave** (2026-05-21) — five LuckyStackWorker User Manual
   gaps closed under the Quality + Speed + minimal-user-action filter:
   - **Highlight-clipped overlay** (LSW 8.8). Toolbar toggle, keyboard shortcut

@@ -116,6 +116,36 @@ final class AppModel: ObservableObject {
     /// step had to absorb. nil until the first Stabilize completes.
     @Published var lastStabilizerShifts: [SIMD2<Float>]? = nil
 
+    // MARK: - Folder watcher (auto-stack realtime mode, LSW 5.2 parity)
+    //
+    // When active, a kqueue watcher + 2 s poll timer pick up freshly-
+    // captured SER files that LAND in the watched folder AFTER watching
+    // started (existing files are snapshotted as "seen" so a full archive
+    // isn't re-stacked). Each new file is held until its size is stable
+    // (capture finished) then auto-stacked one-at-a-time through the
+    // existing lucky-stack queue. Session-only — never auto-resumes on
+    // launch; the folder is remembered via bookmark for the picker default.
+    @Published var folderWatchActive: Bool = false
+    @Published var watchedFolderURL: URL? = nil
+    /// Human-readable live status for the watch UI (e.g. "Watching Jup/ —
+    /// 3 stacked, waiting for new captures…").
+    @Published var folderWatchStatus: String = ""
+    /// Count of files auto-stacked since the current watch session started.
+    @Published var folderWatchStackedCount: Int = 0
+
+    var folderWatcher: FolderWatcher?
+    /// Poll timer: promotes size-stable files to the ready queue + drives
+    /// the one-at-a-time auto-stack pump. Runs the whole time watching is
+    /// active (cheap — a stat() per pending file every 2 s).
+    var folderWatchPollTimer: Timer?
+    /// SER URLs already seen (existing-at-start snapshot + everything
+    /// enqueued) so each file is only ever auto-stacked once.
+    var watchSeenURLs: Set<URL> = []
+    /// Size-stability tracker for files currently being written.
+    var watchStability = WatchStabilityTracker(requiredStableSamples: 2)
+    /// Files confirmed stable + waiting to be auto-stacked (FIFO).
+    var watchReadyURLs: [URL] = []
+
     // Job status for batch runs
     @Published var jobStatus: JobStatus = .idle
 
@@ -294,6 +324,7 @@ final class AppModel: ObservableObject {
     }
 
     private static let outputBookmarkKey = "AstroSharper.customOutputBookmark.v1"
+    private static let watchFolderBookmarkKey = "AstroSharper.watchFolderBookmark.v1"
 
     /// Pin a user-chosen output folder. Stays sticky across folder switches
     /// (`autoOutputFolder` won't override it) and persists across launches
@@ -1269,6 +1300,177 @@ final class AppModel: ObservableObject {
 
     func clearLuckyStackQueue() {
         luckyStack.queue.removeAll()
+    }
+
+    // MARK: - Folder watcher (auto-stack realtime mode)
+
+    /// Default folder to offer in the watch picker: the currently-open
+    /// catalog root, then the last-watched bookmark, then nil.
+    var watchPickerDefaultURL: URL? {
+        catalog.rootURL ?? watchedFolderURL
+    }
+
+    /// Begin watching `url` for new SER captures. Snapshots the existing
+    /// `.ser` files as "seen" (backlog ignored per user choice), persists
+    /// the folder bookmark, and starts the kqueue watcher + poll timer.
+    func startFolderWatch(url: URL) {
+        stopFolderWatch()   // clean slate if re-pointed
+
+        grantSecurityScope(url)
+        persistWatchFolderBookmark(url)
+        watchedFolderURL = url
+
+        // Backlog snapshot — every .ser already present is treated as
+        // already-handled so we only auto-stack files that ARRIVE later.
+        watchSeenURLs = Set(currentSerURLs(in: url))
+        watchStability.reset()
+        watchReadyURLs.removeAll()
+        folderWatchStackedCount = 0
+
+        let watcher = FolderWatcher(callbackQueue: .main) { [weak self] in
+            self?.handleWatchedFolderChange()
+        }
+        guard watcher.start(url: url) else {
+            jobStatus = .error("Couldn't watch \(url.lastPathComponent) — folder unreadable or access denied.")
+            releaseSecurityScope(url)
+            watchedFolderURL = nil
+            return
+        }
+        folderWatcher = watcher
+        folderWatchActive = true
+        updateFolderWatchStatus(extra: "waiting for new captures…")
+
+        // Poll every 2 s: promote size-stable files to ready + pump the
+        // auto-stack. The kqueue tells us WHEN the dir changes; the poll
+        // does the size-stability gating + serial draining.
+        folderWatchPollTimer?.invalidate()
+        folderWatchPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.folderWatchPollTick() }
+        }
+    }
+
+    /// Stop watching. Releases the kqueue + poll timer; the security scope
+    /// + bookmark are kept so the picker can re-offer the same folder.
+    func stopFolderWatch() {
+        folderWatcher?.stop()
+        folderWatcher = nil
+        folderWatchPollTimer?.invalidate()
+        folderWatchPollTimer = nil
+        watchStability.reset()
+        watchReadyURLs.removeAll()
+        folderWatchActive = false
+        if !folderWatchStatus.isEmpty {
+            folderWatchStatus = "Watch stopped."
+        }
+    }
+
+    /// kqueue fired — re-scan the folder and start tracking any .ser we
+    /// haven't seen yet for size stability.
+    private func handleWatchedFolderChange() {
+        guard folderWatchActive, let url = watchedFolderURL else { return }
+        for serURL in currentSerURLs(in: url) where !watchSeenURLs.contains(serURL) {
+            // First sighting — begin stability tracking. Don't add to
+            // seen yet; we only mark seen once it's enqueued so a file
+            // that vanishes mid-write doesn't get stuck "seen but unrun".
+            _ = watchStability.observe(url: serURL, size: fileSize(serURL))
+        }
+    }
+
+    /// 2 s tick: re-observe sizes of tracked files, move newly-complete
+    /// ones to the ready queue, then drain one into the stacker if idle.
+    private func folderWatchPollTick() {
+        guard folderWatchActive, let url = watchedFolderURL else { return }
+
+        // Re-scan so files that appeared between kqueue coalesced events
+        // still get tracked. Cheap on a capture folder (tens of files).
+        for serURL in currentSerURLs(in: url) where !watchSeenURLs.contains(serURL) {
+            let complete = watchStability.observe(url: serURL, size: fileSize(serURL))
+            if complete {
+                watchReadyURLs.append(serURL)
+                watchSeenURLs.insert(serURL)
+                watchStability.forget(serURL)
+            }
+        }
+        pumpWatchQueue()
+        updateFolderWatchStatus(
+            extra: watchReadyURLs.isEmpty && watchStability.pendingCount == 0
+                ? "waiting for new captures…"
+                : "\(watchStability.pendingCount) capturing, \(watchReadyURLs.count) queued"
+        )
+    }
+
+    /// Start the next ready file if the lucky-stack pipeline is idle. One
+    /// at a time so each file's auto-detected target preset is the one
+    /// active when it actually runs (no mid-run preset drift).
+    private func pumpWatchQueue() {
+        guard folderWatchActive else { return }
+        // Gate on "not currently running" rather than "idle" — a finished
+        // watched stack leaves jobStatus at `.done`, which is not `.idle`;
+        // we still want to pick up the next ready file. An `.error` from
+        // one bad capture shouldn't halt the whole watch session either.
+        if case .running = jobStatus { return }
+        guard !watchReadyURLs.isEmpty else { return }
+        let next = watchReadyURLs.removeFirst()
+
+        // Resolve target: filename auto-detect first, then the active
+        // preset (user's chosen chip). If neither yields a target, skip
+        // this file with a logged warning rather than stacking with
+        // generic defaults that never match the data.
+        if let detected = PresetAutoDetect.detect(in: [
+            next.lastPathComponent,
+            next.deletingLastPathComponent().lastPathComponent
+        ]), let preset = presets.builtIn.first(where: { $0.target == detected }) {
+            applyPreset(preset)
+            luckyStack.winjuposTarget = preset.target.rawValue
+        } else if presets.activeID == nil {
+            NSLog("FolderWatch: skipping %@ — no target detected from filename and no active preset", next.lastPathComponent)
+            updateFolderWatchStatus(extra: "skipped \(next.lastPathComponent) — no target")
+            // Try the next ready file on the following tick.
+            return
+        }
+
+        let suggested = watchedFolderURL?.appendingPathComponent("_luckystack", isDirectory: true)
+        guard let outputFolder = resolveWritableOutputFolder(implicit: suggested) else {
+            jobStatus = .error("No writable output folder — auto-stack paused.")
+            return
+        }
+
+        luckyStack.queue = [LuckyStackItem(url: next, meridianFlipped: false, keepPercent: luckyStack.keepPercent)]
+        let opts = LuckyStackOptions(mode: luckyStack.mode, keepPercent: luckyStack.keepPercent)
+        folderWatchStackedCount += 1
+        updateFolderWatchStatus(extra: "stacking \(next.lastPathComponent)…")
+        runNextLuckyStackItem(outputFolder: outputFolder, options: opts)
+    }
+
+    private func updateFolderWatchStatus(extra: String) {
+        guard let url = watchedFolderURL else { folderWatchStatus = ""; return }
+        let name = url.lastPathComponent
+        folderWatchStatus = "Watching \(name)/ — \(folderWatchStackedCount) stacked · \(extra)"
+    }
+
+    /// All `.ser` URLs currently in `folder` (non-recursive, hidden
+    /// skipped). Used for both the backlog snapshot and the poll re-scan.
+    private func currentSerURLs(in folder: URL) -> [URL] {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+        ) else { return [] }
+        return contents.filter { $0.pathExtension.lowercased() == "ser" }
+    }
+
+    private func fileSize(_ url: URL) -> Int {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+    }
+
+    private func persistWatchFolderBookmark(_ url: URL) {
+        if let bookmark = try? url.bookmarkData(
+            options: [.withSecurityScope],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        ) {
+            UserDefaults.standard.set(bookmark, forKey: Self.watchFolderBookmarkKey)
+        }
     }
 
     private func runNextLuckyStackItem(outputFolder: URL, options: LuckyStackOptions) {

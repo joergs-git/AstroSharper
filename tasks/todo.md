@@ -26,6 +26,8 @@ A running record of where we are, what's done, and what's next. Update at the en
 
 5. **F3 v1.4 polish** & **B.6 / D.1 / A.2 / A.3** as before.
 
+**Folder watch + auto-stack shipped 2026-05-22 (LSW 5.2 parity):** The "realtime" feature previously listed as a Speed-only candidate (and earlier as an anti-goal "folder watching → defer unless trivial") is now live by explicit user request. `Engine/IO/FolderWatcher` (kqueue) + pure-Swift `WatchStabilityTracker` (8 unit tests). AppModel 2 s poll promotes size-stable new SERs to a ready queue and serially auto-stacks them via the existing runner (gated on "not running" so `.done` doesn't block the next). Backlog ignored (existing-files snapshot), per-file target = filename-detect → active preset → skip. Session-only, folder bookmark persisted but no auto-resume. UI = `FolderWatchControl` sub-view in the Lucky Stack section. 334/334 tests, F3 unchanged. **Open polish:** stability window is a fixed 2 polls (~4 s) — expose if real capture software flushes slower; no recursive subfolder watch yet (single folder only).
+
 **UX fixes shipped same session (post-`15b3c40`):**
 - Output tab after Apply Sharpen / Apply Tone now selects the newest-mtime file (was alphabetically-first → frequently landed on a stale 2026-02 leftover).
 - `batchTargetIDs` falls back to `previewFileID` when nothing is marked / selected — single-file workflows no longer require an extra click on the only visible file.

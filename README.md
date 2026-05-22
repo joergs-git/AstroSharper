@@ -70,6 +70,15 @@ A second wave of "automate the parameter most users get wrong" landed on top of 
 - **SER playback LRU cache + 4-frame prefetcher** — 16-slot RAM cache keyed by `(url, frameIndex)` plus background-queue look-ahead. NAS-based playback now hits cache instead of disk on most ticks; the prefetcher keeps the next 4 frames warm.
 - **AVI smoke test** — pipeline works for AVFoundation-supported formats; SharpCap raw mono AVI (`codec=rawvideo` + `pal8` + zeroed FourCC) is the documented blocker. Error message now points users to the ffmpeg one-liner workaround (`ffmpeg -i in.avi -c:v prores -profile:v 4 out.mov`). Native rawvideo decoder on the roadmap.
 
+### Folder watch + auto-stack — *new (2026-05-22)*
+
+Point AstroSharper at your SharpCap / FireCapture capture folder, press **Watch folder…** in the Lucky Stack section, and walk away. Each new SER is stacked the moment its capture finishes writing — leave it running overnight and wake up to a folder of stacked TIFFs.
+
+- **Size-stability gating** — a SER is only stacked once its file size has held steady for several seconds, so a half-written capture is never read past its truncation point. This is the failure mode that makes naive "watch + stack" tools produce garbage.
+- **Backlog left alone** — files already in the folder when you start watching are snapshotted as "seen". Only captures that *arrive after* you arm the watch get stacked, so pointing at a full archive doesn't re-process it.
+- **Per-file target** — each new SER's target is auto-detected from its filename (sun / moon / jupiter / saturn / mars keywords), falling back to whichever target chip is currently active. One-at-a-time serial stacking keeps the detected preset coherent with the file being processed.
+- **Session-only** — explicit Start / Stop; the watch never auto-resumes on launch, so there's no surprise CPU spin-up when you open the app. The folder is remembered as the picker default.
+
 ### LSW 6.21.1 parity wave — *new (2026-05-21)*
 
 A targeted comparison against the LuckyStackWorker User Manual surfaced five gaps worth closing under the Quality + Speed + minimal-user-action filter. All five shipped automatic by default where it's safe; mono / non-OSC sources stay numerically unchanged.

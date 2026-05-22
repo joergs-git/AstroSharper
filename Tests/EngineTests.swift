@@ -3914,6 +3914,89 @@ struct HighlightSuppressionTests {
     }
 }
 
+// MARK: - Folder-watch stability tracker (LSW 5.2 auto-stack parity)
+
+@Suite("WatchStabilityTracker — size-stable file completion")
+struct WatchStabilityTrackerTests {
+
+    private static let f = URL(fileURLWithPath: "/tmp/capture/jup_001.ser")
+
+    @Test("Growing file never completes")
+    func growingNeverCompletes() {
+        var t = WatchStabilityTracker(requiredStableSamples: 2)
+        #expect(t.observe(url: Self.f, size: 1_000) == false)
+        #expect(t.observe(url: Self.f, size: 2_000) == false)
+        #expect(t.observe(url: Self.f, size: 3_000) == false)
+        #expect(t.observe(url: Self.f, size: 4_000) == false)
+    }
+
+    @Test("Completes after requiredStableSamples equal observations")
+    func completesWhenStable() {
+        var t = WatchStabilityTracker(requiredStableSamples: 2)
+        #expect(t.observe(url: Self.f, size: 5_000) == false)  // first sighting
+        #expect(t.observe(url: Self.f, size: 5_000) == false)  // stableCount 1
+        #expect(t.observe(url: Self.f, size: 5_000) == true)   // stableCount 2 → complete
+    }
+
+    @Test("Fires complete exactly once, never again")
+    func firesOnce() {
+        var t = WatchStabilityTracker(requiredStableSamples: 1)
+        #expect(t.observe(url: Self.f, size: 9_000) == false)  // first sighting
+        #expect(t.observe(url: Self.f, size: 9_000) == true)   // stableCount 1 → complete
+        #expect(t.observe(url: Self.f, size: 9_000) == false)  // already fired
+        #expect(t.observe(url: Self.f, size: 9_000) == false)
+    }
+
+    @Test("Growth after stability resets the run (resumed capture)")
+    func growthResetsRun() {
+        var t = WatchStabilityTracker(requiredStableSamples: 2)
+        #expect(t.observe(url: Self.f, size: 1_000) == false)
+        #expect(t.observe(url: Self.f, size: 1_000) == false)  // stableCount 1
+        // Capture resumed — file grew again. Run resets, must NOT complete
+        // on the very next equal sample.
+        #expect(t.observe(url: Self.f, size: 2_000) == false)  // reset
+        #expect(t.observe(url: Self.f, size: 2_000) == false)  // stableCount 1
+        #expect(t.observe(url: Self.f, size: 2_000) == true)   // stableCount 2 → complete
+    }
+
+    @Test("Zero-size placeholder never completes")
+    func zeroSizeNeverCompletes() {
+        var t = WatchStabilityTracker(requiredStableSamples: 1)
+        #expect(t.observe(url: Self.f, size: 0) == false)
+        #expect(t.observe(url: Self.f, size: 0) == false)
+        // Once data lands it starts the run normally.
+        #expect(t.observe(url: Self.f, size: 100) == false)
+        #expect(t.observe(url: Self.f, size: 100) == true)
+    }
+
+    @Test("forget drops tracking so the file can complete fresh later")
+    func forgetResets() {
+        var t = WatchStabilityTracker(requiredStableSamples: 1)
+        #expect(t.observe(url: Self.f, size: 7_000) == false)
+        #expect(t.observe(url: Self.f, size: 7_000) == true)
+        t.forget(Self.f)
+        // After forget, the URL is a fresh first-sighting again.
+        #expect(t.observe(url: Self.f, size: 7_000) == false)
+        #expect(t.observe(url: Self.f, size: 7_000) == true)
+    }
+
+    @Test("pendingCount tracks not-yet-complete files")
+    func pendingCount() {
+        var t = WatchStabilityTracker(requiredStableSamples: 2)
+        let a = URL(fileURLWithPath: "/tmp/a.ser")
+        let b = URL(fileURLWithPath: "/tmp/b.ser")
+        _ = t.observe(url: a, size: 100)
+        _ = t.observe(url: b, size: 200)
+        #expect(t.pendingCount == 2)
+        // Complete a.
+        _ = t.observe(url: a, size: 100)
+        _ = t.observe(url: a, size: 100)
+        #expect(t.pendingCount == 1)
+        t.reset()
+        #expect(t.pendingCount == 0)
+    }
+}
+
 // MARK: - Purple-fringe suppression (LSW 7.1 parity)
 
 @Suite("PurpleFringe — hue-targeted desaturation")

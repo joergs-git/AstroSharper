@@ -760,6 +760,11 @@ struct LuckyStackSection: View {
                 }
                 .help("Stacks every marked or selected .ser file. Output goes to the configured Output Folder.")
 
+                // Auto-stack folder watch (LSW 5.2 realtime parity) — its
+                // own sub-view to keep this section's @ViewBuilder budget
+                // in check.
+                FolderWatchControl()
+
                 Text(hintLine)
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
