@@ -1555,7 +1555,11 @@ final class AppModel: ObservableObject {
             ? outputFolder
             : outputFolder.appendingPathComponent(item.variantLabel, isDirectory: true)
         try? FileManager.default.createDirectory(at: variantDir, withIntermediateDirectories: true)
-        let outURL = variantDir.appendingPathComponent(outName)
+        // Never overwrite an existing output — number up (`name_1.tif`,
+        // `name_2.tif`, …) so repeated stacks of the same source with
+        // different settings sit side-by-side for comparison instead of
+        // clobbering each other.
+        let outURL = Self.uniqueOutputURL(variantDir.appendingPathComponent(outName))
         luckyStack.queue[nextIdx].status = .processing
         luckyStack.queue[nextIdx].progress = 0.0
 
@@ -1805,16 +1809,19 @@ final class AppModel: ObservableObject {
 
     // MARK: - Presets
 
-    func applyPreset(_ preset: Preset) {
-        // Preserve user's session-sticky Sharpen/Stabilize/ToneCurve
-        // ENABLE flags. Built-in presets (Sun, Jupiter, etc.) often
-        // come with these enabled, but the user wants them to default
-        // OFF at app launch and to STAY at whatever they've set during
-        // the session — file changes (which trigger autoApplyDefaultPreset)
-        // shouldn't flip them back on. Default Bool is false at app
-        // launch, so the first applyPreset call leaves them off; if the
-        // user toggles enabled=true mid-session, that state survives
-        // subsequent file loads.
+    /// Apply a preset's parameters to the live pipeline.
+    ///
+    /// `userInitiated` controls the section ENABLE toggles (Sharpen /
+    /// Stabilize / Tone Curve, plus the noise / wavelet sub-flags that
+    /// ride inside `SharpenSettings`):
+    ///   - false (default — auto-apply on file open / scroll / folder
+    ///     watch): PRESERVE the user's session toggle states so silently
+    ///     swapping presets as files change never flips a section back on.
+    ///   - true (explicit pick — target chip or preset menu): HONOUR the
+    ///     preset's saved enable flags, so choosing "Sun" actually turns
+    ///     on the sections that preset needs. The user can still toggle
+    ///     them off afterwards; the next explicit pick re-applies.
+    func applyPreset(_ preset: Preset, userInitiated: Bool = false) {
         let userSharpenEnabled  = sharpen.enabled
         let userStabilizeEnabled = stabilize.enabled
         let userToneEnabled      = toneCurve.enabled
@@ -1823,9 +1830,13 @@ final class AppModel: ObservableObject {
         stabilize = preset.stabilize
         toneCurve = preset.toneCurve
 
-        sharpen.enabled   = userSharpenEnabled
-        stabilize.enabled = userStabilizeEnabled
-        toneCurve.enabled = userToneEnabled
+        // Auto-apply: roll the enable flags back to the session state.
+        // Explicit pick: leave the preset's own enabled flags in place.
+        if !userInitiated {
+            sharpen.enabled   = userSharpenEnabled
+            stabilize.enabled = userStabilizeEnabled
+            toneCurve.enabled = userToneEnabled
+        }
         luckyStack.mode = preset.luckyMode
         luckyStack.keepPercent = preset.luckyKeepPercent
         // Per-preset Multi-AP tuning. Grid==0 means the preset prefers the
@@ -2603,6 +2614,33 @@ struct LuckyStackUIState {
     /// / coarse-shift inputs (the BiggSky-warned grid-moiré artefact).
     /// Only effective when `drizzleScale > 1`.
     var drizzleAASigma: Double = 0.7
+}
+
+extension AppModel {
+    /// Return `url` if no file exists there, otherwise the first free
+    /// `<stem>_N.<ext>` (N = 1, 2, …). Lets repeated stacks of the same
+    /// source land side-by-side for setting comparison instead of
+    /// overwriting. Bounded loop guards against a pathological full
+    /// directory (falls back to a UUID-tagged name after 9999 tries).
+    static func uniqueOutputURL(_ url: URL) -> URL {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return url }
+        let dir = url.deletingLastPathComponent()
+        let ext = url.pathExtension
+        let stem = url.deletingPathExtension().lastPathComponent
+        var n = 1
+        while n < 10_000 {
+            let candidate = dir.appendingPathComponent(
+                ext.isEmpty ? "\(stem)_\(n)" : "\(stem)_\(n).\(ext)"
+            )
+            if !fm.fileExists(atPath: candidate.path) { return candidate }
+            n += 1
+        }
+        // Pathological fallback — directory crammed with numbered files.
+        return dir.appendingPathComponent(
+            ext.isEmpty ? "\(stem)_\(UUID().uuidString)" : "\(stem)_\(UUID().uuidString).\(ext)"
+        )
+    }
 }
 
 enum LuckyStackNaming {

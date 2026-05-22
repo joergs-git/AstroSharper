@@ -291,7 +291,10 @@ private struct TargetChip: View {
     /// AppModel.autoApplyDefaultPreset.
     private func applyTargetPreset() {
         if let preset = app.presets.builtIn.first(where: { $0.target == target }) {
-            app.applyPreset(preset)
+            // Explicit user pick — honour the preset's saved section
+            // enable flags (turns Sharpen / Tone / etc. on as the preset
+            // intends), unlike the auto-apply-on-file-change path.
+            app.applyPreset(preset, userInitiated: true)
             app.luckyStack.winjuposTarget = preset.target.rawValue
         }
     }

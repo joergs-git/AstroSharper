@@ -235,7 +235,7 @@ struct LuckyStackSection: View {
                     Spacer()
                     Toggle(isOn: $app.luckyStack.autoNuke) {
                         Label(
-                            app.luckyStack.autoNuke ? "AutoNuke ON" : "AutoNuke",
+                            app.luckyStack.autoNuke ? "AutoNuke is ON" : "AutoNuke is OFF",
                             systemImage: "wand.and.stars"
                         )
                             .font(.system(size: 12, weight: .semibold))

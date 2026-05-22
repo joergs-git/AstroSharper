@@ -5,6 +5,24 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+### Added
+- **Stacked outputs are never overwritten** — when a file of the same
+  name already exists, the new stack is numbered up (`name_1.tif`,
+  `name_2.tif`, …) so repeated stacks of the same source with different
+  settings sit side-by-side for comparison.
+
+### Changed
+- **AutoNuke button reads "AutoNuke is ON" / "AutoNuke is OFF"** so the
+  current state is unambiguous at a glance.
+- **Explicitly picking a preset now re-activates its section toggles.**
+  Choosing a target chip or a preset from the menu honours the enable
+  flags the preset saved (Sharpen / Tone Curve / Stabilize, plus the
+  noise / wavelet sub-flags) — so picking "Sun" actually turns on the
+  sections that preset needs. Auto-apply on file open / scroll / folder
+  watch still preserves the user's session toggle states (a file change
+  never silently flips a section back on). New `applyPreset(_:userInitiated:)`
+  distinguishes the two paths.
+
 ### Fixed
 - **Crash when fast-forwarding / scrubbing a SER whose header overstates
   its frame count** (truncated copy or a capture still being written).
