@@ -7,13 +7,16 @@ the project follows semantic versioning once it leaves 0.x.
 
 ### Added
 - **Drift correction (opt-in)** for slowly-drifting planets. When a long
-  capture's planet wandered across the frame and the stack shows a ghost /
-  double contour, enable "Drift correction (planet wandered)" in the Lucky
-  Stack section (CLI `--drift-correct`). It robustly fits a drift trajectory
-  through the per-frame shifts and snaps outlier frames — where full-frame
-  phase correlation failed on the small disc against dark sky — back onto
-  it. Default OFF: on well-tracked captures the real shift variation can
-  exceed the outlier threshold, so always-on perturbed the F3 baselines.
+  capture's planet wandered across the frame, enable "Drift correction
+  (planet wandered)" in the Lucky Stack section (CLI `--drift-correct`).
+  It aligns by the background-subtracted disc CENTROID instead of phase
+  correlation — robust for a bright disc that drifts, and used for both
+  the reference build and the final per-frame shifts so the reference
+  can't ghost either. Default OFF (always-on perturbed the F3 baselines).
+  Note: this needs a reasonably-exposed disc; it can't rescue a very
+  low-contrast capture where the planet barely stands out from a bright
+  sky (the alignment is data-limited there — fix it capture-side with
+  more exposure / darker sky / shorter sub-captures).
 - **Stop button in the stacking progress overlay** (2026-05-22). Aborts an
   in-flight lucky stack — the engine polls cancellation per frame, drains
   its staging semaphore cleanly, removes any partial output, and resets

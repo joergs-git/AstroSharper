@@ -46,9 +46,11 @@ When multi-AP IS engaged, each cell only earns a local shift if its SAD minimum 
 
 Long planetary captures sometimes drift — mount tracking error or field rotation slowly walks the planet across the frame over 20–60 s. Full-frame phase correlation can fail on the odd frame (a small bright disc on a large dark sky is noise-dominated; a frame locks on the (0,0) DC peak instead of tracking the drift), and those frames accumulate at the wrong position → a **ghost / double contour**.
 
-Enable **Drift correction (planet wandered)** in the Lucky Stack section (CLI `--drift-correct`) for such a capture. It robustly fits a drift trajectory (gap-aware least-squares line through the per-frame shifts, with a 2-pass outlier reject) and snaps shifts that deviate too far back onto the line.
+Enable **Drift correction (planet wandered)** in the Lucky Stack section (CLI `--drift-correct`) for such a capture. It aligns by the **background-subtracted disc centroid** instead of phase correlation — the centroid of the brightest blob tracks the planet directly, immune to the phase-correlation scatter. It drives both the reference build and the final per-frame alignment, so the reference can't ghost either.
 
-**Default OFF** on purpose: well-tracked captures have real shift variation that the outlier threshold can catch, so always-on perturbed the F3 reference set (softer output). Turn it on only for a capture you can see ghosting.
+**Default OFF** on purpose: well-tracked captures have real shift variation, so always-on perturbed the F3 reference set. Turn it on only for a capture you can see ghosting.
+
+**Caveat — it's data-limited.** Centroid alignment needs the disc to actually stand out. On a very low-contrast capture (planet only ~1.5–2× brighter than a bright sky — twilight, haze, or too much gain), the centroid is as noisy as phase correlation and drift correction won't rescue it. The real fix there is capture-side: more exposure on the planet, a darker sky, or shorter sub-captures (e.g. 3×10 s instead of 1×30 s) to limit how far the planet drifts within one stack.
 
 ## Variants
 

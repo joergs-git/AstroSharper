@@ -1631,13 +1631,10 @@ private final class LuckyRunner {
         // outliers back onto the single drift line, killing the ghost.
         // No-op on well-tracked captures (shifts already smooth → no
         // outliers), so it's always-on.
-        if options.validateDrift {
-            referenceShifts = Self.validateGlobalDrift(
-                shifts: referenceShifts,
-                keptOrder: kept,
-                referenceIndex: referenceIndex
-            )
-        }
+        // (Drift correction now happens inside alignAgainstReference via
+        // disc-centroid alignment when options.validateDrift is set — it
+        // replaces phase correlation for BOTH the reference build and the
+        // final per-frame shifts, so the reference can't ghost either.)
 
         // AutoAP — empirical AP-grid + patchHalf + drop-list + deconv-
         // tile-size selection from the reference luma. Runs CPU-side
@@ -1961,82 +1958,28 @@ private final class LuckyRunner {
         return accum
     }
 
-    /// Snap drift-outlier global shifts back onto the drift trajectory.
-    /// A slowly-drifting planet (mount error / field rotation over a long
-    /// capture) makes full-frame phase correlation fail on the odd frame —
-    /// a small bright disc on dark sky is noise-dominated, so a frame locks
-    /// on the (0,0) DC peak or a spurious offset, accumulating at the wrong
-    /// position → a ghost / double contour.
-    ///
-    /// Robustly fits a LINE through (frameIndex → shift) per axis (the
-    /// drift is ~constant velocity in capture time) and replaces shifts
-    /// whose residual exceeds the threshold with the fitted value. Using
-    /// frameIndex as the abscissa makes the fit GAP-AWARE — essential
-    /// because the kept frames are a quality-sorted, non-uniformly-spaced
-    /// subset. (An earlier last-two-points extrapolation assumed uniform
-    /// spacing and false-flagged good shifts on well-tracked BiggSky
-    /// captures, softening the stack — caught by the F3 regression.)
-    /// A clean, well-tracked capture fits a near-flat line with tiny
-    /// residuals → nothing flagged → passes through unchanged.
-    static func validateGlobalDrift(
-        shifts: [Int: SIMD2<Float>],
-        keptOrder: [Int],
-        referenceIndex: Int
-    ) -> [Int: SIMD2<Float>] {
-        let chrono = keptOrder.sorted()
-        guard chrono.count >= 8 else { return shifts }   // too few to fit robustly
-
-        let xs = chrono.map { Double($0) }
-        let dxs = chrono.map { Double(shifts[$0]?.x ?? 0) }
-        let dys = chrono.map { Double(shifts[$0]?.y ?? 0) }
-
-        // Two-pass robust line fit: LSQ, drop points whose residual is
-        // > 3× the median residual, refit on the inliers. Outliers
-        // (failed correlations) can't bias the trajectory that way.
-        func robustLine(_ ys: [Double]) -> (a: Double, b: Double) {
-            func lsq(_ idx: [Int]) -> (Double, Double) {
-                let n = Double(idx.count)
-                guard n >= 2 else { return (idx.first.map { ys[$0] } ?? 0, 0) }
-                var sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0
-                for i in idx { sx += xs[i]; sy += ys[i]; sxx += xs[i]*xs[i]; sxy += xs[i]*ys[i] }
-                let denom = n*sxx - sx*sx
-                guard abs(denom) > 1e-9 else { return (sy / n, 0) }
-                let b = (n*sxy - sx*sy) / denom
-                let a = (sy - b*sx) / n
-                return (a, b)
-            }
-            let all = Array(ys.indices)
-            var (a, b) = lsq(all)
-            let resid = all.map { abs(ys[$0] - (a + b*xs[$0])) }
-            let medResid = resid.sorted()[resid.count / 2]
-            let cutoff = max(1.0, 3.0 * medResid)
-            let inliers = all.filter { abs(ys[$0] - (a + b*xs[$0])) <= cutoff }
-            if inliers.count >= 2 && inliers.count < all.count { (a, b) = lsq(inliers) }
-            return (a, b)
-        }
-
-        let fx = robustLine(dxs)
-        let fy = robustLine(dys)
-
-        // Residual threshold in full-res px. Well-tracked seeing jitter
-        // sits well under this; a drift-ghost outlier (0,0 vs a large
-        // drift offset) blows past it.
-        let thresh = 8.0
-        var out = shifts
-        var corrected = 0
-        for (i, idx) in chrono.enumerated() {
-            let predDx = fx.a + fx.b * xs[i]
-            let predDy = fy.a + fy.b * xs[i]
-            if abs(dxs[i] - predDx) > thresh || abs(dys[i] - predDy) > thresh {
-                out[idx] = SIMD2<Float>(Float(predDx), Float(predDy))
-                corrected += 1
+    /// Disc-centroid shift for drift correction. Full-frame phase
+    /// correlation fails on a low-contrast planet against a not-very-dark
+    /// background (the odd frame locks on the DC peak or scatters — seen
+    /// as a huge global-shift sigma), so a slowly-drifting planet ghosts
+    /// the stack. The brightness centroid of the background-subtracted
+    /// disc tracks the planet directly, immune to that failure. Background
+    /// = the luma median (robust on a bright-sky frame); only pixels above
+    /// it contribute, so the disc dominates the centroid.
+    static func discCentroid(_ luma: [Float], n: Int) -> SIMD2<Float> {
+        var sorted = luma
+        sorted.sort()
+        let bg = sorted[sorted.count / 2]
+        var sumI = 0.0, sumX = 0.0, sumY = 0.0
+        for y in 0..<n {
+            let row = y * n
+            for x in 0..<n {
+                let v = Double(luma[row + x]) - Double(bg)
+                if v > 0 { sumI += v; sumX += Double(x) * v; sumY += Double(y) * v }
             }
         }
-        if corrected > 0 {
-            NSLog("Drift validation: corrected %d/%d outlier shift(s) — planet-drift ghost guard",
-                  corrected, chrono.count)
-        }
-        return out
+        guard sumI > 1e-6 else { return SIMD2<Float>(Float(n) / 2, Float(n) / 2) }
+        return SIMD2<Float>(Float(sumX / sumI), Float(sumY / sumI))
     }
 
     private func alignAgainstReference(referenceTex: MTLTexture, indices: [Int]) async throws -> [Int: SIMD2<Float>] {
@@ -2060,6 +2003,24 @@ private final class LuckyRunner {
 
         var result: [Int: SIMD2<Float>] = [:]
         var shifts = [SIMD2<Float>](repeating: .zero, count: lumas.count)
+
+        // Drift correction: replace phase correlation with disc-centroid
+        // alignment. Robustly tracks a drifting planet on a low-contrast /
+        // bright-sky background where full-frame phase correlation
+        // scatters (huge shift sigma → ghost). Same code path serves both
+        // the reference build and the final per-frame alignment, so the
+        // reference itself is no longer a ghost. Shift convention matches
+        // the accumulator's `frame[gid - shift]`: shift = refCentroid -
+        // frameCentroid, scaled to full res.
+        if options.validateDrift {
+            let refC = Self.discCentroid(refLuma, n: n)
+            for (i, item) in lumas.enumerated() {
+                let c = Self.discCentroid(item.data, n: n)
+                shifts[i] = SIMD2<Float>((refC.x - c.x) * scaleX, (refC.y - c.y) * scaleY)
+            }
+            for (i, item) in lumas.enumerated() { result[item.idx] = shifts[i] }
+            return result
+        }
 
         if #available(macOS 14.0, *), let gpu = gpuCorrelator {
             // GPU path — feed each frame through the pre-built MPSGraph.
