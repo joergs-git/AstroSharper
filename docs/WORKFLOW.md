@@ -13,8 +13,9 @@ Three end-to-end paths for the most common targets. Each one is one-pass — ope
 2.  Mark all .ser files (⌘A then space)
 3.  Press R on the sharpest preview frame   ← anchor for stabilization
 4.  Pick preset:
-        – Sun · Granulation        for white-light surface
-        – Sun · Prominences        for Hα limb features
+        – Sun — Granulation        for white-light surface
+        – Sun — Full Disk          for the whole disc
+        – Sun — Hα Prominence      for Hα limb features
 5.  In Stabilize section:
         – Reference   : Marked
         – Alignment   : Disc Centroid    (locks onto the limb)
@@ -40,7 +41,7 @@ Three end-to-end paths for the most common targets. Each one is one-pass — ope
 ```
 1.  Open folder, mark .ser files
 2.  R on a frame where seeing froze nicely
-3.  Preset: Moon · Detail
+3.  Preset: Moon — High Detail  (or Moon — Wide Field for whole-disc)
 4.  Stabilize:
         – Alignment : Disc Centroid  (full Moon)
                       Reference ROI  (close-up of a crater field)

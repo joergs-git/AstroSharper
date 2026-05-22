@@ -1,37 +1,42 @@
 # Lucky Stack
 
-The SER → final-image pipeline. Three modes balance speed against quality.
+The SER → final-image pipeline. Two modes balance speed against quality.
 
 ## Modes
 
 | Mode | What it does | When to use |
 | --- | --- | --- |
-| **Lightspeed** | Top-N% best frames, single-AP global align, simple weighted mean. | Quick previews; "is this SER worth keeping?" |
-| **Balanced** | Top-N% best frames, multi-AP local refinement, gamma-shaped quality weights. | Default. Fits 95 % of imaging sessions. |
-| **Scientific** | Two-pass: top-5 % aligned-accumulated → use that as reference for re-aligning all kept frames. Gamma-shaped weights. | Demanding solar / lunar / planetary imaging where every grain of detail matters. |
+| **Lightspeed** | Top-N% best frames, single-AP global align, weighted mean. AutoStakkert-equivalent. Fast. | Whole-disc subjects with little local distortion (full-disc Sun / Moon); quick "is this SER worth keeping?" passes. |
+| **Scientific** | Builds a reference from the top frames, re-aligns all kept frames to it, multi-AP local refinement, LoG quality grading, optional post-stack Wiener deconvolution. Slower, higher fidelity. | High-resolution surface / planetary work where local seeing matters. |
+
+(There is no "Balanced" mode — earlier docs listed one that was never in the code. The enum is exactly `lightspeed` + `scientific`.)
 
 ## Quality grading
 
-Each frame is scored by **3×3 Laplacian variance** on a downsampled luminance — high variance = high-frequency content = sharp frame. The score is computed once, cached (`lumaCache`), and reused across stack passes.
+Each frame is scored by a **Laplacian / LoG sharpness metric** on a downsampled luminance — high response = high-frequency content = sharp frame. The score is computed once, cached, and reused across stack passes.
 
-The **Keep %** slider picks the top fraction. 25 % is a good default; bump to 50 % for short captures, drop to 10 % for very long ones.
+The **Keep %** slider picks the top fraction. Sensible defaults are target-dependent (see [Presets](Presets.md)): planetary 20–25 %, lunar 25–50 %, solar 30–50 %. `--auto-keep` resolves it from the frame-quality distribution, clamped to a [20 %, 75 %] band with a frame-count floor so very short captures don't over-reject.
 
 ## Multi-AP (alignment-point) refinement
 
 After global alignment, AstroSharper splits the frame into a grid (e.g. 8×8 for Jupiter belts) and computes a local SAD-search shift per cell. Each cell's content is warped independently, then bilinear-blended at boundaries. This catches local seeing distortions that global alignment can't.
 
-Per-preset tuning:
+Per-preset tuning (matches `BuiltInPresets`):
 
 | Preset | Grid | Patch half-size |
 | --- | --- | --- |
-| Sun · Granulation | 12×12 | 24 px |
-| Sun · Prominences | 6×6 | 32 px |
-| Moon · Detail | 10×10 | 28 px |
-| Jupiter · Belts | 8×8 | 24 px |
-| Saturn · Rings | 6×6 | 28 px |
-| Mars · Surface | 12×12 | 20 px |
+| Sun — Granulation | 12×12 | 24 px |
+| Sun — Full Disk | 8×8 | 32 px |
+| Sun — Hα Prominence | 8×8 | 32 px |
+| Moon — High Detail | 10×10 | 24 px |
+| Moon — Wide Field | 8×8 | 32 px |
+| Jupiter — Standard | 10×10 | 24 px |
+| Jupiter — Belt Detail | 10×10 | 16 px |
+| Saturn — Standard | 10×10 | 24 px |
+| Saturn — Ring Emphasis | 12×12 | 24 px |
+| Mars — Standard | 6×6 | 16 px |
 
-You can override these in the Multi-AP popup.
+You can override these in the Multi-AP popup. **AutoAP** (default on) picks grid + patch from the reference frame automatically; touching the sliders or running with `--multi-ap-grid N` switches to manual. See [Presets](Presets.md) for *why* the grids differ per target.
 
 ## Variants
 
@@ -63,7 +68,7 @@ Default **ON**. The stacked texture is run through the standard Sharpen + Tone-C
 
 ## Why this is fast
 
-Every step except quality grading runs on the GPU. Bayer demosaic is a Metal kernel; AP shifts are dispatched in threadgroup-sized parallel; weighted accumulation uses 16-bit float ping-pong textures so it never quantises. A 1500-frame Jupiter SER stacks in under 30 seconds on M2 with Balanced mode.
+Every step except quality grading runs on the GPU. Bayer demosaic is a Metal kernel; AP shifts are dispatched in threadgroup-sized parallel; weighted accumulation runs in **32-bit float** so it never banks visible quantisation banding through the later sharpen pass. A 1500-frame Jupiter SER stacks in well under a minute on an M2 in Scientific mode.
 
 ## See also
 
