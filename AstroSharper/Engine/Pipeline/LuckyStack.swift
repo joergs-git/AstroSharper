@@ -41,9 +41,9 @@ enum LuckyStackMode: String, CaseIterable, Identifiable, Codable {
     var description: String {
         switch self {
         case .lightspeed:
-            return "AutoStakkert-equivalent. Laplacian quality, single-AP global alignment, fast."
+            return "Single-pass align + multi-AP refine + accumulate. The right default for clean captures (good seeing, low drift) — on quality data, indistinguishable from Scientific."
         case .scientific:
-            return "Reference-stack alignment, LoG quality, post-stack Wiener deconv. Slower, higher fidelity."
+            return "Adds an explicit top-25% reference build + re-alignment pass before stacking. Only moves the needle on HARD data: varying seeing, drift, low SNR. On clean captures it converges to Lightspeed (verified headless 2026-05-23: <0.1% RMS diff on BiggSky moon)."
         }
     }
 }

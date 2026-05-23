@@ -6,8 +6,10 @@ The SER → final-image pipeline. Two modes balance speed against quality.
 
 | Mode | What it does | When to use |
 | --- | --- | --- |
-| **Lightspeed** | Top-N% best frames, single-AP global align, weighted mean. AutoStakkert-equivalent. Fast. | Whole-disc subjects with little local distortion (full-disc Sun / Moon); quick "is this SER worth keeping?" passes. |
-| **Scientific** | Builds a reference from the top frames, re-aligns all kept frames to it, multi-AP local refinement, LoG quality grading, optional post-stack Wiener deconvolution. Slower, higher fidelity. | High-resolution surface / planetary work where local seeing matters. |
+| **Lightspeed** | Top-N% best frames, multi-AP local refinement (via AutoAP), weighted mean. The right default for clean captures. | Most real-world data — good seeing, well-tracked, decent SNR. |
+| **Scientific** | Adds an explicit top-25% **reference build** + a **re-alignment pass** before stacking. Same multi-AP refinement otherwise. | Hard data: varying seeing, drift, low SNR — where the reference choice matters. |
+
+**Reality check (2026-05-23 headless on BiggSky moon):** on clean data the two modes are indistinguishable — RMS diff 0.065%, zero pixels differ by >0.5%. Both engaged identical AutoAP refinement (grid 8, patchHalf 24). Scientific's extra reference-build step matters only when the data is *hard enough* that the reference choice actually changes the alignment outcome. **Start with Lightspeed; switch to Scientific only if you can see ghosting / softness from a marginal capture.**
 
 (There is no "Balanced" mode — earlier docs listed one that was never in the code. The enum is exactly `lightspeed` + `scientific`.)
 
