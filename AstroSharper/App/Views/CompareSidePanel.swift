@@ -63,6 +63,17 @@ struct CompareSidePanel: View {
         return nil
     }
 
+    /// Context-aware label for the top thumbnail. Outputs is the most
+    /// common A/B case (post-stack comparison) so we say so explicitly
+    /// rather than the ambiguous "Stacked / Current File".
+    private var currentSectionLabel: String {
+        switch app.displayedSection {
+        case .outputs: return "Stacked result"
+        case .inputs:  return "Current input (unstacked)"
+        case .memory:  return "Current file"
+        }
+    }
+
     private var sourceLabel: String {
         if let url = app.lastStackedSourceURL { return url.lastPathComponent }
         if app.displayedSection == .inputs { return currentFileLabel }
@@ -108,7 +119,7 @@ struct CompareSidePanel: View {
 
             Divider()
 
-            sectionLabel("Stacked / Current File", systemImage: "photo")
+            sectionLabel(currentSectionLabel, systemImage: "photo")
             thumbnailFrame(image: currentFileThumbnail, caption: currentFileLabel)
 
             Divider()
