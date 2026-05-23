@@ -128,6 +128,8 @@ struct HowToView: View {
                               text: "After Stabilize, the HUD shows a Drift sparkline + peak shift in pixels — quick read on how much atmospheric motion the registration absorbed.")
                     BulletRow(icon: "circle.dashed.inset.filled", color: .teal,
                               text: "Planet ghosting / double contour after a long capture (planet drifted)? Enable 'Drift correction (planet wandered)' in Lucky Stack — it aligns by the disc centroid. Caveat: it needs a disc that stands out; a low-contrast / bright-sky capture is data-limited (fix with more exposure, darker sky, or shorter sub-captures).")
+                    BulletRow(icon: "arrow.up.circle.fill", color: .orange,
+                              text: "Upload still in progress? When a SharpCap capture (or any tool) is still writing to disk / NAS, the Inputs row dims and shows an orange upload arrow; the size column ticks up live every 5 s. Wait for the orange to disappear before stacking — that's the 'fully written' signal.")
                     BulletRow(icon: "scope", color: .pink,
                               text: "Median HFR (half-flux radius) joins the Jitter row in the HUD after a Calculate Video Quality scan. Lower = sharper / more concentrated PSF.")
 

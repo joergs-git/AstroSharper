@@ -8,7 +8,17 @@ struct FileEntry: Identifiable, Hashable {
     let id: UUID
     let url: URL
     let name: String
-    let sizeBytes: Int64
+    /// Mutable so the input-list size poller can reflect an in-progress
+    /// upload as it grows (e.g. SharpCap writing to a NAS share). The
+    /// poller updates this AND `isUploading` together — see
+    /// `AppModel.pollInputSizes()`.
+    var sizeBytes: Int64
+    /// True while the file's size is still growing between consecutive
+    /// 5 s polls — indicates an upload / capture is still writing.
+    /// Renders the file-list row dimmed with an upload icon so the user
+    /// knows not to start stacking yet. Flips back to false on the first
+    /// poll where the size hasn't changed.
+    var isUploading: Bool = false
     /// Filesystem creation date (or modification date as fallback). Shown in
     /// the list so the user can match outputs to capture sessions.
     let creationDate: Date?

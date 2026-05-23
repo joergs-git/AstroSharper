@@ -24,6 +24,15 @@ If you're on the older behaviour, update to the latest commit.
 
 Bake-in is OFF. Open the Lucky Stack section and turn on **Bake-in (Sharpen + Tone)**. The stacked texture will then run through the sharpening / tone pipeline before saving — what you see in the preview is what you get on disk.
 
+## Is the SharpCap upload to my NAS finished?
+
+The Inputs file list refreshes file sizes every 5 seconds. While a file is still being written:
+- the row dims,
+- an orange ⬆ arrow appears next to the filename, and
+- the Size column updates live in orange.
+
+When the size stops changing for one poll (≈5 s), the row flips back to normal — that's the safe moment to start stacking. (You can still start while it's uploading; the SER reader handles partial files, but you'll only stack the frames written so far.)
+
 ## Planet stack shows a ghost / double contour
 
 The planet drifted across the frame during a long capture (mount tracking error / field rotation) and the kept frames didn't all align to the same position.

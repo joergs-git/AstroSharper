@@ -187,8 +187,20 @@ struct FileListView: View {
                             .foregroundColor(.clear)
                             .font(.system(size: 10))
                     }
+                    // Upload-in-progress badge — the size poller flips this
+                    // on for any file whose size is still growing between
+                    // 5 s ticks. Tells the user "wait, the capture is still
+                    // writing to disk / NAS" before they start stacking.
+                    if file.isUploading {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 10))
+                            .help("Still uploading / writing to disk. Wait for the size to stop growing before stacking.")
+                    }
                     Text(file.name).font(.system(size: 12))
+                        .foregroundColor(file.isUploading ? .secondary : .primary)
                 }
+                .opacity(file.isUploading ? 0.6 : 1.0)
             }
 
             // Sortable extension column — clicking groups SER together and
@@ -236,9 +248,13 @@ struct FileListView: View {
             .width(115)
 
             TableColumn("Size", value: \.sizeBytes) { (file: FileEntry) in
+                // While uploading we tint the size orange so the live
+                // increasing number is the obvious focus point — the user
+                // can watch the upload tick up and know when to start.
                 Text(Self.sizeString(file.sizeBytes))
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(file.isUploading ? .orange : .secondary)
+                    .help(file.isUploading ? "File is still being written — size updates every 5 s." : "")
             }
             .width(80)
 

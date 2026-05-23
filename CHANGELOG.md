@@ -6,6 +6,16 @@ the project follows semantic versioning once it leaves 0.x.
 ## [Unreleased]
 
 ### Added
+- **Live file-size refresh in the Inputs list** — a 5 s poller re-stats every
+  catalog file. The size column ticks up while SharpCap (or another capture
+  tool) is still writing to disk / NAS, and the row visibly indicates the
+  upload-in-progress state: dimmed text, an orange upload arrow next to the
+  filename, and the size in orange. When the size stops changing (one poll
+  with no growth), the row flips back to normal — that's the "OK to start
+  stacking now" signal. Cost is one stat() per Inputs file every 5 s
+  (negligible even over a NAS share).
+- **"If you like it — ☕ buy me a coffee" link** added to the splash footer
+  next to GitHub / AstroBin (the modal About sheet already had it).
 - **Drift correction (opt-in)** for slowly-drifting planets. When a long
   capture's planet wandered across the frame, enable "Drift correction
   (planet wandered)" in the Lucky Stack section (CLI `--drift-correct`).

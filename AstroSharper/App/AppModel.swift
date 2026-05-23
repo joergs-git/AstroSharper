@@ -141,6 +141,17 @@ final class AppModel: ObservableObject {
     /// SER URLs already seen (existing-at-start snapshot + everything
     /// enqueued) so each file is only ever auto-stacked once.
     var watchSeenURLs: Set<URL> = []
+
+    /// 5-second poller that re-stats every catalog file, so an in-progress
+    /// upload (e.g. SharpCap → NAS share) shows its growing size live and
+    /// flips the row to "uploading" until the size stops changing. Cheap —
+    /// one stat() per Inputs file. See `pollInputSizes()`.
+    var inputPollTimer: Timer?
+    /// Last observed size per file URL, used by `pollInputSizes()` to
+    /// detect growth between consecutive ticks. A tick with no change
+    /// flips `isUploading` back to false. New catalog entries seed this
+    /// from their initial `sizeBytes` so we only flag on detected growth.
+    var lastSeenInputSizes: [URL: Int64] = [:]
     /// Size-stability tracker for files currently being written.
     var watchStability = WatchStabilityTracker(requiredStableSamples: 2)
     /// Files confirmed stable + waiting to be auto-stacked (FIFO).
@@ -561,6 +572,57 @@ final class AppModel: ObservableObject {
         // Restore the previously-chosen output folder (if any) so the user's
         // one-time pick sticks across launches.
         restoreOutputFolderFromBookmark()
+
+        // Live size-refresh for the Inputs list — see `pollInputSizes()`.
+        startInputSizePolling()
+    }
+
+    /// Periodically re-stat catalog files so the size column reflects an
+    /// in-progress upload (SharpCap writing to a NAS, for example) and so
+    /// the row can be visually marked "still uploading — don't stack yet"
+    /// until the size stabilises. 5 s is the sweet spot — fast enough that
+    /// the size visibly ticks up for the user, slow enough that the NAS
+    /// stat() traffic stays negligible (one round-trip per file every 5 s).
+    private func startInputSizePolling() {
+        inputPollTimer?.invalidate()
+        inputPollTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            self?.pollInputSizes()
+        }
+    }
+
+    /// One tick of the input-list size poller. For each catalog file:
+    /// re-stat its current size; if it grew since the last tick, mark the
+    /// row as uploading (and update the visible size); if it stayed the
+    /// same, clear the uploading flag (the upload finished). Rebuilds the
+    /// catalog array only when something actually changed, so an idle
+    /// catalog of stable files costs nothing beyond the stat() calls.
+    private func pollInputSizes() {
+        guard !catalog.files.isEmpty else { return }
+        var changed = false
+        var updated = catalog.files
+        var seenURLs = Set<URL>()
+        for i in updated.indices {
+            let url = updated[i].url
+            seenURLs.insert(url)
+            let now = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? updated[i].sizeBytes
+            let prev = lastSeenInputSizes[url] ?? updated[i].sizeBytes
+            let stillUploading = now != prev
+            if updated[i].sizeBytes != now {
+                updated[i].sizeBytes = now
+                changed = true
+            }
+            if updated[i].isUploading != stillUploading {
+                updated[i].isUploading = stillUploading
+                changed = true
+            }
+            lastSeenInputSizes[url] = now
+        }
+        // Prune the size dictionary so it doesn't grow unbounded across
+        // catalog switches.
+        if lastSeenInputSizes.count != seenURLs.count {
+            lastSeenInputSizes = lastSeenInputSizes.filter { seenURLs.contains($0.key) }
+        }
+        if changed { catalog.files = updated }
     }
 
     // MARK: - Folder
