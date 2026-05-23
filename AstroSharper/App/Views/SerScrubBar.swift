@@ -81,6 +81,22 @@ struct SerScrubBar: View {
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(.secondary)
                 .frame(width: 130, alignment: .trailing)
+
+            // Playback speed picker — multiplies the base blink rate.
+            // Live: changing while playing re-arms the timer at the new
+            // interval, no need to stop / restart.
+            Picker("", selection: $app.serPlaybackSpeedMultiplier) {
+                Text("1×").tag(1.0)
+                Text("2×").tag(2.0)
+                Text("4×").tag(4.0)
+                Text("8×").tag(8.0)
+                Text("16×").tag(16.0)
+            }
+            .pickerStyle(.menu)
+            .frame(width: 64)
+            .controlSize(.small)
+            .disabled(!usable)
+            .help("Playback speed multiplier (1× = base blink rate). Picks the timer interval — decode/upload caps the effective speed around 125 fps.")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 4)

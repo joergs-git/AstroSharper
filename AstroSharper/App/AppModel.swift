@@ -243,6 +243,16 @@ final class AppModel: ObservableObject {
     // the play button advances `previewSerFrameIndex` (instead of cycling
     // between files) so they can preview the captured stream.
     @Published var serPlaybackActive: Bool = false
+    /// Playback speed multiplier on top of `blinkRate` (1× = base rate;
+    /// 2/4/8/16× speed up frame advance). Picker sits next to the frame
+    /// counter in the scrub bar. Live: changing while playing restarts
+    /// the timer with the new interval, no need to stop/start.
+    @Published var serPlaybackSpeedMultiplier: Double = 1.0 {
+        didSet {
+            guard serPlaybackActive, serPlaybackSpeedMultiplier != oldValue else { return }
+            startSerPlayback()  // re-arms the timer at the new interval
+        }
+    }
     private var serPlaybackTimer: Timer?
 
     /// Display-only auto-range stretch. OFF by default (2026-05-01):
@@ -2246,7 +2256,11 @@ final class AppModel: ObservableObject {
         guard canPlaySerFrames else { return }
         serPlaybackActive = true
         serPlaybackTimer?.invalidate()
-        let interval = 1.0 / max(0.5, blinkRate)
+        // Effective rate = blinkRate × speed multiplier. Floor the
+        // interval at 8 ms (~125 fps) — beyond that the decode/upload
+        // can't keep up and the user sees stutter rather than speed.
+        let effectiveRate = max(0.5, blinkRate) * serPlaybackSpeedMultiplier
+        let interval = max(0.008, 1.0 / effectiveRate)
         serPlaybackTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.advanceSerFrame() }
         }
