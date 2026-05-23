@@ -73,7 +73,7 @@ Violet **Community** button in the headline bar (right side) — or **Help → S
 
 If AstroSharper is useful to your imaging workflow, the kindest things you can do:
 
-1. ⭐️ Star [the GitHub repo](https://github.com/joergsflow/astrosharper)
+1. ⭐️ Star [the GitHub repo](https://github.com/joergs-git/AstroSharper)
 2. ☕️ [Buy me a coffee](https://buymeacoffee.com/joergsflow)
 3. 📝 Leave an App Store review once it lands
 4. 🐛 File issues with reproducible bugs and a sample SER

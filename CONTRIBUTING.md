@@ -5,7 +5,7 @@ Thanks for considering it! AstroSharper is a single-maintainer project and the b
 ## Quick start
 
 ```bash
-git clone https://github.com/joergsflow/astrosharper.git
+git clone https://github.com/joergs-git/AstroSharper.git
 cd astrosharper
 xcodegen generate
 open AstroSharper.xcodeproj

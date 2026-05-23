@@ -219,7 +219,7 @@ SwiftUI on top, `MTKView` preview, `MPSGraph` and hand-written Metal compute ker
 
 ## Documentation
 
-- [**Wiki on GitHub**](https://github.com/joergsflow/astrosharper/wiki) — page-per-feature reference
+- [**Wiki on GitHub**](https://github.com/joergs-git/AstroSharper/wiki) — page-per-feature reference
 - [**Workflow guide**](docs/WORKFLOW.md) — smart end-to-end use cases (Sun, Moon, planets)
 - [**Architecture**](docs/ARCHITECTURE.md) — code structure & GPU pipeline
 - [**Lucky Stack**](docs/wiki/Lucky-Stack.md) — modes, AutoAP, multi-AP gate

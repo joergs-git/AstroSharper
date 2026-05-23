@@ -31,7 +31,7 @@ enum AppVersion {
 }
 
 enum AppLinks {
-    static let github = URL(string: "https://github.com/joergsflow/astrosharper")!
+    static let github = URL(string: "https://github.com/joergs-git/AstroSharper")!
     static let buyMeACoffee = URL(string: "https://buymeacoffee.com/joergsflow")!
     /// AstroBin profile — community visibility for the user's actual
     /// imaging output. Surfaced in the splash + About so visitors

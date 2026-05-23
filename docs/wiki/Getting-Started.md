@@ -5,7 +5,7 @@ Five minutes from install to first stacked image.
 ## Install
 
 ```bash
-git clone https://github.com/joergsflow/astrosharper.git
+git clone https://github.com/joergs-git/AstroSharper.git
 cd astrosharper
 xcodegen generate
 open AstroSharper.xcodeproj

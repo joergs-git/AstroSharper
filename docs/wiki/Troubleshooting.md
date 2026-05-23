@@ -97,7 +97,7 @@ Look at the status bar — the active output path is always visible there. If it
 
 ## Reporting a bug
 
-[Open an issue on GitHub](https://github.com/joergsflow/astrosharper/issues) with:
+[Open an issue on GitHub](https://github.com/joergs-git/AstroSharper/issues) with:
 
 - macOS version
 - Mac model (Intel / Apple Silicon)
