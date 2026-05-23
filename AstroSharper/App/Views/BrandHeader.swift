@@ -15,12 +15,32 @@ struct BrandHeader: View {
             HStack(spacing: 8) {
                 BrandMark()
                     .frame(width: 22, height: 22)
-                Text("AstroSharper")
-                    .font(.system(size: 14, weight: .heavy, design: .rounded))
-                    .foregroundStyle(AppPalette.brandGradient)
-                Text(AppVersion.shortString)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 6) {
+                        Text("AstroSharper")
+                            .font(.system(size: 14, weight: .heavy, design: .rounded))
+                            .foregroundStyle(AppPalette.brandGradient)
+                        Text(AppVersion.shortString)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    // Inline coffee-link directly under the title + version
+                    // so it sits in the user's eye-line every session — not
+                    // hidden behind a menu / About sheet.
+                    Button {
+                        NSWorkspace.shared.open(AppLinks.buyMeACoffee)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "cup.and.saucer.fill")
+                                .font(.system(size: 9))
+                            Text("If you like it — buy me a coffee")
+                                .font(.system(size: 9, weight: .medium))
+                        }
+                        .foregroundColor(.orange)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Opens buymeacoffee.com/joergsflow in your browser.")
+                }
             }
             .frame(width: 260, height: 44, alignment: .leading)
 
