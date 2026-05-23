@@ -116,7 +116,11 @@ struct CompareSidePanel: View {
             sectionLabel("Source SER · Frame 0", systemImage: "film")
             thumbnailFrame(image: sourceImage, caption: sourceLabel)
         }
-        .frame(width: 200)
+        // Sizing is now driven by the enclosing HSplitView in ContentView
+        // so the user can drag the divider to widen the compare column
+        // (e.g. for a bigger Before/After at-a-glance). Hard-coded 200pt
+        // moved here as `idealWidth` + sensible min / max bounds.
+        .frame(minWidth: 140, idealWidth: 200, maxWidth: 600)
         .background(Color(NSColor.underPageBackgroundColor))
     }
 

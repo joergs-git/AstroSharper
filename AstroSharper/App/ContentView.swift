@@ -32,13 +32,20 @@ struct ContentView: View {
             // drags the divider down to see more files when needed.
             VSplitView {
                 VStack(spacing: 0) {
-                    HStack(spacing: 0) {
-                        PreviewView()
-                            .frame(minHeight: 200)
-                        if app.compareSidePanelVisible {
-                            Divider()
+                    // When the Compare side panel is visible, drop into an
+                    // HSplitView so its width is user-resizable via the
+                    // divider (symmetric to the preview/file-list VSplitView
+                    // below). Without the panel, no nested splitter is
+                    // needed and PreviewView fills the row directly.
+                    if app.compareSidePanelVisible {
+                        HSplitView {
+                            PreviewView()
+                                .frame(minWidth: 320, minHeight: 200)
                             CompareSidePanel()
                         }
+                    } else {
+                        PreviewView()
+                            .frame(minHeight: 200)
                     }
                     if app.previewSerFrameCount > 1 {
                         Divider()
