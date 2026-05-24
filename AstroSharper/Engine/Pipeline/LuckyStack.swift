@@ -2240,6 +2240,7 @@ private final class LuckyRunner {
             // to the first eligible frame (saturated = all equivalent)
             // so off-limb tiles drive the honest selection.
             var discMask: [Bool]? = nil
+            var promBrightness: QualityGrader.PerTileQuality? = nil
             if options.discMaskScoring, let refTex = referenceTex {
                 let dm = detectDiscTiles(
                     device: device, queue: queue,
@@ -2252,6 +2253,15 @@ private final class LuckyRunner {
                 let n = dm.filter { $0 }.count
                 NSLog("LuckyRegion: disc-mask flagged %d of %d tiles (%.0f%% disc)",
                       n, dm.count, 100.0 * Double(n) / max(1.0, Double(dm.count)))
+                // Brightness-based per-tile quality for off-limb tiles:
+                // best frame = the one where this tile is BRIGHTEST.
+                // Atmospheric seeing smears faint photons over more
+                // pixels (lower peak/mean), so highest mean intensity =
+                // best seeing moment for the faint feature in this tile
+                // = sharpest wisp morphology. Variance-based scoring
+                // would rank dark-sky shot-noise instead of signal.
+                promBrightness = quality.computePerTileBrightness(aggregation: Int(REGION_TILE_PX) / 16)
+                NSLog("LuckyRegion: brightness-quality active for off-limb tiles (faint-feature mode)")
             }
             let selection = selectFramesPerTile(
                 quality: perTile,
@@ -2259,7 +2269,8 @@ private final class LuckyRunner {
                 minK: 1,
                 maxK: 1,
                 qualityFraction: 1.0,
-                discMask: discMask
+                discMask: discMask,
+                brightnessQuality: promBrightness
             )
             regionTileFramesBuf = device.makeBuffer(
                 bytes: selection.frameIndices,
@@ -3264,6 +3275,47 @@ private final class QualityGrader {
         let tilesY: Int
     }
 
+    /// Per-tile per-frame MEAN brightness. For faint diffuse off-limb
+    /// features (Hα prominence wisps), brightness is a more honest
+    /// "quality" signal than variance — atmospheric seeing smears
+    /// photons across more pixels (lower peak brightness), so the
+    /// frame with the HIGHEST mean intensity in a prominence tile is
+    /// the moment of best seeing for that wisp. Variance on the same
+    /// tile is dominated by dark-sky shot noise and ranks noise
+    /// instead of signal.
+    func computePerTileBrightness(aggregation: Int = 4) -> PerTileQuality {
+        precondition(aggregation > 0)
+        let ptr = partialsBuffer.contents().assumingMemoryBound(to: QualityPartialResult.self)
+        let tilesX = (groupsX + aggregation - 1) / aggregation
+        let tilesY = (groupsY + aggregation - 1) / aggregation
+        let perFrame = tilesX * tilesY
+        var out = [Float](repeating: 0, count: frameCount * perFrame)
+        for f in 0..<frameCount {
+            let frameOffset = f * groupsPerFrame
+            for ty in 0..<tilesY {
+                for tx in 0..<tilesX {
+                    var s: Double = 0
+                    var cnt: UInt64 = 0
+                    let gy0 = ty * aggregation
+                    let gy1 = min(gy0 + aggregation, groupsY)
+                    let gx0 = tx * aggregation
+                    let gx1 = min(gx0 + aggregation, groupsX)
+                    for gy in gy0..<gy1 {
+                        for gx in gx0..<gx1 {
+                            let r = ptr[frameOffset + gy * groupsX + gx]
+                            s += Double(r.sum)
+                            cnt += UInt64(r.count)
+                        }
+                    }
+                    if cnt > 0 {
+                        out[f * perFrame + ty * tilesX + tx] = Float(s / Double(cnt))
+                    }
+                }
+            }
+        }
+        return PerTileQuality(variances: out, tilesX: tilesX, tilesY: tilesY)
+    }
+
     func computePerTileVariances(aggregation: Int = 4) -> PerTileQuality {
         precondition(aggregation > 0)
         let ptr = partialsBuffer.contents().assumingMemoryBound(to: QualityPartialResult.self)
@@ -3332,7 +3384,8 @@ fileprivate func selectFramesPerTile(
     minK: Int = 1,
     maxK: Int = 10,
     qualityFraction: Float = 0.5,
-    discMask: [Bool]? = nil   // tiles flagged true = inside saturated disc; take first eligible
+    discMask: [Bool]? = nil,                // tile inside saturated disc → take first eligible
+    brightnessQuality: QualityGrader.PerTileQuality? = nil  // when supplied, off-limb tiles pick best by BRIGHTNESS (best for faint prominence wisps where Laplacian reads noise instead of signal)
 ) -> RegionFrameSelection {
     let tiles = quality.tilesX * quality.tilesY
     var indices = [UInt32](repeating: UInt32.max, count: tiles * maxK)
@@ -3355,9 +3408,17 @@ fileprivate func selectFramesPerTile(
             counts[t] = 1
             continue
         }
+        // Off-limb tile with brightness-quality supplied: rank frames
+        // by per-tile MEAN BRIGHTNESS. Brightest = most-concentrated
+        // prominence flux = best seeing moment for THIS tile. The
+        // standard variance-based scoring picks the noisiest frame in
+        // dark off-limb tiles (Laplacian is dominated by shot noise
+        // when the signal is faint), which is the opposite of what
+        // we want.
+        let scoreSrc = brightnessQuality?.variances ?? quality.variances
         scratch.removeAll(keepingCapacity: true)
         for f in eligibleFrames {
-            scratch.append((quality.variances[f * tiles + t], UInt32(f)))
+            scratch.append((scoreSrc[f * tiles + t], UInt32(f)))
         }
         scratch.sort { $0.q > $1.q }
         let bestQ = max(scratch[0].q, 1e-9)
