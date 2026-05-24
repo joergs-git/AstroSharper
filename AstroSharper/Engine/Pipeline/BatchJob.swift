@@ -63,10 +63,17 @@ final class BatchJob {
                 return
             }
 
-            // Build tone-curve LUT once.
-            let lut: MTLTexture? = config.toneCurve.enabled
-                ? ToneCurveLUT.build(points: config.toneCurve.controlPoints, device: MetalDevice.shared.device)
-                : nil
+            // Build tone-curve LUT once. solarDualZone short-circuits the
+            // control-points path with the asinh + linear fixed curve;
+            // fires regardless of the main `enabled` toggle.
+            let lut: MTLTexture?
+            if config.toneCurve.solarDualZone {
+                lut = ToneCurveLUT.buildSolarDualZone(device: MetalDevice.shared.device)
+            } else if config.toneCurve.enabled {
+                lut = ToneCurveLUT.build(points: config.toneCurve.controlPoints, device: MetalDevice.shared.device)
+            } else {
+                lut = nil
+            }
 
             // Stabilization: compute shifts up front and optionally derive a
             // crop rectangle that's the intersection of all shifted frames.

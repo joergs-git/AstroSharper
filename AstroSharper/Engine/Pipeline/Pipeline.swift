@@ -178,6 +178,7 @@ final class Pipeline {
             && !toneCurve.chromaticAlignment
             && !toneCurve.channelNormalize
             && !toneCurve.reducePurpleFringe
+            && !toneCurve.solarDualZone   // Solar Dual-Zone fires regardless of main toggle (caller passes the dual-zone LUT)
             && !sharpen.enabled
             && (!toneCurve.enabled || (toneCurveLUT == nil && bcIsIdentity && satIsIdentity))
         // Allocate a persistent output — not from pool, caller owns.
@@ -486,7 +487,11 @@ final class Pipeline {
         // / file write) re-apply their own encoding. Skipped when no
         // tone op will run — saves a redundant pair of dispatches on
         // every preview frame in the no-tone case.
+        // solarDualZone fires regardless of the main `enabled` toggle
+        // (it's its own opinionated tone curve). When it's on AND the
+        // caller passed the matching LUT, the apply step below runs.
         let toneOpsActive = (toneCurve.enabled && toneCurveLUT != nil)
+            || (toneCurve.solarDualZone && toneCurveLUT != nil)
             || (toneCurve.enabled && !bcIsIdentity)
             || (toneCurve.enabled && (abs(toneCurve.highlights) > 1e-4 || abs(toneCurve.shadows) > 1e-4))
             || (toneCurve.enabled && abs(toneCurve.saturation - 1.0) > 1e-4)
@@ -504,7 +509,7 @@ final class Pipeline {
             current = result
         }
 
-        if toneCurve.enabled, let lut = toneCurveLUT {
+        if (toneCurve.enabled || toneCurve.solarDualZone), let lut = toneCurveLUT {
             let result = borrow(width: w, height: h, format: input.pixelFormat)
             borrowed.append(result)
             ToneCurveApply.run(

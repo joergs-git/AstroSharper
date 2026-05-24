@@ -56,6 +56,55 @@ enum ToneCurveLUT {
         return tex
     }
 
+    /// Solar Dual-Zone LUT (validated 2026-05-24 on
+    /// TESTIMAGES/sun/14_09_57_fulldisc.ser): a solar Hα capture has its
+    /// disc fill the upper-half of the [0,1] range and its faint off-limb
+    /// prominences in the lower-half. The standard linear-display crushes
+    /// off-limb into pure black. This LUT compresses the dark off-limb
+    /// data via asinh so prominences pop, while preserving the disc
+    /// surface (granulation, sunspots) via a linear pass-through of the
+    /// upper half. Spatial decision is value-based (any pixel < 0.5 =
+    /// off-limb), so a per-pixel LUT works — no segmentation needed.
+    static func buildSolarDualZone(device: MTLDevice, size: Int = 1024) -> MTLTexture {
+        var values = [Float](repeating: 0, count: size)
+        let beta: Float = 20.0
+        let asinhBeta = log(beta + sqrt(beta * beta + 1))   // arsinh(beta) precomputed
+        for i in 0..<size {
+            let t = Float(i) / Float(size - 1)   // 0..1 input value
+            if t < 0.5 {
+                // Off-limb: asinh-stretch [0..0.5] → [0..0.5] output.
+                // The stretch lifts low values (faint prominences) while
+                // compressing very-low values (noise floor) so the
+                // background stays dark grey, not noisy grey.
+                let n = t * 2.0                  // 0..1 in off-limb space
+                let stretched = log(n * beta + sqrt((n * beta) * (n * beta) + 1)) / asinhBeta
+                values[i] = stretched * 0.5
+            } else {
+                // Disc: linear [0.5..1.0] input → [0.5..1.0] output.
+                // Granulation and sunspot detail pass through unchanged.
+                values[i] = t
+            }
+        }
+        let desc = MTLTextureDescriptor()
+        desc.textureType = .type1D
+        desc.pixelFormat = .r32Float
+        desc.width = size
+        desc.height = 1
+        desc.usage = [.shaderRead]
+        desc.storageMode = .shared
+        let tex = device.makeTexture(descriptor: desc)!
+        values.withUnsafeBufferPointer { buf in
+            tex.replace(
+                region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                  size: MTLSize(width: size, height: 1, depth: 1)),
+                mipmapLevel: 0,
+                withBytes: buf.baseAddress!,
+                bytesPerRow: size * MemoryLayout<Float>.size
+            )
+        }
+        return tex
+    }
+
     /// Piecewise Catmull-Rom. `t` is in [0,1], uses the segment that contains t.
     private static func sampleCatmullRom(t: Double, points: [CGPoint]) -> Double {
         guard points.count >= 2 else { return t }

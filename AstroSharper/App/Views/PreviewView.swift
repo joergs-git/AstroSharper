@@ -433,6 +433,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     // Tone curve LUT cache
     private var lutTex: MTLTexture?
     private var lastLUTPoints: [CGPoint] = []
+    /// Tracks whether the cached `lutTex` was built via Solar Dual-Zone
+    /// (fixed asinh + linear curve) vs the standard control-points
+    /// Catmull-Rom path. Used to invalidate the cache when the user
+    /// toggles between the two.
+    private var lastLUTSolarDualZone: Bool = false
 
     init(app: AppModel) {
         self.app = app
@@ -1274,6 +1279,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         let nothingActive = !tone.autoWB
             && !tone.chromaticAlignment
             && !sharpen.enabled
+            && !tone.solarDualZone   // Solar Dual-Zone overrides the curve regardless of tone.enabled
             && (!tone.enabled || (!toneCurveActive && bcIsIdentity && satIsIdentity))
         if nothingActive {
             afterTex = nil
@@ -1334,11 +1340,25 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     }
 
     private func ensureLUT(for tone: ToneCurveSettings) -> MTLTexture? {
+        // Solar Dual-Zone short-circuits the control-points path with a
+        // fixed asinh-lower-half / linear-upper-half curve that exposes
+        // off-limb prominences while preserving disc surface detail.
+        // Independent of `tone.enabled` — when this flag is on, the
+        // tone-curve fires regardless of the main toggle.
+        if tone.solarDualZone {
+            if lutTex != nil, lastLUTSolarDualZone { return lutTex }
+            let newLUT = ToneCurveLUT.buildSolarDualZone(device: MetalDevice.shared.device)
+            lutTex = newLUT
+            lastLUTSolarDualZone = true
+            lastLUTPoints = []
+            return newLUT
+        }
         guard tone.enabled else { return nil }
-        if lutTex != nil, lastLUTPoints == tone.controlPoints { return lutTex }
+        if lutTex != nil, !lastLUTSolarDualZone, lastLUTPoints == tone.controlPoints { return lutTex }
         let newLUT = ToneCurveLUT.build(points: tone.controlPoints, device: MetalDevice.shared.device)
         lutTex = newLUT
         lastLUTPoints = tone.controlPoints
+        lastLUTSolarDualZone = false
         return newLUT
     }
 

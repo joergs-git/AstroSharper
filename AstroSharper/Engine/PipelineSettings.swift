@@ -363,6 +363,19 @@ struct ToneCurveSettings: Equatable, Codable {
     /// empirical "Reduce Purple" sweet spot.
     var purpleFringeStrength: Double = 0.5
 
+    /// Solar Dual-Zone tone mapping. When ON, replaces the
+    /// control-points-based LUT with a hardcoded asinh-stretched-lower-
+    /// half + linear-upper-half curve that exposes faint off-limb
+    /// prominences while preserving disc surface detail. Validated
+    /// 2026-05-24 on TESTIMAGES/sun/14_09_57_fulldisc.ser. The
+    /// auto-detection is value-based (any pixel < 0.5 = off-limb), so
+    /// it only meaningfully affects images that actually have that
+    /// split — on a planet against dark sky it's effectively pure
+    /// asinh on the dark half, which is also fine. Independent of
+    /// `enabled`: when this is on, tone-curve fires regardless of
+    /// the main toggle (since this IS the curve).
+    var solarDualZone: Bool = false
+
     // MARK: - Codable
     /// Backwards-compatible decoder so older preset JSON keeps loading. The
     /// synthesised encoder is fine — new files always carry the field.
@@ -380,6 +393,7 @@ struct ToneCurveSettings: Equatable, Codable {
         self.channelNormalize   = try c.decodeIfPresent(Bool.self,   forKey: .channelNormalize)   ?? false
         self.reducePurpleFringe   = try c.decodeIfPresent(Bool.self,   forKey: .reducePurpleFringe)   ?? false
         self.purpleFringeStrength = try c.decodeIfPresent(Double.self, forKey: .purpleFringeStrength) ?? 0.5
+        self.solarDualZone        = try c.decodeIfPresent(Bool.self,   forKey: .solarDualZone)        ?? false
         self.brightness         = try c.decodeIfPresent(Double.self, forKey: .brightness)         ?? 0.0
         self.contrast           = try c.decodeIfPresent(Double.self, forKey: .contrast)           ?? 1.0
         self.highlights         = try c.decodeIfPresent(Double.self, forKey: .highlights)         ?? 0.0
@@ -402,7 +416,8 @@ struct ToneCurveSettings: Equatable, Codable {
         brightness: Double = 0.0,
         contrast: Double = 1.0,
         highlights: Double = 0.0,
-        shadows: Double = 0.0
+        shadows: Double = 0.0,
+        solarDualZone: Bool = false
     ) {
         self.enabled = enabled
         self.controlPoints = controlPoints
@@ -416,5 +431,6 @@ struct ToneCurveSettings: Equatable, Codable {
         self.contrast = contrast
         self.highlights = highlights
         self.shadows = shadows
+        self.solarDualZone = solarDualZone
     }
 }

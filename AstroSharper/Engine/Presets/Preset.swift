@@ -264,6 +264,11 @@ enum BuiltInPresets {
         t.enabled = true
         // Mild S-curve to lift mid-tones.
         t.controlPoints = [.init(x: 0, y: 0), .init(x: 0.35, y: 0.30), .init(x: 0.75, y: 0.85), .init(x: 1, y: 1)]
+        // Solar Dual-Zone: lifts off-limb area so prominences at the
+        // limb become visible in the same image as the disc surface
+        // (validated 2026-05-24 on TESTIMAGES/sun/14_09_57_fulldisc.ser).
+        // Overrides the S-curve above when on.
+        t.solarDualZone = true
         return Preset(
             // Switched to Lucky Region 2026-05-24. Same bracket as
             // Sun-Granulation: sunspots stay crisp, granulation cleaner
@@ -290,6 +295,13 @@ enum BuiltInPresets {
         t.enabled = true
         // Strong stretch — typical Hα off-limb workflow.
         t.controlPoints = [.init(x: 0, y: 0), .init(x: 0.05, y: 0), .init(x: 0.25, y: 0.85), .init(x: 1, y: 1)]
+        // Solar Dual-Zone: when the prominence capture also catches a
+        // sliver of the saturated disc (typical for limb prominence
+        // shots), this exposes BOTH at once instead of clipping the
+        // disc to pure white. Overrides the control-points curve above
+        // when on. Pure off-limb captures (no disc in frame) still
+        // benefit from the asinh-stretch of the dark half.
+        t.solarDualZone = true
         // Multi-AP OFF here too — off-limb Hα is even lower-contrast than
         // white-light granulation, so per-cell SAD correlation is noise-
         // dominated. Keeps the higher keep-% (40) for SNR on the faint

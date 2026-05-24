@@ -530,6 +530,8 @@ struct ToneCurveSection: View {
             // to drag curve points against.
             Toggle("Auto White Balance (gray-world)", isOn: $app.toneCurve.autoWB)
                 .help("Computes a per-channel offset+scale so the three channels share a neutral mean. Critical for OSC stacks — Bayer green is naturally amplified by 2× photosite count, so post-stack OSC images otherwise look greenish once saturation > 1. Mono / pre-balanced sources are unaffected.")
+            Toggle("Sun: Dual-Zone (disc + limb prominences)", isOn: $app.toneCurve.solarDualZone)
+                .help("Solar Hα tone preset: asinh-stretches the off-limb half [0..0.5] so faint prominences pop, while preserving disc surface detail (granulation, sunspots) linearly in [0.5..1.0]. Bypasses the control-points curve below — fires regardless of the main Tone Curve toggle. Apply this to a fulldisc or prominence stack to see BOTH the disc AND the off-limb structure in one image. Validated 2026-05-24.")
             Toggle("Atmospheric Chromatic Dispersion Correction", isOn: $app.toneCurve.chromaticAlignment)
                 .help("Phase-correlates R and B against G on the post-stack output and applies sub-pixel shifts so the three channels re-align (G stays anchored). Atmospheric refraction shifts blue more than red, so OSC planets at low altitude show coloured limb fringes; ACDC removes them. No-op on mono / pre-aligned sources because the offsets come out near zero.")
             Divider().padding(.vertical, 4)
