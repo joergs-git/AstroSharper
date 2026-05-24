@@ -211,6 +211,21 @@ struct FileCatalog {
 
 // Thumbnail generation — off the main actor, result fed back via callback.
 enum ThumbnailLoader {
+    /// NSImage's logical `size` is what SwiftUI's `.aspectRatio(.fit)`
+    /// reads as the image's intrinsic aspect. Forcing it to a square
+    /// (`width: maxDimension, height: maxDimension`) stretches non-square
+    /// content vertically when fit into a non-square frame — that's how
+    /// the Sun was ending up as a vertical egg in the Compare panel.
+    /// Compute a size that preserves the CGImage's real aspect ratio with
+    /// the longer side bounded by `maxDimension`.
+    private static func aspectFitSize(_ cg: CGImage, maxDimension: CGFloat) -> NSSize {
+        let w = CGFloat(cg.width), h = CGFloat(cg.height)
+        guard w > 0, h > 0 else { return NSSize(width: maxDimension, height: maxDimension) }
+        return w >= h
+            ? NSSize(width: maxDimension, height: maxDimension * h / w)
+            : NSSize(width: maxDimension * w / h, height: maxDimension)
+    }
+
     static func load(url: URL, maxDimension: CGFloat) -> NSImage? {
         if url.pathExtension.lowercased() == FileCatalog.serExtension {
             return loadSER(url: url, maxDimension: maxDimension)
@@ -246,10 +261,10 @@ enum ThumbnailLoader {
             ctx.interpolationQuality = .low
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
             if let normalised = ctx.makeImage() {
-                return NSImage(cgImage: normalised, size: NSSize(width: maxDimension, height: maxDimension))
+                return NSImage(cgImage: normalised, size: aspectFitSize(normalised, maxDimension: maxDimension))
             }
         }
-        return NSImage(cgImage: cg, size: NSSize(width: maxDimension, height: maxDimension))
+        return NSImage(cgImage: cg, size: aspectFitSize(cg, maxDimension: maxDimension))
     }
 
     /// Read frame 0 of a SER and produce an 8-bit thumbnail. Mono and Bayer
@@ -329,6 +344,6 @@ enum ThumbnailLoader {
                                 bytesPerRow: dstW * 4, space: cs, bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
                                 provider: provider, decode: nil, shouldInterpolate: true,
                                 intent: .defaultIntent) else { return nil }
-        return NSImage(cgImage: cg, size: NSSize(width: maxDimension, height: maxDimension))
+        return NSImage(cgImage: cg, size: aspectFitSize(cg, maxDimension: maxDimension))
     }
 }

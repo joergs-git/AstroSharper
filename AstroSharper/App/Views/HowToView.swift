@@ -135,6 +135,21 @@ struct HowToView: View {
 
                     Divider().padding(.vertical, 4)
 
+                    Text("What's different per subject (Sun vs Moon vs Jupiter)")
+                        .font(.system(size: 14, weight: .heavy))
+                    BulletRow(icon: "wand.and.stars", color: .purple,
+                              text: "You don't have to memorise this — the top-bar Target picker auto-detects Sun/Moon/Jupiter/Saturn/Mars from the filename and applies the matching preset. AutoNuke ON then picks AP grid / patch / keep-% / AutoPSF per file. The notes below explain WHY each preset differs.")
+                    BulletRow(icon: "sun.max.fill", color: .yellow,
+                              text: "SUN. Granulation: Scientific + σ-clip, keep 20%, multi-AP OFF (low-contrast surface — multi-AP smears it, warps the limb). Full Disk: Lightspeed, keep 50%, AP 8×8 / patch 32. Hα Prominence: Scientific + σ-clip, keep 40%, multi-AP OFF (off-limb detail + variable background = σ-clip mandatory).")
+                    BulletRow(icon: "moon.fill", color: .gray,
+                              text: "MOON. High Detail (terminator / craters): Scientific, keep 25%, AP 10×10 / patch 24 (sharp 2D features = multi-AP wins). Wide Field (whole disc): Lightspeed, keep 50%, AP 8×8 / patch 32 (large stable subject = more frames OK, gentler grid).")
+                    BulletRow(icon: "globe.europe.africa.fill", color: .orange,
+                              text: "JUPITER. Standard: Scientific, keep 25%, AP 10×10 / patch 24 (small + seeing-limited = strict frame selection, bands give 2D contrast for multi-AP). Belt Detail: keep 20%, patch 16 (smaller patch for fine band structure).")
+                    BulletRow(icon: "list.bullet.rectangle", color: .teal,
+                              text: "RULES OF THUMB. Multi-AP YES if surface has dense high-contrast 2D features (craters, bands, rings) — NO for smooth low-contrast subjects (solar surface, Hα prominences). Keep % LOW for seeing-sensitive tiny subjects (planets 20–25%), HIGH for robust large subjects (full Moon / Sun 40–50%). Smaller PATCH = finer local detail; larger PATCH = broader structures. Mode mostly converges on clean data — Scientific only wins on hard data (drift, varying seeing, low SNR).")
+
+                    Divider().padding(.vertical, 4)
+
                     Text("Privacy + community")
                         .font(.system(size: 14, weight: .heavy))
                     BulletRow(icon: "chart.bar.doc.horizontal.fill", color: .green,
