@@ -535,11 +535,23 @@ struct ToneCurveSection: View {
             Toggle("Atmospheric Chromatic Dispersion Correction", isOn: $app.toneCurve.chromaticAlignment)
                 .help("Phase-correlates R and B against G on the post-stack output and applies sub-pixel shifts so the three channels re-align (G stays anchored). Atmospheric refraction shifts blue more than red, so OSC planets at low altitude show coloured limb fringes; ACDC removes them. No-op on mono / pre-aligned sources because the offsets come out near zero.")
             Divider().padding(.vertical, 4)
+            // Dual-Zone replaces the control-points curve with its own
+            // fixed asinh+linear LUT, so leaving the editor active would
+            // be misleading. Grey it out + show a small note explaining
+            // why. The B/C/H/S/Sat sliders below still apply on top of
+            // dual-zone (they're post-LUT ops), so they stay enabled.
             ToneCurveEditor(
                 points: $app.toneCurve.controlPoints,
                 histogram: app.previewHistogram,
                 logHistogram: $app.histogramLogScale
             )
+            .disabled(app.toneCurve.solarDualZone)
+            .opacity(app.toneCurve.solarDualZone ? 0.45 : 1.0)
+            if app.toneCurve.solarDualZone {
+                Text("Control-points curve bypassed by Sun: Dual-Zone.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
             Divider().padding(.vertical, 4)
             // Brightness — additive offset, ±0.3 typical. Identity = 0.
             HStack {
