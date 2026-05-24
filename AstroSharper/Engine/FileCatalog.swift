@@ -211,6 +211,54 @@ struct FileCatalog {
 
 // Thumbnail generation — off the main actor, result fed back via callback.
 enum ThumbnailLoader {
+    /// Linear percentile auto-stretch on an 8-bit RGBA CGImage so the
+    /// stacked TIFF thumbnails fill the full [0,255] range instead of
+    /// the dim mid-grey their raw [16k..58k]-of-65k data would render
+    /// as. Without this, the Compare panel showed stacked outputs as
+    /// washed-out grey discs against grey backgrounds — visibly worse
+    /// than the SER frame-0 thumbnails (which fill the byte range via
+    /// raw `>>8` mapping). With it, both thumbnails are normalised and
+    /// comparable. Cheap: ~120k pixel histogram + one rescale pass.
+    private static func autoStretchPercentile(_ cg: CGImage) -> CGImage? {
+        let w = cg.width, h = cg.height
+        guard w > 0, h > 0 else { return cg }
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let ctx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: cs, bitmapInfo: info
+        ) else { return cg }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let buf = ctx.data else { return cg }
+        let pixels = buf.bindMemory(to: UInt8.self, capacity: w * h * 4)
+        // Luminance histogram → percentile clamps (1% / 99.5%).
+        var counts = [Int](repeating: 0, count: 256)
+        for i in stride(from: 0, to: w * h * 4, by: 4) {
+            let lum = (Int(pixels[i]) + Int(pixels[i+1]) + Int(pixels[i+2])) / 3
+            counts[lum] += 1
+        }
+        let total = w * h
+        let lowTarget  = total / 100         // 1 percentile
+        let highTarget = total - total / 200 // 99.5 percentile
+        var cum = 0, pLow = 0, pHigh = 255, lowSet = false
+        for v in 0..<256 {
+            cum += counts[v]
+            if !lowSet, cum >= lowTarget { pLow = v; lowSet = true }
+            if cum >= highTarget { pHigh = v; break }
+        }
+        guard pHigh > pLow + 1 else { return cg }  // flat image — no stretch
+        let scale = 255.0 / Float(pHigh - pLow)
+        for i in stride(from: 0, to: w * h * 4, by: 4) {
+            for c in 0..<3 {
+                let v = Float(pixels[i + c])
+                let s = (v - Float(pLow)) * scale
+                pixels[i + c] = UInt8(max(0, min(255, s)))
+            }
+        }
+        return ctx.makeImage() ?? cg
+    }
+
     /// NSImage's logical `size` is what SwiftUI's `.aspectRatio(.fit)`
     /// reads as the image's intrinsic aspect. Forcing it to a square
     /// (`width: maxDimension, height: maxDimension`) stretches non-square
@@ -266,7 +314,8 @@ enum ThumbnailLoader {
             ctx.interpolationQuality = .high
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
             if let normalised = ctx.makeImage() {
-                return NSImage(cgImage: normalised, size: aspectFitSize(normalised, maxDimension: maxDimension))
+                let stretched = autoStretchPercentile(normalised) ?? normalised
+                return NSImage(cgImage: stretched, size: aspectFitSize(stretched, maxDimension: maxDimension))
             }
         }
         return NSImage(cgImage: cg, size: aspectFitSize(cg, maxDimension: maxDimension))
