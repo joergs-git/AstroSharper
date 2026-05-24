@@ -242,6 +242,15 @@ final class AppModel: ObservableObject {
     // SER in-file playback. When the user has a multi-frame SER selected,
     // the play button advances `previewSerFrameIndex` (instead of cycling
     // between files) so they can preview the captured stream.
+    /// Set true by `applyPreset(userInitiated: true)` when the user
+    /// explicitly clicks a target chip or picks a preset from the menu.
+    /// Reset by `autoApplyDefaultPreset` on new-folder open. The
+    /// file-change auto-detect (BrandHeader → TargetPickerRow) checks
+    /// this flag and refuses to override an explicit user pick — fixes
+    /// the post-stack "Sun jumps to Moon" bug where the output filename
+    /// keyword-matched a different target.
+    @Published var lastPresetWasUserInitiated: Bool = false
+
     @Published var serPlaybackActive: Bool = false
     /// Playback speed multiplier on top of `blinkRate` (1× = base rate;
     /// 2/4/8/16× speed up frame advance). Picker sits next to the frame
@@ -721,6 +730,9 @@ final class AppModel: ObservableObject {
     /// best built-in preset (the first one). Leaves the active preset alone if
     /// no keyword matches so the user's current settings aren't clobbered.
     private func autoApplyDefaultPreset(candidates: [String]) {
+        // Opening a new folder = fresh start, clear the user's previous
+        // explicit-pick pin so this folder's auto-detect can run normally.
+        lastPresetWasUserInitiated = false
         guard autoDetectPresetOnOpen else { return }
         guard let target = PresetAutoDetect.detect(in: candidates) else { return }
         guard let preset = presets.builtIn.first(where: { $0.target == target }) else { return }
@@ -1960,6 +1972,13 @@ final class AppModel: ObservableObject {
             stabilize.enabled = userStabilizeEnabled
             toneCurve.enabled = userToneEnabled
         }
+
+        // Pin the user's explicit pick so subsequent file-change auto-detect
+        // doesn't clobber it (the original bug: pick Sun → stack → output
+        // file's name contains "moon" keyword → auto-detect switched
+        // preset back to Moon). The pin is cleared only when the user
+        // opens a new folder (`autoApplyDefaultPreset`).
+        if userInitiated { lastPresetWasUserInitiated = true }
         luckyStack.mode = preset.luckyMode
         luckyStack.keepPercent = preset.luckyKeepPercent
         // Per-preset Multi-AP tuning. Grid==0 means the preset prefers the

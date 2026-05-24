@@ -80,9 +80,13 @@ enum PresetTarget: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .sun:     return "sun.max.fill"
         case .moon:    return "moon.fill"
+        // Jupiter + Saturn also have custom shape renderings in
+        // `TargetIconView` (belted disc / ringed disc) used by the
+        // big chips in the toolbar. The SF Symbol strings here are
+        // the fallback for plain Image / Label call sites.
         case .jupiter: return "circle.hexagongrid.fill"
         case .saturn:  return "circle.dashed.inset.filled"
-        case .mars:    return "globe.europe.africa.fill"
+        case .mars:    return "circle.fill"  // small filled disc — Mars is a tiny red dot in real captures
         case .other:   return "scope"
         }
     }

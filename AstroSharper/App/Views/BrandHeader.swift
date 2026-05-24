@@ -205,6 +205,12 @@ struct TargetPickerRow: View {
     /// preset's target (so we don't clobber the user's tuning every
     /// time SwiftUI re-renders).
     private func applyPresetForCurrentFile() {
+        // Don't override an explicit user pick — once the user clicked
+        // a target chip / picked a preset from the menu, file changes
+        // (including the post-stack output landing in the preview) must
+        // not switch the preset back to whatever keyword matches the
+        // new filename. The pin is reset on new-folder open.
+        guard !app.lastPresetWasUserInitiated else { return }
         guard let detected = detectedTargetForCurrentFile() else { return }
         let activeTarget = app.presets.activeID
             .flatMap { app.presets.preset(withID: $0) }?.target
@@ -254,8 +260,7 @@ private struct TargetChip: View {
     /// shadow + faint violet glow so it pops against the brand bar.
     private var highlightedChip: some View {
         VStack(spacing: 1) {
-            Image(systemName: target.icon)
-                .font(.system(size: 17, weight: .semibold))
+            TargetIconView(target: target, size: 17, color: .white)
             Text(target.rawValue)
                 .font(.system(size: 9, weight: .semibold, design: .rounded))
                 .lineLimit(1)
@@ -281,8 +286,7 @@ private struct TargetChip: View {
     /// no glow. Reads as available-but-not-active.
     private var inactiveChip: some View {
         VStack(spacing: 1) {
-            Image(systemName: target.icon)
-                .font(.system(size: 16))
+            TargetIconView(target: target, size: 16, color: Self.pickerViolet)
             Text(target.rawValue)
                 .font(.system(size: 9, weight: .medium))
                 .lineLimit(1)
