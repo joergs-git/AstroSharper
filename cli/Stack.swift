@@ -200,7 +200,7 @@ enum Stack {
                 //               to that cleaner reference). Sharper alignment on
                 //               smooth subjects (Jupiter / Saturn / Sun); slower.
                 guard i + 1 < args.count else {
-                    cliStderr("stack: --mode requires lightspeed | scientific")
+                    cliStderr("stack: --mode requires lightspeed | scientific | region")
                     return 64
                 }
                 switch args[i + 1].lowercased() {
@@ -208,8 +208,10 @@ enum Stack {
                     mode = .lightspeed
                 case "scientific", "sci":
                     mode = .scientific
+                case "region", "lucky", "luckyregion":
+                    mode = .region
                 default:
-                    cliStderr("stack: --mode '\(args[i + 1])' not recognised (use lightspeed | scientific)")
+                    cliStderr("stack: --mode '\(args[i + 1])' not recognised (use lightspeed | scientific | region)")
                     return 64
                 }
                 i += 2

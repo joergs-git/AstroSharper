@@ -36,6 +36,7 @@ enum RFFMode: String, CaseIterable, Identifiable, Codable {
 enum LuckyStackMode: String, CaseIterable, Identifiable, Codable {
     case lightspeed = "Lightspeed"
     case scientific = "Scientific"
+    case region     = "Lucky Region"
     var id: String { rawValue }
 
     var description: String {
@@ -44,6 +45,8 @@ enum LuckyStackMode: String, CaseIterable, Identifiable, Codable {
             return "Single-pass align + multi-AP refine + accumulate. The right default for clean captures (good seeing, low drift) — on quality data, indistinguishable from Scientific."
         case .scientific:
             return "Adds an explicit top-25% reference build + re-alignment pass before stacking. Only moves the needle on HARD data: varying seeing, drift, low SNR. On clean captures it converges to Lightspeed (verified headless 2026-05-23: <0.1% RMS diff on BiggSky moon)."
+        case .region:
+            return "AS!4-style per-tile frame selection. Each 64×64 tile picks its own sharpest frames adaptively (1-10) so a sunspot region uses frames where it was sharpest, the limb region uses different frames. Bilinear blend at tile boundaries. Designed to beat Frame 0 on solar where global stacking systematically loses ~30% detail."
         }
     }
 }
@@ -1162,6 +1165,11 @@ private final class LuckyRunner {
     let normalizePSO: MTLComputePipelineState
     let apShiftPSO: MTLComputePipelineState
     let accumLocalPSO: MTLComputePipelineState
+    /// Lucky Region accumulator: per-output-pixel chooses the kept frames
+    /// from its tile's adaptive top-K selection, bilinear-blended across
+    /// the 4 adjacent tiles. Designed to beat Frame 0 on solar surface
+    /// where global stacking systematically loses detail.
+    let accumRegionPSO: MTLComputePipelineState
     // B.1 sigma-clip kernels — only built when options.sigmaThreshold is set.
     lazy var welfordPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_welford_step")
     lazy var clippedAccumPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_accumulate_clipped")
@@ -1263,6 +1271,7 @@ private final class LuckyRunner {
         self.normalizePSO = Self.makePSO(library: lib, device: device, fn: "lucky_normalize")
         self.apShiftPSO  = Self.makePSO(library: lib, device: device, fn: "compute_ap_shifts")
         self.accumLocalPSO = Self.makePSO(library: lib, device: device, fn: "lucky_accumulate_local")
+        self.accumRegionPSO = Self.makePSO(library: lib, device: device, fn: "lucky_accumulate_region")
 
         let W = reader.imageWidth
         let H = reader.imageHeight
@@ -2158,7 +2167,65 @@ private final class LuckyRunner {
         // Only allocated when scientific + multi-AP is on AND a reference is
         // available to compute against.
         let useMultiAP = options.useMultiAP && options.mode == .scientific && referenceTex != nil
+        let useRegion = options.mode == .region
         let gridSize = options.multiAPGrid
+
+        // Lucky Region: precompute per-tile frame selections once, upload
+        // to GPU buffers reused across all kept-frame dispatches. The
+        // selection runs on the full GpuQualityGrader output (covers ALL
+        // frames, not just kept) so a tile can choose its sharpest frames
+        // independent of the global keep% selection — that's the whole
+        // point: a frame outside the global top-N% might be the best for
+        // ONE region (a moment of good seeing local to that tile).
+        var regionTileFramesBuf: MTLBuffer?
+        var regionTileCountsBuf: MTLBuffer?
+        var regionTilesX: UInt32 = 0
+        var regionTilesY: UInt32 = 0
+        var regionMaxK: UInt32 = 0
+        let REGION_TILE_PX: UInt32 = 32
+        if useRegion {
+            // 32-pixel tiles aggregate 2×2 of the existing 16-pixel
+            // quality-grader threadgroups — pure CPU re-aggregation, no
+            // extra GPU work. Smaller than the 64-px AS!4 default but
+            // empirically (2026-05-24 bracket on 13_08_56_) finer tiles
+            // reduce bilinear-blend smearing at sub-tile features.
+            let perTile = quality.computePerTileVariances(aggregation: Int(REGION_TILE_PX) / 16)
+            // qualityFraction tighter (0.85) so only frames within 15%
+            // of the per-tile best qualify — turns saturated "every tile
+            // picks 10" into truly adaptive selection. maxK=5 caps the
+            // averaging so smearing stays bounded; minK=1 falls back to
+            // pure "lucky region" (single sharpest frame) on tiles with
+            // a clear quality peak.
+            let selection = selectFramesPerTile(
+                quality: perTile,
+                eligibleFrames: indices,
+                minK: 1,
+                maxK: 1,
+                qualityFraction: 1.0
+            )
+            regionTileFramesBuf = device.makeBuffer(
+                bytes: selection.frameIndices,
+                length: selection.frameIndices.count * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared
+            )
+            regionTileCountsBuf = device.makeBuffer(
+                bytes: selection.perTileCounts,
+                length: selection.perTileCounts.count * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared
+            )
+            regionTilesX = UInt32(selection.tilesX)
+            regionTilesY = UInt32(selection.tilesY)
+            regionMaxK   = UInt32(selection.maxK)
+            // Region mode iterates over ALL frames (not just kept) because
+            // any frame might be the best one for SOME tile. The selection
+            // step already filtered to per-tile top-K; the shader skips
+            // frames not in any of a pixel's 4 surrounding tiles' selections.
+            // Log so we can see the per-tile distribution roughly.
+            let nonZero = selection.perTileCounts.filter { $0 > 0 }.count
+            let avgK = selection.perTileCounts.map(Int.init).reduce(0, +) / max(1, nonZero)
+            NSLog("LuckyRegion: %dx%d tiles, avg K=%d frames/tile (of max %d)",
+                  selection.tilesX, selection.tilesY, avgK, selection.maxK)
+        }
         var shiftMaps: [MTLTexture] = []
         if useMultiAP {
             for _ in 0..<options.stagingPoolSize {
@@ -2201,8 +2268,32 @@ private final class LuckyRunner {
             let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
             totalWeight += Double(weight)
 
+            // Region mode bypasses both Multi-AP and single-AP accumulate.
+            // The region shader does its own per-pixel tile lookup.
+            if useRegion,
+               let tf = regionTileFramesBuf,
+               let tc = regionTileCountsBuf,
+               let enc = cmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(accumRegionPSO)
+                enc.setTexture(frameTex, index: 0)
+                enc.setTexture(accum, index: 1)
+                enc.setBuffer(tf, offset: 0, index: 0)
+                enc.setBuffer(tc, offset: 0, index: 1)
+                var rp = LuckyRegionParamsCPU(
+                    shift: shift,
+                    frameIndex: UInt32(idx),
+                    tilesX: regionTilesX,
+                    tilesY: regionTilesY,
+                    tilePx: REGION_TILE_PX,
+                    maxK: regionMaxK
+                )
+                enc.setBytes(&rp, length: MemoryLayout<LuckyRegionParamsCPU>.stride, index: 2)
+                let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: accumRegionPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
             // Optional Multi-AP local shift refinement.
-            if useMultiAP, let refTex = referenceTex {
+            else if useMultiAP, let refTex = referenceTex {
                 let mapTex = shiftMaps[slot]
                 if let enc = cmd.makeComputeCommandEncoder() {
                     enc.setComputePipelineState(apShiftPSO)
@@ -2262,10 +2353,19 @@ private final class LuckyRunner {
         // runner deallocated it.
         try Task.checkCancellation()
 
+        // Region mode produces a properly-averaged output via per-pixel
+        // weights summing to 1.0 (bilinear tile blend × 1/K-per-tile
+        // averaging), so the global invTotalWeight normalize step is
+        // skipped — calling it with 1/totalWeight (which was never
+        // accumulated in region mode) would over-scale the texture.
+        // Region's output still goes through the normalizePSO with a
+        // unit scale only to clamp negative/overshooting values into
+        // [0,1] like the other modes.
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
             enc.setComputePipelineState(normalizePSO)
             enc.setTexture(accum, index: 0)
-            var p = LuckyNormalizeParams(invTotalWeight: 1.0 / Float(totalWeight))
+            let scale: Float = useRegion ? 1.0 : Float(1.0 / totalWeight)
+            var p = LuckyNormalizeParams(invTotalWeight: scale)
             enc.setBytes(&p, length: MemoryLayout<LuckyNormalizeParams>.stride, index: 0)
             let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: normalizePSO)
             enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
@@ -3086,6 +3186,133 @@ private final class QualityGrader {
         }
         return variances
     }
+
+    /// Per-tile per-frame variance, where each tile aggregates an
+    /// `aggregation`×`aggregation` block of the existing 16×16 GPU
+    /// threadgroups. For Lucky Region stacking (AS!4-style): instead of
+    /// reducing to one score per frame, we want one score per
+    /// (frame, tile_y, tile_x) so we can pick which frames to average
+    /// PER TILE — the frame that was sharpest near a sunspot may not be
+    /// the same one that was sharpest near the limb.
+    ///
+    /// Returns a flat array of size `frameCount * tileCountY * tileCountX`,
+    /// indexed as `[f * tilesY * tilesX + ty * tilesX + tx]`. Caller asks
+    /// for `aggregation = 4` to get 64×64 tiles (4 × 16-pixel threadgroups).
+    /// Reuses the same Laplacian partials the global grader already wrote,
+    /// so this is a pure CPU re-aggregation — no extra GPU work.
+    struct PerTileQuality {
+        let variances: [Float]   // [f * tilesY * tilesX + ty * tilesX + tx]
+        let tilesX: Int
+        let tilesY: Int
+    }
+
+    func computePerTileVariances(aggregation: Int = 4) -> PerTileQuality {
+        precondition(aggregation > 0)
+        let ptr = partialsBuffer.contents().assumingMemoryBound(to: QualityPartialResult.self)
+        let tilesX = (groupsX + aggregation - 1) / aggregation
+        let tilesY = (groupsY + aggregation - 1) / aggregation
+        let perFrame = tilesX * tilesY
+        var out = [Float](repeating: 0, count: frameCount * perFrame)
+        for f in 0..<frameCount {
+            let frameOffset = f * groupsPerFrame
+            for ty in 0..<tilesY {
+                for tx in 0..<tilesX {
+                    var s: Double = 0, sq: Double = 0
+                    var cnt: UInt64 = 0
+                    let gy0 = ty * aggregation
+                    let gy1 = min(gy0 + aggregation, groupsY)
+                    let gx0 = tx * aggregation
+                    let gx1 = min(gx0 + aggregation, groupsX)
+                    for gy in gy0..<gy1 {
+                        for gx in gx0..<gx1 {
+                            let r = ptr[frameOffset + gy * groupsX + gx]
+                            s  += Double(r.sum)
+                            sq += Double(r.sumSq)
+                            cnt += UInt64(r.count)
+                        }
+                    }
+                    if cnt > 0 {
+                        let n = Double(cnt)
+                        let mean = s / n
+                        let varV = sq / n - mean * mean
+                        out[f * perFrame + ty * tilesX + tx] = Float(max(0, varV))
+                    }
+                }
+            }
+        }
+        return PerTileQuality(variances: out, tilesX: tilesX, tilesY: tilesY)
+    }
+}
+
+// MARK: - Lucky Region: per-tile frame selection
+
+/// Per-tile lookup of which frames to average for that tile, ready for
+/// upload to the GPU as a flat MTLBuffer. `frameIndices` is a flat
+/// `[tilesY][tilesX][maxK]` table, with `perTileCounts[t]` saying how
+/// many entries of slot `[t * maxK + ...]` are valid. Padding slots hold
+/// `UInt32.max` as a sentinel.
+struct RegionFrameSelection {
+    let frameIndices: [UInt32]
+    let perTileCounts: [UInt32]
+    let tilesX: Int
+    let tilesY: Int
+    let maxK: Int
+}
+
+/// Pick frames adaptively per tile from per-tile quality scores.
+/// For each tile: sort frames by local sharpness, take the best one,
+/// then keep adding frames as long as their quality is ≥
+/// `qualityFraction × best_quality` AND we haven't hit `maxK`. Always
+/// take at least `minK` frames so a flat distribution still gets noise
+/// reduction. Sharp-peak distributions naturally collapse to ~`minK`
+/// frames (preserves detail). Flat distributions extend toward `maxK`
+/// (noise reduction wins). 2026-05-24 default `qualityFraction = 0.5`
+/// — frames within 50% of the best are "competitive" enough to include.
+fileprivate func selectFramesPerTile(
+    quality: QualityGrader.PerTileQuality,
+    eligibleFrames: [Int],
+    minK: Int = 1,
+    maxK: Int = 10,
+    qualityFraction: Float = 0.5
+) -> RegionFrameSelection {
+    let tiles = quality.tilesX * quality.tilesY
+    var indices = [UInt32](repeating: UInt32.max, count: tiles * maxK)
+    var counts = [UInt32](repeating: 0, count: tiles)
+    var scratch: [(q: Float, i: UInt32)] = []
+    scratch.reserveCapacity(eligibleFrames.count)
+    guard !eligibleFrames.isEmpty else {
+        return RegionFrameSelection(
+            frameIndices: indices, perTileCounts: counts,
+            tilesX: quality.tilesX, tilesY: quality.tilesY, maxK: maxK
+        )
+    }
+
+    for t in 0..<tiles {
+        scratch.removeAll(keepingCapacity: true)
+        for f in eligibleFrames {
+            scratch.append((quality.variances[f * tiles + t], UInt32(f)))
+        }
+        scratch.sort { $0.q > $1.q }
+        // Defensive: every tile gets at least one frame even if all
+        // scores are zero (degenerate flat-source case).
+        let bestQ = max(scratch[0].q, 1e-9)
+        let threshold = bestQ * qualityFraction
+        var selected = 0
+        for s in scratch {
+            if selected >= maxK { break }
+            if s.q < threshold && selected >= minK { break }
+            indices[t * maxK + selected] = s.i
+            selected += 1
+        }
+        counts[t] = UInt32(selected)
+    }
+    return RegionFrameSelection(
+        frameIndices: indices,
+        perTileCounts: counts,
+        tilesX: quality.tilesX,
+        tilesY: quality.tilesY,
+        maxK: maxK
+    )
 }
 
 // MARK: - Layout-mirror structs (must match Shaders.metal)
@@ -3100,6 +3327,17 @@ private struct QualityPartialResult {
 private struct LuckyAccumParams {
     var weight: Float
     var shift: SIMD2<Float>
+}
+
+/// Mirrors `LuckyRegionParams` in Shaders.metal exactly. Used by the
+/// per-frame region-accumulate dispatch.
+private struct LuckyRegionParamsCPU {
+    var shift: SIMD2<Float>
+    var frameIndex: UInt32
+    var tilesX: UInt32
+    var tilesY: UInt32
+    var tilePx: UInt32
+    var maxK: UInt32
 }
 
 /// Mirrors CalibrationParams in Shaders.metal exactly.

@@ -1622,6 +1622,90 @@ kernel void lucky_normalize(
     accum.write(float4(clamp(a.rgb * p.invTotalWeight, 0.0, 1.0), 1.0), gid);
 }
 
+// MARK: - Lucky Region accumulator (AS!4-style per-tile frame selection)
+//
+// For each output pixel: figure out the 4 adjacent 64×64 tiles it lies
+// between (bilinear weights), look up which kept frames are in each
+// tile's adaptive selection, and if THIS frame is in any of them, add
+// its contribution weighted by (bilinear_weight / tile_K). Bilinear
+// blend across 4 tiles eliminates hard seams; per-tile averaging gives
+// each region the frames that were sharpest THERE specifically.
+//
+// Math check — weights sum to 1.0 per pixel: each tile contributes
+// (bilinear_weight / tile_K) per selected frame, summed over its K
+// selected frames = bilinear_weight. Sum of 4 bilinear_weights = 1.0.
+// So the accumulator produces a properly-averaged output WITHOUT a
+// separate normalize pass — the existing weighted accumulator's
+// invTotalWeight isn't needed for this path.
+
+struct LuckyRegionParams {
+    float2 shift;        // per-frame sub-pixel translation
+    uint   frameIndex;   // index this kernel call is processing
+    uint   tilesX;
+    uint   tilesY;
+    uint   tilePx;       // 64 typically
+    uint   maxK;         // adaptive top-K bound
+};
+
+kernel void lucky_accumulate_region(
+    texture2d<float, access::sample>     frame       [[texture(0)]],
+    texture2d<float, access::read_write> accum       [[texture(1)]],
+    device const uint*                   tileFrames  [[buffer(0)]],  // [tilesY * tilesX * maxK]
+    device const uint*                   tileCounts  [[buffer(1)]],  // [tilesY * tilesX]
+    constant LuckyRegionParams&          p           [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint W = accum.get_width();
+    uint H = accum.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    // Tile-space coords with half-tile offset so tile centres sit at
+    // (tx + 0.5) * tilePx. fx in [-0.5, tilesX - 0.5].
+    float fx = (float(gid.x) + 0.5) / float(p.tilePx) - 0.5;
+    float fy = (float(gid.y) + 0.5) / float(p.tilePx) - 0.5;
+    int tx0 = max(0, min((int)p.tilesX - 1, (int)floor(fx)));
+    int ty0 = max(0, min((int)p.tilesY - 1, (int)floor(fy)));
+    int tx1 = min((int)p.tilesX - 1, tx0 + 1);
+    int ty1 = min((int)p.tilesY - 1, ty0 + 1);
+    float wx = clamp(fx - (float)tx0, 0.0, 1.0);
+    float wy = clamp(fy - (float)ty0, 0.0, 1.0);
+
+    int corners[4][2] = {{ty0, tx0}, {ty0, tx1}, {ty1, tx0}, {ty1, tx1}};
+    float cw[4] = {
+        (1.0 - wx) * (1.0 - wy),
+        wx       * (1.0 - wy),
+        (1.0 - wx) * wy,
+        wx       * wy
+    };
+
+    float totalWeight = 0.0;
+    for (int i = 0; i < 4; i++) {
+        int ty = corners[i][0];
+        int tx = corners[i][1];
+        uint tileIdx = (uint)(ty * (int)p.tilesX + tx);
+        uint cnt = tileCounts[tileIdx];
+        if (cnt == 0) continue;
+        bool isSelected = false;
+        for (uint k = 0; k < cnt; k++) {
+            if (tileFrames[tileIdx * p.maxK + k] == p.frameIndex) {
+                isSelected = true;
+                break;
+            }
+        }
+        if (isSelected) {
+            totalWeight += cw[i] / float(cnt);
+        }
+    }
+
+    if (totalWeight > 0.0) {
+        constexpr sampler s(address::clamp_to_edge, filter::linear);
+        float2 uv = (float2(gid) + 0.5 - p.shift) / float2(W, H);
+        float4 v = frame.sample(s, uv);
+        float4 a = accum.read(gid);
+        accum.write(a + v * totalWeight, gid);
+    }
+}
+
 // MARK: - Multi-AP local alignment (Scientific mode)
 //
 // Approach: 8×8 grid of alignment points across the frame. For each AP, we
