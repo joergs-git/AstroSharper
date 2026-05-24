@@ -16,7 +16,16 @@ import Foundation
 ///   - output-style choices (bake-in, auto-tone)
 struct LuckyPresetDetails: Codable, Equatable {
     var autoNuke: Bool = false
-    var autoPSF: Bool = false
+    /// Default 2026-05-24: TRUE. Empirically validated on the user's
+    /// /Volumes/ASTRO/LUNT/AUTOTRANS/11_02_46_.ser solar capture:
+    /// bare stack gave sunspot contrast 0.38 (vs Frame 0 baseline 0.59,
+    /// a 36% loss — the user's "stack worse than ungestackt" complaint).
+    /// With AutoPSF Wiener post-deconv: 0.679 = +14% OVER Frame 0,
+    /// finally delivering on the lucky-imaging promise. AutoPSF
+    /// auto-bails on subjects it can't fit (lunar surface / textured /
+    /// cropped, see feedback_autopsf_lunar_bail.md), so default-true is
+    /// safe — wrong-σ output is structurally impossible.
+    var autoPSF: Bool = true
     var autoPSFSNR: Double = 50
     var autoKeepPercent: Bool = false
     var perChannelStacking: Bool = false
