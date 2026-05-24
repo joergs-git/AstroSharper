@@ -2615,7 +2615,12 @@ struct LuckyStackUIState {
     /// the single source of truth for "let it decide" vs "I'll
     /// configure" — replaces the old Smart-auto button which only
     /// nudged a few flags one-shot and left manual controls active.
-    var autoNuke: Bool = false
+    /// Default ON 2026-05-24 — empirically the engine's auto picks beat
+    /// the hand-tuned presets across the regression suite (AutoAP v1 beat
+    /// 6/6 fixtures; AutoPSF auto-bails on lunar / textured / cropped
+    /// subjects so wrong-σ output is impossible). Manual configuration
+    /// is still one click away by turning the pill off.
+    var autoNuke: Bool = true
     /// When ON, the stacked texture is run through the standard sharpen +
     /// tone pipeline before being written to disk. Default OFF: a freshly
     /// stacked image should land "raw" so the user can decide which post-
