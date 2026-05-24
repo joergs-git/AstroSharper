@@ -235,11 +235,18 @@ enum BuiltInPresets {
         d.sigmaClipEnabled = true
         d.sigmaClipThreshold = 2.5
         return Preset(
+            // Switched to Lucky Region 2026-05-24 after user-validated
+            // bracket on TESTIMAGES/sun/14_02_07_partial.ser and 14_09_57_
+            // fulldisc.ser: bare scientific stacks lose ~50% edge energy
+            // vs Frame 0, sunspots smear, granulation gets averaged. Lucky
+            // Region (per-tile pure-lucky K=1, 32×32 tiles) preserves
+            // sunspot definition AND has cleaner granulation than Frame 0.
+            // sigma-clip stays in case there are partial cloud frames.
             name: "Sun — Granulation",
-            target: .sun, notes: "Fine-scale granulation. Scientific stack, sigma-clip, NO multi-AP (it smears low-contrast solar surface).",
+            target: .sun, notes: "Fine-scale granulation. Lucky Region (per-tile sharpest-frame selection) + sigma-clip. Beat bare stacks on the partial-disc + fulldisc bracket 2026-05-24.",
             isBuiltIn: true,
             sharpen: s,
-            luckyMode: .scientific, luckyKeepPercent: 20,
+            luckyMode: .region, luckyKeepPercent: 25,
             luckyMultiAPGrid: 0, luckyMultiAPPatchHalf: 24,
             luckyDetails: d
         )
@@ -258,12 +265,16 @@ enum BuiltInPresets {
         // Mild S-curve to lift mid-tones.
         t.controlPoints = [.init(x: 0, y: 0), .init(x: 0.35, y: 0.30), .init(x: 0.75, y: 0.85), .init(x: 1, y: 1)]
         return Preset(
+            // Switched to Lucky Region 2026-05-24. Same bracket as
+            // Sun-Granulation: sunspots stay crisp, granulation cleaner
+            // than Frame 0. multi-AP no longer needed since Region's
+            // per-tile selection IS the local refinement.
             name: "Sun — Full Disk",
-            target: .sun, notes: "Full-disk balanced sharpen with mild S-curve.",
+            target: .sun, notes: "Full-disk lucky region. Preserves sunspot definition + cleaner granulation than Frame 0 (validated 2026-05-24).",
             isBuiltIn: true,
             sharpen: s, toneCurve: t,
-            luckyMode: .lightspeed, luckyKeepPercent: 50,
-            luckyMultiAPGrid: 8, luckyMultiAPPatchHalf: 32
+            luckyMode: .region, luckyKeepPercent: 25,
+            luckyMultiAPGrid: 0, luckyMultiAPPatchHalf: 32
         )
     }
     private static func sunProminence() -> Preset {
@@ -288,8 +299,18 @@ enum BuiltInPresets {
         d.sigmaClipEnabled = true
         d.sigmaClipThreshold = 2.5
         return Preset(
+            // Stays .scientific 2026-05-24. Empirical bracket on
+            // TESTIMAGES/sun/14_03_21_prominence.ser showed: ANY stacking
+            // (scientific, region, region+disc-mask, region+disc-mask+
+            // off-limb-align) softens the prominence wisp vs raw Frame 0.
+            // The wisp deforms physically per-frame due to seeing, so
+            // averaging integrates over those variations — fundamental
+            // limit. Stack here gives cleaner background; raw Frame 0
+            // (or single-best-frame export) gives sharpest wisp detail.
+            // Power users: try `--mode region --disc-mask` via CLI for a
+            // noise-cleaned stack with usable wisp visibility.
             name: "Sun — Hα Prominence",
-            target: .sun, notes: "Off-limb Hα prominences: strong stretch, soft sharpen, sigma-clip, no multi-AP.",
+            target: .sun, notes: "Off-limb Hα prominences: strong stretch, soft sharpen, sigma-clip, no multi-AP. NOTE: stacking softens prominence wisps vs raw Frame 0 by ~10-20% (the wisps deform frame-to-frame due to seeing — a fundamental limit). Stack for clean background; export single-best-frame for max wisp detail.",
             isBuiltIn: true,
             sharpen: s, toneCurve: t,
             luckyMode: .scientific, luckyKeepPercent: 40,

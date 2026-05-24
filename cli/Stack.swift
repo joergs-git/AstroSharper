@@ -61,6 +61,7 @@ enum Stack {
         // robust drift line — fixes a slowly-drifting planet ghosting the
         // stack. Default off (perturbs well-tracked captures).
         var validateDrift = false
+        var discMaskScoring = false
         // Synthetic-PSF fallback (LSW 3.2.1 parity at the cascade
         // tail). Default OFF per the lunar-bail lesson — a guess σ
         // can over-sharpen or halo subjects where AutoPSF correctly
@@ -417,6 +418,9 @@ enum Stack {
             case "--drift-correct":
                 validateDrift = true
                 i += 1
+            case "--disc-mask":
+                discMaskScoring = true
+                i += 1
             case "--synthetic-psf":
                 useAutoPSFSyntheticFallback = true
                 i += 1
@@ -732,6 +736,7 @@ enum Stack {
             options.autoPSFSNR = autoPSFSNR
             options.useAutoPSFAutoROI = useAutoPSFAutoROI
             options.validateDrift = validateDrift
+            options.discMaskScoring = discMaskScoring
             options.useAutoPSFSyntheticFallback = useAutoPSFSyntheticFallback
             options.syntheticPSFSeeingIndex = syntheticPSFSeeingIndex
             options.autoTileSizeFromScope = autoTileSizeFromScope

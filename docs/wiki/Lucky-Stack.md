@@ -25,7 +25,18 @@ The conventional accumulator AVERAGES kept frames. On data where each frame's lo
 
 Visually the Lucky Region output preserves all Frame 0 features (sunspots, secondary dots) AND has noticeably cleaner granulation with more filamentary structure visible — looks like a post-processed astrophoto, not a noisy raw frame.
 
-**When NOT to use Lucky Region:** for now, only verified on solar full-disc / surface captures. Planetary (Jupiter, Saturn) hasn't been bracketed against Frame 0 yet — Lightspeed / Scientific are still recommended there. The Sun presets retain `multiAPGrid: 0` for backward compatibility; switch to Lucky Region manually via the mode picker (or `--mode region` on the CLI).
+**When NOT to use Lucky Region:** verified on solar surface + sunspot captures, where it wins clearly. Planetary (Jupiter, Saturn) hasn't been bracketed against Frame 0 yet — Lightspeed / Scientific are still recommended there. Sun-Granulation and Sun-Full-Disk presets now ship with `.region` as default (validated 2026-05-24).
+
+**Hα Prominence captures: stack ≠ better than Frame 0.** A 48-variant bracket on `TESTIMAGES/sun/14_03_21_prominence.ser` (Lightspeed/Scientific/Region × keep% × multi-AP × sigma-clip × disc-mask × off-limb-alignment) showed: **every** stack variant softens the prominence wisp vs raw Frame 0. The cause is physical — the wisps deform per-frame from atmospheric seeing, so averaging integrates over the deformation. No alignment fix can recover what's morphologically different per frame. Sun-Hα-Prominence preset stays `.scientific` for backward compatibility (clean background, prominence visible but soft); for max wisp detail, export a single best frame instead.
+
+### Disc-mask + off-limb alignment (CLI `--disc-mask`)
+
+Opt-in for Hα prominence captures where the bright saturated disc dominates the global quality + alignment signals.
+
+- **Quality side**: Region's per-tile selection normally picks "frames where this tile was sharpest by Laplacian variance". On prominence captures the saturated disc dominates the Laplacian → off-limb tiles inadvertently pick "frames where the DISC was sharpest", not where the prominence was clearest. Disc-mask short-circuits disc tiles to the first eligible frame (saturated → any frame is equivalent there) so off-limb tiles drive the honest selection.
+- **Alignment side**: phase correlation runs on full-frame luma; the disc edge dominates the cross-power spectrum, so the off-limb prominence gets aligned via disc-anchor sub-pixel jitter. With disc-mask on, bright pixels in luma are replaced with the off-limb median BEFORE phase correlation — alignment honestly tracks off-limb features.
+
+Helps the prominence stack incrementally (cleaner background, slightly better wisp definition vs no-mask Region) but does NOT beat raw Frame 0 for wisp detail (see prominence note above). Not enabled in any preset; use `--mode region --disc-mask` via CLI for power-user experiments.
 
 (There is no "Balanced" mode — earlier docs listed one that was never in the code. The enum is exactly `lightspeed` + `scientific`.)
 

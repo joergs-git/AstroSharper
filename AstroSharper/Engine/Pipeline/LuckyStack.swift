@@ -282,6 +282,17 @@ struct LuckyStackOptions {
     /// capture you can see ghosting. CLI `--drift-correct`.
     var validateDrift: Bool = false
 
+    /// Lucky-Region-only: detect the saturated solar disc in the
+    /// reference frame and exclude disc-tiles from the per-tile quality
+    /// scoring. Without this, on Hα prominence captures (saturated disc
+    /// + faint off-limb prominence) the per-tile quality ranking is
+    /// dominated by the disc, so the prominence-tile selection picks
+    /// frames where the DISC was sharpest, not where the PROMINENCE
+    /// was clearest. With this on, disc tiles just take the first
+    /// kept frame (disc is saturated → any frame is equivalent there)
+    /// and off-limb tiles do their own honest per-tile selection.
+    var discMaskScoring: Bool = false
+
     /// Seeing-index-driven synthetic PSF fallback (LSW 3.2.1 parity).
     /// When `useAutoPSF` is on AND both the planetary limb-LSF and the
     /// auto-ROI step-edge estimators bail, the cascade falls through
@@ -1993,7 +2004,7 @@ private final class LuckyRunner {
 
     private func alignAgainstReference(referenceTex: MTLTexture, indices: [Int]) async throws -> [Int: SIMD2<Float>] {
         let n = options.alignmentResolution
-        let refLuma = try await extractLuma(referenceTex, size: n)
+        var refLuma = try await extractLuma(referenceTex, size: n)
         let scaleX = Float(W) / Float(n)
         let scaleY = Float(H) / Float(n)
 
@@ -2007,6 +2018,32 @@ private final class LuckyRunner {
                 let frameTex = try await loadAndUnpack(frameIndex: idx, into: nil)
                 let extracted = try await extractLuma(frameTex, size: n)
                 lumas.append((idx, extracted))
+            }
+        }
+
+        // Off-limb alignment: when `discMaskScoring` is on (prominence
+        // captures), replace bright-disc pixels in BOTH refLuma and each
+        // frame luma with the off-disc median BEFORE phase correlation.
+        // Without this, the saturated disc dominates the cross-power
+        // spectrum and locks alignment onto disc-edge sub-pixel jitter
+        // — the off-limb prominence then gets accumulated at jittered
+        // positions and averages out to a soft blob. With masking, the
+        // alignment honestly tracks off-limb features (the prominence
+        // itself or any nearby limb structure).
+        if options.discMaskScoring {
+            let refThresh = (refLuma.max() ?? 1.0) * 0.9
+            let refOff = refLuma.filter { $0 < refThresh }
+            if !refOff.isEmpty {
+                let refMed = refOff.sorted()[refOff.count / 2]
+                refLuma = refLuma.map { $0 > refThresh ? refMed : $0 }
+                for i in lumas.indices {
+                    let frThresh = (lumas[i].data.max() ?? 1.0) * 0.9
+                    let frOff = lumas[i].data.filter { $0 < frThresh }
+                    if frOff.isEmpty { continue }
+                    let frMed = frOff.sorted()[frOff.count / 2]
+                    lumas[i].data = lumas[i].data.map { $0 > frThresh ? frMed : $0 }
+                }
+                NSLog("LuckyRegion: off-limb alignment active (disc pixels replaced with off-limb median before phase correlation)")
             }
         }
 
@@ -2196,12 +2233,33 @@ private final class LuckyRunner {
             // averaging so smearing stays bounded; minK=1 falls back to
             // pure "lucky region" (single sharpest frame) on tiles with
             // a clear quality peak.
+            // Disc-mask: on Hα prominence captures the saturated disc
+            // dominates the global Laplacian and pulls per-tile selection
+            // toward "frames where the disc was sharpest" — irrelevant
+            // to the off-limb prominence. Mask short-circuits disc tiles
+            // to the first eligible frame (saturated = all equivalent)
+            // so off-limb tiles drive the honest selection.
+            var discMask: [Bool]? = nil
+            if options.discMaskScoring, let refTex = referenceTex {
+                let dm = detectDiscTiles(
+                    device: device, queue: queue,
+                    referenceTex: refTex,
+                    tilesX: perTile.tilesX,
+                    tilesY: perTile.tilesY,
+                    tilePx: Int(REGION_TILE_PX)
+                )
+                discMask = dm
+                let n = dm.filter { $0 }.count
+                NSLog("LuckyRegion: disc-mask flagged %d of %d tiles (%.0f%% disc)",
+                      n, dm.count, 100.0 * Double(n) / max(1.0, Double(dm.count)))
+            }
             let selection = selectFramesPerTile(
                 quality: perTile,
                 eligibleFrames: indices,
                 minK: 1,
                 maxK: 1,
-                qualityFraction: 1.0
+                qualityFraction: 1.0,
+                discMask: discMask
             )
             regionTileFramesBuf = device.makeBuffer(
                 bytes: selection.frameIndices,
@@ -3273,7 +3331,8 @@ fileprivate func selectFramesPerTile(
     eligibleFrames: [Int],
     minK: Int = 1,
     maxK: Int = 10,
-    qualityFraction: Float = 0.5
+    qualityFraction: Float = 0.5,
+    discMask: [Bool]? = nil   // tiles flagged true = inside saturated disc; take first eligible
 ) -> RegionFrameSelection {
     let tiles = quality.tilesX * quality.tilesY
     var indices = [UInt32](repeating: UInt32.max, count: tiles * maxK)
@@ -3288,13 +3347,19 @@ fileprivate func selectFramesPerTile(
     }
 
     for t in 0..<tiles {
+        // Disc tile: saturated, every frame equivalent there. Just take
+        // the first eligible frame so the accumulator has something to
+        // contribute at this tile. Skips the expensive quality sort.
+        if let mask = discMask, t < mask.count, mask[t] {
+            indices[t * maxK + 0] = UInt32(eligibleFrames[0])
+            counts[t] = 1
+            continue
+        }
         scratch.removeAll(keepingCapacity: true)
         for f in eligibleFrames {
             scratch.append((quality.variances[f * tiles + t], UInt32(f)))
         }
         scratch.sort { $0.q > $1.q }
-        // Defensive: every tile gets at least one frame even if all
-        // scores are zero (degenerate flat-source case).
         let bestQ = max(scratch[0].q, 1e-9)
         let threshold = bestQ * qualityFraction
         var selected = 0
@@ -3313,6 +3378,103 @@ fileprivate func selectFramesPerTile(
         tilesY: quality.tilesY,
         maxK: maxK
     )
+}
+
+/// Detect which tiles fall inside the saturated solar disc by reading
+/// the reference texture and asking: does this tile have >50% of its
+/// pixels above 90% of the global max? Cheap CPU pass — only runs
+/// once at stack start when `discMaskScoring` is on. The reference
+/// texture is on `.private` storage (GPU-only); we blit it into a
+/// shared-storage staging texture first since `getBytes` doesn't work
+/// on private-storage textures (it silently hangs / no-ops).
+fileprivate func detectDiscTiles(
+    device: MTLDevice,
+    queue: MTLCommandQueue,
+    referenceTex: MTLTexture,
+    tilesX: Int, tilesY: Int, tilePx: Int
+) -> [Bool] {
+    let W = referenceTex.width
+    let H = referenceTex.height
+    let desc = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: referenceTex.pixelFormat,
+        width: W, height: H, mipmapped: false
+    )
+    desc.storageMode = .shared
+    desc.usage = [.shaderRead]
+    guard let staging = device.makeTexture(descriptor: desc) else { return [] }
+    if let cmd = queue.makeCommandBuffer(), let blit = cmd.makeBlitCommandEncoder() {
+        blit.copy(from: referenceTex, sourceSlice: 0, sourceLevel: 0,
+                  sourceOrigin: .init(x: 0, y: 0, z: 0),
+                  sourceSize: .init(width: W, height: H, depth: 1),
+                  to: staging, destinationSlice: 0, destinationLevel: 0,
+                  destinationOrigin: .init(x: 0, y: 0, z: 0))
+        blit.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+    }
+    let region = MTLRegion(origin: .init(x: 0, y: 0, z: 0),
+                           size: .init(width: W, height: H, depth: 1))
+    switch staging.pixelFormat {
+    case .rgba16Float:
+        var buf = [UInt16](repeating: 0, count: W * H * 4)
+        staging.getBytes(&buf, bytesPerRow: W * 8, from: region, mipmapLevel: 0)
+        return discTilesFromHalfFloat(buf, W: W, H: H, tilesX: tilesX, tilesY: tilesY, tilePx: tilePx)
+    case .rgba32Float:
+        var buf = [Float](repeating: 0, count: W * H * 4)
+        staging.getBytes(&buf, bytesPerRow: W * 16, from: region, mipmapLevel: 0)
+        return discTilesFromFloat32(buf, W: W, H: H, tilesX: tilesX, tilesY: tilesY, tilePx: tilePx)
+    default:
+        return []
+    }
+}
+
+fileprivate func discTilesFromFloat32(_ buf: [Float], W: Int, H: Int, tilesX: Int, tilesY: Int, tilePx: Int) -> [Bool] {
+    var maxV: Float = 0
+    for i in stride(from: 0, to: buf.count, by: 4) { if buf[i] > maxV { maxV = buf[i] } }
+    let thresh = maxV * 0.9
+    var mask = [Bool](repeating: false, count: tilesX * tilesY)
+    for ty in 0..<tilesY {
+        for tx in 0..<tilesX {
+            let y0 = ty * tilePx, y1 = min(y0 + tilePx, H)
+            let x0 = tx * tilePx, x1 = min(x0 + tilePx, W)
+            var hot = 0, total = 0
+            for y in y0..<y1 {
+                let row = y * W * 4
+                for x in x0..<x1 {
+                    if buf[row + x * 4] > thresh { hot += 1 }
+                    total += 1
+                }
+            }
+            if total > 0 && hot * 2 > total { mask[ty * tilesX + tx] = true }
+        }
+    }
+    return mask
+}
+
+fileprivate func discTilesFromHalfFloat(_ buf: [UInt16], W: Int, H: Int, tilesX: Int, tilesY: Int, tilePx: Int) -> [Bool] {
+    // Use UInt16 raw value as a proxy — for the disc-vs-sky decision we
+    // only need ORDERING, not absolute value. Saturated disc pixels
+    // have the highest UInt16 values.
+    var maxV: UInt16 = 0
+    for i in stride(from: 0, to: buf.count, by: 4) { if buf[i] > maxV { maxV = buf[i] } }
+    let thresh = UInt16(Float(maxV) * 0.9)
+    var mask = [Bool](repeating: false, count: tilesX * tilesY)
+    for ty in 0..<tilesY {
+        for tx in 0..<tilesX {
+            let y0 = ty * tilePx, y1 = min(y0 + tilePx, H)
+            let x0 = tx * tilePx, x1 = min(x0 + tilePx, W)
+            var hot = 0, total = 0
+            for y in y0..<y1 {
+                let row = y * W * 4
+                for x in x0..<x1 {
+                    if buf[row + x * 4] > thresh { hot += 1 }
+                    total += 1
+                }
+            }
+            if total > 0 && hot * 2 > total { mask[ty * tilesX + tx] = true }
+        }
+    }
+    return mask
 }
 
 // MARK: - Layout-mirror structs (must match Shaders.metal)
