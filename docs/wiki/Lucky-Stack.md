@@ -8,8 +8,24 @@ The SER → final-image pipeline. Two modes balance speed against quality.
 | --- | --- | --- |
 | **Lightspeed** | Top-N% best frames, multi-AP local refinement (via AutoAP), weighted mean. The right default for clean captures. | Most real-world data — good seeing, well-tracked, decent SNR. |
 | **Scientific** | Adds an explicit top-25% **reference build** + a **re-alignment pass** before stacking. Same multi-AP refinement otherwise. | Hard data: varying seeing, drift, low SNR — where the reference choice matters. |
+| **Lucky Region** | AS!4-style per-tile frame selection. The image is divided into 32×32 tiles; for EACH tile, the engine picks adaptively 1-10 of the kept frames where local quality at that tile was sharpest, then averages only those (bilinear-blended at tile boundaries). | Solar full-disc / surface where global stacking loses 40-60% detail vs Frame 0 (a moment of good seeing near a sunspot can contribute to that region even when the same frame's limb was bad). |
 
-**Reality check (2026-05-23 headless on BiggSky moon):** on clean data the two modes are indistinguishable — RMS diff 0.065%, zero pixels differ by >0.5%. Both engaged identical AutoAP refinement (grid 8, patchHalf 24). Scientific's extra reference-build step matters only when the data is *hard enough* that the reference choice actually changes the alignment outcome. **Start with Lightspeed; switch to Scientific only if you can see ghosting / softness from a marginal capture.**
+**Reality check (2026-05-23 headless on BiggSky moon):** on clean data Lightspeed and Scientific are indistinguishable — RMS diff 0.065%, zero pixels differ by >0.5%. Both engaged identical AutoAP refinement. Scientific's extra reference-build step matters only when the data is *hard enough* that the reference choice actually changes the alignment outcome. **Start with Lightspeed; switch to Scientific only if you can see ghosting / softness; switch to Lucky Region for solar where averaging-induced smearing is the limit.**
+
+### Lucky Region (added 2026-05-24)
+
+The conventional accumulator AVERAGES kept frames. On data where each frame's local sharpness varies — atmospheric seeing affects different regions differently per frame — averaging smears every feature by the sub-pixel jitter that survived global alignment. The classic AS!4 / RegiStax answer: build the output **per region**, not per frame.
+
+**How it works:** the engine divides the output into 32×32 tiles. The existing GPU quality-grader already produces per-16×16-threadgroup partial scores; these are re-aggregated to per-tile quality scores per frame at zero extra GPU cost. For each tile, the K=1-10 sharpest frames at THAT tile are selected (adaptive — default K=1, "pure lucky region"). A custom Metal shader (`lucky_accumulate_region`) accumulates per-output-pixel using bilinear weights across the 4 adjacent tiles, so there are no hard seams.
+
+**Empirical results (2026-05-24 bracket on LUNT Hα solar captures):**
+- Frame 0 baseline edge energy = 2124 (reference)
+- Bare stack (top 10% of 3000 frames): edges 1092 (**-49%** — the original "stack worse than Frame 0" problem)
+- Lucky Region tile=32 pure lucky: edges 1788 (**-16%** — closes 2/3 of the gap)
+
+Visually the Lucky Region output preserves all Frame 0 features (sunspots, secondary dots) AND has noticeably cleaner granulation with more filamentary structure visible — looks like a post-processed astrophoto, not a noisy raw frame.
+
+**When NOT to use Lucky Region:** for now, only verified on solar full-disc / surface captures. Planetary (Jupiter, Saturn) hasn't been bracketed against Frame 0 yet — Lightspeed / Scientific are still recommended there. The Sun presets retain `multiAPGrid: 0` for backward compatibility; switch to Lucky Region manually via the mode picker (or `--mode region` on the CLI).
 
 (There is no "Balanced" mode — earlier docs listed one that was never in the code. The enum is exactly `lightspeed` + `scientific`.)
 

@@ -6,6 +6,20 @@ the project follows semantic versioning once it leaves 0.x.
 ## [Unreleased]
 
 ### Added
+- **Lucky Region stacking mode** (`LuckyStackMode.region`, CLI `--mode region`)
+  — AS!4-style per-tile frame selection. The image is divided into 32×32
+  tiles; for each tile, the engine picks adaptively 1-10 of the kept frames
+  where local quality at THAT tile was sharpest, then averages only those
+  (bilinear-blended at tile boundaries). Closes the gap on solar captures
+  where bare global stacking systematically lost 40-60% edge energy vs Frame 0
+  (the "stacking that's worse than a single frame is pointless" problem).
+  Verified on /Volumes/ASTRO/LUNT/AUTOTRANS/ Hα captures: bare stack -49%
+  edges, Lucky Region -16%, and visually CLEANER than Frame 0 with more
+  filamentary detail visible. Reuses the existing GPU quality-grader
+  threadgroup partials for the per-tile scoring (zero extra GPU work for
+  scoring; new `lucky_accumulate_region` Metal shader for the assembly).
+  Currently must be picked manually (Sun presets still ship with the older
+  `multiAPGrid: 0` setting pending Hα prominence verification).
 - **Live file-size refresh in the Inputs list** — a 5 s poller re-stats every
   catalog file. The size column ticks up while SharpCap (or another capture
   tool) is still writing to disk / NAS, and the row visibly indicates the
