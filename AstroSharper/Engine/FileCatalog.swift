@@ -258,7 +258,12 @@ enum ThumbnailLoader {
             bitsPerComponent: 8, bytesPerRow: w * 4,
             space: cs, bitmapInfo: info
         ) {
-            ctx.interpolationQuality = .low
+            // .high so detail survives the thumbnail downscale — `.low`
+            // was making stacked TIFF previews in the Compare panel look
+            // dramatically softer than the SER frame-0 thumbnail (which
+            // samples nearest-neighbour), creating a false "stacked is
+            // blurry" impression the user flagged 2026-05-24.
+            ctx.interpolationQuality = .high
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
             if let normalised = ctx.makeImage() {
                 return NSImage(cgImage: normalised, size: aspectFitSize(normalised, maxDimension: maxDimension))

@@ -205,12 +205,20 @@ struct TargetPickerRow: View {
     /// preset's target (so we don't clobber the user's tuning every
     /// time SwiftUI re-renders).
     private func applyPresetForCurrentFile() {
-        // Don't override an explicit user pick — once the user clicked
-        // a target chip / picked a preset from the menu, file changes
-        // (including the post-stack output landing in the preview) must
-        // not switch the preset back to whatever keyword matches the
-        // new filename. The pin is reset on new-folder open.
+        // Defence 1: don't override an explicit user pick — once the user
+        // clicked a target chip / picked a preset from the menu, file
+        // changes must not silently switch the preset.
         guard !app.lastPresetWasUserInitiated else { return }
+        // Defence 2: only auto-detect on Inputs. In Outputs / Memory the
+        // currently-previewed file is a RESULT, not an input to be
+        // processed; its filename keyword (often inherited from the
+        // source SER's parent folder, sometimes a misleading "moon" /
+        // "AUTOTRANS" / etc.) must not reroute the active preset.
+        // Original bug — 2026-05-24: a Sun capture stacked successfully,
+        // the app switched to Outputs, and the auto-detect on the
+        // post-stack file flipped the preset to Moon, applying Moon's
+        // multi-AP-10×10 on subsequent stacks (smears solar surface).
+        guard app.displayedSection == .inputs else { return }
         guard let detected = detectedTargetForCurrentFile() else { return }
         let activeTarget = app.presets.activeID
             .flatMap { app.presets.preset(withID: $0) }?.target
