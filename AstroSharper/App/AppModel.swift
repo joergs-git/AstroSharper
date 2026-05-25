@@ -2347,7 +2347,7 @@ final class AppModel: ObservableObject {
         }
         let base = entry.url.deletingPathExtension().lastPathComponent
         let fname = String(format: "%@_frame_%04d.tif", base, frameIndex)
-        let outURL = Self.uniqueOutputURL(in: outFolder, named: fname)
+        let outURL = Self.uniqueOutputURL(outFolder.appendingPathComponent(fname))
 
         // Decode the frame on a background queue — same path the preview
         // uses (SerFrameLoader → unpack → MTLTexture). Then write TIFF
