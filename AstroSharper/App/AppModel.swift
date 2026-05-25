@@ -210,6 +210,11 @@ final class AppModel: ObservableObject {
     // Recomputed when the preview file changes. Used by the tone-curve editor
     // for its overlay and by the Stretch button for auto-endpoint detection.
     @Published var previewHistogram: [UInt32] = []
+    /// Per-channel R/G/B histogram for OSC/colour images. Populated
+    /// alongside `previewHistogram` by the same load path; rendered as
+    /// three coloured overlays by the Tone Curve editor when
+    /// `.isColor` is true. Empty for mono / unloaded.
+    @Published var previewHistogramRGB: ChannelHistogram = ChannelHistogram(r: [], g: [], b: [])
     @Published var histogramLogScale: Bool = false
 
     // SER scrub state — frame index and frame count for the currently-shown

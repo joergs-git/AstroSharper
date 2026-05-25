@@ -19,6 +19,11 @@ import SwiftUI
 struct ToneCurveEditor: View {
     @Binding var points: [CGPoint]
     let histogram: [UInt32]
+    /// Optional per-channel histograms — when `rgbHistogram.isColor` is
+    /// true, the editor renders three coloured overlays (R / G / B)
+    /// instead of the single luma curve. For mono captures (R=G=B)
+    /// the RGB overlay collapses and only luma is drawn.
+    var rgbHistogram: ChannelHistogram = ChannelHistogram(r: [], g: [], b: [])
     @Binding var logHistogram: Bool
 
     @State private var dragTarget: DragTarget = .none
@@ -38,8 +43,18 @@ struct ToneCurveEditor: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.28))
 
-                    // Histogram underneath curve.
-                    if !histogram.isEmpty {
+                    // Histogram underneath curve. For colour images
+                    // (OSC Bayer stacks), draw three coloured overlays
+                    // (R/G/B) instead of the single luma curve so the
+                    // user can see per-channel imbalance — typical
+                    // green excess from Bayer demosaic, or red-shifted
+                    // planetary captures. Falls back to luma when the
+                    // image is effectively mono (R=G=B).
+                    if rgbHistogram.isColor {
+                        HistogramBarsRGB(histogram: rgbHistogram, log: logHistogram)
+                            .frame(width: size.width, height: size.height)
+                            .allowsHitTesting(false)
+                    } else if !histogram.isEmpty {
                         HistogramBars(histogram: histogram, log: logHistogram)
                             .frame(width: size.width, height: size.height)
                             .allowsHitTesting(false)
@@ -312,6 +327,51 @@ private struct HistogramBars: View {
             }
             .stroke(Color.white.opacity(0.25), lineWidth: 1)
         }
+    }
+}
+
+/// Three colour overlays for OSC stacks. Each channel is normalised
+/// against the SAME max so the relative heights mean something —
+/// catches green-excess Bayer bias at a glance. `screen`-blended so
+/// overlapping bars (where R=G=B at the same height) read as white
+/// instead of a muddy late-coloured smear.
+private struct HistogramBarsRGB: View {
+    let histogram: ChannelHistogram
+    let log: Bool
+
+    private func transform(_ vals: [UInt32]) -> [Double] {
+        log ? vals.map { Foundation.log(1.0 + Double($0)) } : vals.map(Double.init)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = geo.size
+            let r = transform(histogram.r)
+            let g = transform(histogram.g)
+            let b = transform(histogram.b)
+            // Shared max so the three channels stay comparable.
+            let maxV = max(r.max() ?? 0, g.max() ?? 0, b.max() ?? 0, 1.0)
+            ZStack {
+                bars(r, maxV: maxV, size: size, color: Color(red: 1.0, green: 0.25, blue: 0.25))
+                bars(g, maxV: maxV, size: size, color: Color(red: 0.30, green: 0.90, blue: 0.35))
+                bars(b, maxV: maxV, size: size, color: Color(red: 0.35, green: 0.55, blue: 1.00))
+            }
+            .blendMode(.screen)
+        }
+    }
+
+    private func bars(_ vals: [Double], maxV: Double, size: CGSize, color: Color) -> some View {
+        Path { p in
+            guard !vals.isEmpty else { return }
+            let barW = size.width / CGFloat(vals.count)
+            for (i, v) in vals.enumerated() {
+                let h = CGFloat(v / maxV) * size.height
+                let x = CGFloat(i) * barW
+                p.move(to: CGPoint(x: x, y: size.height))
+                p.addLine(to: CGPoint(x: x, y: size.height - h))
+            }
+        }
+        .stroke(color.opacity(0.55), lineWidth: 1)
     }
 }
 

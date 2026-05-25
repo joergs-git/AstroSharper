@@ -873,6 +873,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             // Skip the on-disk histogram path for any frame-sequence file —
             // Histogram.compute reads via ImageIO which doesn't grok SER/AVI.
             let hist = (isSER || isAVI) ? [] : Histogram.compute(url: url)
+            // Per-channel histogram for the Tone Curve editor's RGB
+            // overlay — cheap single-pass companion read.
+            let histRGB: ChannelHistogram = (isSER || isAVI)
+                ? ChannelHistogram(r: [], g: [], b: [])
+                : Histogram.computeRGB(url: url)
             // Sharpness probe deliberately NOT auto-run on file open — at full
             // source resolution it adds 5-30 ms per click, which becomes
             // unbearable when the user is fanning through a folder of large
@@ -898,6 +903,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 // the same region) work without re-zooming after every click.
                 // Double-click on the preview / ⌘0 still reset to fit.
                 self.app.previewHistogram = hist
+                self.app.previewHistogramRGB = histRGB
                 if let dim = tex.map({ ($0.width, $0.height) }) {
                     self.app.previewStats.dimensions = dim
                 }

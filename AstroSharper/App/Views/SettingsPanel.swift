@@ -545,6 +545,7 @@ struct ToneCurveSection: View {
             ToneCurveEditor(
                 points: $app.toneCurve.controlPoints,
                 histogram: app.previewHistogram,
+                rgbHistogram: app.previewHistogramRGB,
                 logHistogram: $app.histogramLogScale
             )
             .disabled(app.toneCurve.solarDualZone)
