@@ -318,12 +318,20 @@ kernel void guided_compose(
     float4 o = original.read(gid);
     float l = dot(o.rgb, float3(0.2126, 0.7152, 0.0722));
     float q = mab.r * l + mab.g;
-    // Output greyscale q in RGB (drops chroma — mono use case is the
-    // target). For colour images: the unsharp result downstream gets
-    // (o.rgb - q), which preserves chroma in the diff signal because
-    // q is treated as luma reference. So colour images still work,
-    // just with chroma-aware sharpening.
-    output.write(float4(q, q, q, o.a), gid);
+    // Color-preserving compose (fix 2026-05-25 for OSC Bayer regression
+    // — old greyscale output made unsharp diff per-channel chromatic
+    // and visibly skewed hue/saturation on OSC stacks). Scale the
+    // original RGB by the ratio new_luma / old_luma — hue stays exact,
+    // only luminance gets the edge-aware blur. For mono captures the
+    // ratio collapses to 1 and the behaviour matches the original
+    // greyscale intent. For dark pixels (l near zero) the chroma is
+    // meaningless; output mid-grey luma to avoid div-by-zero blow-up.
+    if (l > 1e-4) {
+        float scale = q / l;
+        output.write(float4(o.rgb * scale, o.a), gid);
+    } else {
+        output.write(float4(q, q, q, o.a), gid);
+    }
 }
 
 kernel void unsharp_mask(

@@ -63,7 +63,10 @@ struct SerScrubBar: View {
                 frameIndex: $app.previewSerFrameIndex,
                 frameCount: frameCount
             )
-            .frame(height: 18)
+            // Hit area 28 px (visual track + knob stay 4/13 px centred);
+            // makes the scrubber forgiving on click — user no longer has
+            // to pixel-hunt the 13-px knob to start a drag.
+            .frame(height: 28)
             .disabled(!usable)
             .opacity(usable ? 1 : 0.4)
 
