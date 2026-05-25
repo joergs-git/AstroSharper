@@ -15,7 +15,14 @@ import Foundation
 ///   - radial fade filter (RFF)
 ///   - output-style choices (bake-in, auto-tone)
 struct LuckyPresetDetails: Codable, Equatable {
-    var autoNuke: Bool = false
+    /// Default true to match the master `LuckyStackUIState.autoNuke`
+    /// default (since 2026-05-24 commit 0dae988). Previously false here
+    /// meant picking a preset with luckyDetails silently flipped the
+    /// user's AutoNuke off — surprise bug the user flagged on
+    /// 2026-05-25. AutoAP v1 beats hand-tuned presets on the regression
+    /// suite (6/6 fixtures), so a preset-picked-then-Nuke'd state is
+    /// the empirically correct default.
+    var autoNuke: Bool = true
     /// Default FALSE (reverted 2026-05-24 after the day-of regression):
     /// AutoPSF Wiener post-deconv produces unnatural-looking output
     /// (white halo rings around sunspots, over-sharpened granulation)
