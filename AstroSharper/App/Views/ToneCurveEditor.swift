@@ -43,14 +43,16 @@ struct ToneCurveEditor: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.28))
 
-                    // Histogram underneath curve. For colour images
-                    // (OSC Bayer stacks), draw three coloured overlays
-                    // (R/G/B) instead of the single luma curve so the
-                    // user can see per-channel imbalance — typical
-                    // green excess from Bayer demosaic, or red-shifted
-                    // planetary captures. Falls back to luma when the
-                    // image is effectively mono (R=G=B).
-                    if rgbHistogram.isColor {
+                    // Histogram underneath curve. Always prefer the
+                    // RGB overlay when per-channel data is available
+                    // (any loaded TIFF / PNG / JPEG): on colour images
+                    // the three curves separate so per-channel
+                    // imbalance is obvious; on mono images they
+                    // overlap exactly and read as a near-white blend
+                    // — still informative, no extra UI toggle needed.
+                    // Falls back to single luma only when RGB couldn't
+                    // be computed (SER / AVI scrub frames).
+                    if !rgbHistogram.r.isEmpty {
                         HistogramBarsRGB(histogram: rgbHistogram, log: logHistogram)
                             .frame(width: size.width, height: size.height)
                             .allowsHitTesting(false)
