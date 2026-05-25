@@ -216,6 +216,13 @@ final class AppModel: ObservableObject {
     // SER. Set by the preview coordinator after reading the SER header;
     // re-set to (0, 0) when the active file isn't SER.
     @Published var previewSerFrameIndex: Int = 0
+    /// Remembers the last-viewed frame index per SER URL so switching
+    /// section away and back (Inputs → Outputs → Inputs) restores the
+    /// scrubber instead of resetting to frame 0. Stored only in-memory
+    /// — session-scoped. Populated by `switchToSection` (and by file
+    /// selection within the same section, indirectly). Cleared on
+    /// folder open.
+    var rememberedSerFrameIndices: [URL: Int] = [:]
     @Published var previewSerFrameCount: Int = 0
 
     /// Handle to the in-flight lucky-stack engine task, so the progress
@@ -797,6 +804,19 @@ final class AppModel: ObservableObject {
 
     func switchToSection(_ section: CatalogSection) {
         guard section != displayedSection else { return }
+
+        // Remember the current SER frame index before we leave so that
+        // coming back to this file (within this app session) restores
+        // the scrubber to where the user stopped. Pinned use case:
+        // scrubbing in Inputs to compare with an exported single frame
+        // in Outputs, then back to Inputs — without this every
+        // round-trip would reset to frame 0.
+        if let id = previewFileID,
+           let entry = catalog.files.first(where: { $0.id == id }),
+           entry.isSER,
+           previewSerFrameCount > 0 {
+            rememberedSerFrameIndices[entry.url] = previewSerFrameIndex
+        }
 
         // Stash the currently-active section's mirrored state.
         stashedStates[displayedSection] = CatalogSectionState(

@@ -750,7 +750,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 // correctly refuses to read past the mapped data).
                 let realCount = serReader?.readableFrameCount ?? h.frameCount
                 app.previewSerFrameCount = realCount
-                app.previewSerFrameIndex = 0
+                // Restore the last-viewed frame for this SER when the
+                // user round-trips between sections. Clamp to the
+                // actual readable range in case the file was truncated.
+                let remembered = app.rememberedSerFrameIndices[url] ?? 0
+                app.previewSerFrameIndex = max(0, min(realCount - 1, remembered))
                 stats.totalFrames = realCount
                 stats.dimensions = (h.imageWidth, h.imageHeight)
                 stats.bitDepth = h.pixelDepthPerPlane
