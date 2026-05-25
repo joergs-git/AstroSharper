@@ -903,7 +903,19 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 // the same region) work without re-zooming after every click.
                 // Double-click on the preview / ⌘0 still reset to fit.
                 self.app.previewHistogram = hist
-                self.app.previewHistogramRGB = histRGB
+                // For SER / AVI the ImageIO-based RGB pass returns empty
+                // (formats it can't open). Compute from the just-decoded
+                // preview texture instead so OSC Bayer SERs also get a
+                // per-channel histogram in the Tone Curve editor.
+                if histRGB.r.isEmpty, let t = tex {
+                    let device = MetalDevice.shared.device
+                    let queue = MetalDevice.shared.commandQueue
+                    self.app.previewHistogramRGB = Histogram.computeRGB(
+                        texture: t, device: device, queue: queue
+                    )
+                } else {
+                    self.app.previewHistogramRGB = histRGB
+                }
                 if let dim = tex.map({ ($0.width, $0.height) }) {
                     self.app.previewStats.dimensions = dim
                 }
