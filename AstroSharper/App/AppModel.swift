@@ -2318,6 +2318,62 @@ final class AppModel: ObservableObject {
         previewSerFrameIndex = ((previewSerFrameIndex + delta) % n + n) % n
     }
 
+    /// Save the currently-scrubbed SER frame as a 16-bit TIFF into the
+    /// outputs folder. The pinned use case: solar Hα prominence
+    /// captures where stacking softens the wisp morphology (wisps
+    /// deform per-frame from seeing) — the user scrubs to find the
+    /// sharpest single frame and exports it as the master image, then
+    /// optionally composites it manually with a clean stack.
+    /// Filename: `<ser-basename>_frame_<NNNN>.tif`, no-overwrite numbered.
+    /// Triggered by the disk-arrow button in the SER scrub bar.
+    func exportCurrentSerFrame() {
+        guard let id = previewFileID,
+              let entry = catalog.files.first(where: { $0.id == id }),
+              entry.isSER else {
+            jobStatus = .error("Export Frame: no SER preview active.")
+            return
+        }
+        let frameIndex = previewSerFrameIndex
+        let frameCount = previewSerFrameCount
+        guard frameIndex >= 0, frameCount > 0 else {
+            jobStatus = .error("Export Frame: no frame loaded.")
+            return
+        }
+        let suggested = entry.url.deletingLastPathComponent()
+            .appendingPathComponent("_luckystack", isDirectory: true)
+        guard let outFolder = resolveWritableOutputFolder(implicit: suggested) else {
+            jobStatus = .error("Export Frame: no writable output folder.")
+            return
+        }
+        let base = entry.url.deletingPathExtension().lastPathComponent
+        let fname = String(format: "%@_frame_%04d.tif", base, frameIndex)
+        let outURL = Self.uniqueOutputURL(in: outFolder, named: fname)
+
+        // Decode the frame on a background queue — same path the preview
+        // uses (SerFrameLoader → unpack → MTLTexture). Then write TIFF
+        // via the shared ImageTexture writer. Bit depth: 16-bit (matches
+        // the source SER's 8/16-bit per-pixel data after unpack to RGBA).
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let tex = try SerFrameLoader.loadFrame(
+                    url: entry.url, frameIndex: frameIndex,
+                    device: MetalDevice.shared.device
+                )
+                try ImageTexture.write(texture: tex, to: outURL, bitDepth: .uint16)
+                DispatchQueue.main.async {
+                    self.registerOutput(url: outURL, autoSwitch: true)
+                    self.jobStatus = .done(processed: 1, outputDir: outFolder)
+                    NSLog("Exported frame %d → %@", frameIndex + 1, outURL.lastPathComponent)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.jobStatus = .error("Export Frame failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
     /// Returns the IDs the blink player rotates through. Prefers row-
     /// selection in the active section; if nothing selected, falls back to
     /// every file in the active section.

@@ -82,6 +82,20 @@ struct SerScrubBar: View {
                 .foregroundColor(.secondary)
                 .frame(width: 130, alignment: .trailing)
 
+            // Export-current-frame → TIFF in outputs folder.
+            // Pinned use case: solar Hα prominence captures where
+            // stacking softens wisp morphology — scrub to the sharpest
+            // single frame, click here to keep it.
+            Button {
+                app.exportCurrentSerFrame()
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+                    .font(.system(size: 14))
+            }
+            .buttonStyle(.plain)
+            .disabled(!usable)
+            .help("Save the currently-displayed frame as a 16-bit TIFF in the outputs folder. Use this when stacking softens a feature you want to preserve crisply — scrub to the sharpest single frame and click to keep it. Filename: <ser_basename>_frame_<NNNN>.tif (no-overwrite numbered).")
+
             // Playback speed picker — multiplies the base blink rate.
             // Live: changing while playing re-arms the timer at the new
             // interval, no need to stop / restart.
