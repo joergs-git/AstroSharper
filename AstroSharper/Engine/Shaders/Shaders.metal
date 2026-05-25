@@ -250,6 +250,82 @@ struct UnsharpParams {
     uint  adaptive;      // 0 = off, 1 = on
 };
 
+// MARK: - Guided Filter (anti-halo blur for unsharp / wavelet)
+//
+// Replaces the Gaussian-blur step of unsharp masking with an edge-aware
+// guided filter (He et al. 2010). Same math as the existing unsharp
+// from there: result = input + amount × (input - blurred). But because
+// `blurred` doesn't smear across high-contrast edges (limb, sunspot
+// borders), the (input - blurred) difference doesn't overshoot at
+// those edges → no bright/dark ring artefact when the result is later
+// shown with an aggressive tone curve.
+//
+// Algorithm (luma-based for simplicity — input greyscale-ised first;
+// fine for the solar/lunar use case where ringing is the problem):
+//   I = input luma
+//   mean_I  = box_blur(I)
+//   mean_II = box_blur(I*I)
+//   var     = mean_II - mean_I²        (local variance)
+//   a       = var / (var + eps)        (smaller a = smoother area)
+//   b       = mean_I × (1 - a)
+//   mean_a  = box_blur(a)
+//   mean_b  = box_blur(b)
+//   q       = mean_a × I + mean_b       (edge-aware blurred output)
+//
+// Two MPS Gaussian-blur passes between three small per-pixel kernels
+// (pack / coefficients / compose). All on textures the standard
+// pool already vends — no new allocations beyond the temporaries.
+
+kernel void guided_pack(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> packed [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= input.get_width() || gid.y >= input.get_height()) return;
+    float4 px = input.read(gid);
+    float l = dot(px.rgb, float3(0.2126, 0.7152, 0.0722));   // Rec.709 luma
+    packed.write(float4(l, l * l, 0.0, 1.0), gid);
+}
+
+struct GuidedCoeffParams {
+    float eps;       // regularisation — bigger = smoother (more blur)
+};
+
+kernel void guided_coefficients(
+    texture2d<float, access::read>  means [[texture(0)]],   // (mean_I, mean_II, 0, 1)
+    texture2d<float, access::write> ab    [[texture(1)]],   // (a, b, 0, 1)
+    constant GuidedCoeffParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= means.get_width() || gid.y >= means.get_height()) return;
+    float4 m = means.read(gid);
+    float meanI  = m.r;
+    float meanII = m.g;
+    float var = max(0.0, meanII - meanI * meanI);
+    float a = var / (var + p.eps);
+    float b = meanI * (1.0 - a);
+    ab.write(float4(a, b, 0.0, 1.0), gid);
+}
+
+kernel void guided_compose(
+    texture2d<float, access::read>  meanAB   [[texture(0)]],  // (mean_a, mean_b, 0, 1)
+    texture2d<float, access::read>  original [[texture(1)]],
+    texture2d<float, access::write> output   [[texture(2)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 mab = meanAB.read(gid);
+    float4 o = original.read(gid);
+    float l = dot(o.rgb, float3(0.2126, 0.7152, 0.0722));
+    float q = mab.r * l + mab.g;
+    // Output greyscale q in RGB (drops chroma — mono use case is the
+    // target). For colour images: the unsharp result downstream gets
+    // (o.rgb - q), which preserves chroma in the diff signal because
+    // q is treated as luma reference. So colour images still work,
+    // just with chroma-aware sharpening.
+    output.write(float4(q, q, q, o.a), gid);
+}
+
 kernel void unsharp_mask(
     texture2d<float, access::read>  original [[texture(0)]],
     texture2d<float, access::read>  blurred  [[texture(1)]],

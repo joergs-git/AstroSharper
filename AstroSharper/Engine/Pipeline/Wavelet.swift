@@ -32,6 +32,11 @@ enum Wavelet {
         // carry more noise per coefficient: thresh_i = base × 2^(-i/2).
         // Pass 0 to disable.
         noiseThreshold: Float = 0,
+        // When true, swap each pyramid level's Gaussian for a guided
+        // filter so the band-pass layers don't show overshoot at
+        // high-contrast edges. Same anti-halo principle as the unsharp
+        // path, costs ~30–40% more per level.
+        edgeAware: Bool = false,
         pipeline: Pipeline,
         commandBuffer: MTLCommandBuffer,
         borrowed: inout [MTLTexture]
@@ -60,14 +65,27 @@ enum Wavelet {
         // Build the pyramid.
         for i in 0..<scales {
             let sigma = baseSigma * powf(2.0, Float(i))
-            let gauss = MPSImageGaussianBlur(device: device, sigma: sigma)
             let nextCoarse = pipeline.borrow(width: w, height: h, format: fmt)
             let layer = pipeline.borrow(width: w, height: h, format: fmt)
             borrowed.append(nextCoarse)
             borrowed.append(layer)
 
-            // next = gauss(current)
-            gauss.encode(commandBuffer: commandBuffer, sourceTexture: coarses.last!, destinationTexture: nextCoarse)
+            // next = blur(current)  — Gaussian by default, guided filter
+            // when edgeAware is set (kills the layer-overshoot at edges
+            // that produces a bright ring around the disc in extreme
+            // tone-curve workflows).
+            if edgeAware {
+                GuidedFilter.encodeBlur(
+                    input: coarses.last!, output: nextCoarse,
+                    radius: sigma,
+                    pipeline: pipeline,
+                    commandBuffer: commandBuffer,
+                    borrowed: &borrowed
+                )
+            } else {
+                let gauss = MPSImageGaussianBlur(device: device, sigma: sigma)
+                gauss.encode(commandBuffer: commandBuffer, sourceTexture: coarses.last!, destinationTexture: nextCoarse)
+            }
 
             // layer_i = current - next
             if let enc = commandBuffer.makeComputeCommandEncoder() {

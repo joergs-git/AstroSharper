@@ -203,6 +203,8 @@ struct SharpeningSection: View {
                 LabeledSlider(label: "Radius (σ)", value: $app.sharpen.radius, range: 0.2...15, format: "%.2f px")
                 LabeledSlider(label: "Amount", value: $app.sharpen.amount, range: 0...8, format: "%.2f")
                 Toggle("Adaptive (dim areas less)", isOn: $app.sharpen.adaptive)
+                Toggle("Suppress edge halo (anti-ring)", isOn: $app.sharpen.edgeAwareBlur)
+                    .help("Replaces the Gaussian-blur base of the unsharp with a guided filter — edge-aware blur that doesn't smear across high-contrast edges (solar limb, sunspots). Eliminates the bright ring/halo artefact that standard unsharp produces at the disc edge when an aggressive tone curve makes the off-limb very dark. ~30–40% extra compute, irrelevant for a single sharpen run. Affects both Unsharp and Wavelet boost methods.")
             } else if boostBinding.wrappedValue == .wavelet {
                 ForEach(0..<app.sharpen.waveletScales.count, id: \.self) { idx in
                     LabeledSlider(

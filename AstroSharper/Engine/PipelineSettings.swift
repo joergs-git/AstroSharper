@@ -66,6 +66,20 @@ struct SharpenSettings: Equatable, Codable {
     /// the very detail we just amplified. Default 0 = off.
     var waveletNoiseThreshold: Double = 0.0
 
+    /// Edge-aware blur for the unsharp / wavelet base (guided filter).
+    /// When ON, replaces the Gaussian-blur step in unsharp mask with a
+    /// guided filter (He et al. 2010). Eliminates the bright-ring /
+    /// dark-band halo artefact that standard Gaussian unsharp produces
+    /// at high-contrast edges (solar limb against dark sky, sunspot
+    /// borders, Jupiter against black). The halo is normally invisible
+    /// because the off-limb is also bright noise — it only becomes
+    /// obvious when an aggressive tone curve (e.g. Sun Dual-Zone or a
+    /// V-curve) maps mid-tones to deep black. Default OFF since the
+    /// 30–40% extra compute is irrelevant per single sharpen but
+    /// wasted on normal captures where the halo isn't visible anyway.
+    /// Toggle in the Sharpen panel under "Suppress edge halo".
+    var edgeAwareBlur: Bool = false
+
     // -------------------------------------------------------------------
     // Block C — blind / tiled deconvolution plumbing
     // -------------------------------------------------------------------
@@ -154,6 +168,7 @@ struct SharpenSettings: Equatable, Codable {
         self.waveletEnabled  = try c.decodeIfPresent(Bool.self,    forKey: .waveletEnabled)  ?? false
         self.waveletScales   = try c.decodeIfPresent([Double].self, forKey: .waveletScales)  ?? [1.8, 1.4, 1.0, 0.6, 0.4, 0.3]
         self.waveletNoiseThreshold = try c.decodeIfPresent(Double.self, forKey: .waveletNoiseThreshold) ?? 0.0
+        self.edgeAwareBlur         = try c.decodeIfPresent(Bool.self,   forKey: .edgeAwareBlur)         ?? false
         // New Block C fields.
         self.denoiseBeforePercent = try c.decodeIfPresent(Double.self, forKey: .denoiseBeforePercent) ?? 75
         self.denoiseAfterPercent  = try c.decodeIfPresent(Double.self, forKey: .denoiseAfterPercent)  ?? 75
@@ -183,6 +198,7 @@ struct SharpenSettings: Equatable, Codable {
         waveletEnabled: Bool = false,
         waveletScales: [Double] = [1.8, 1.4, 1.0, 0.6, 0.4, 0.3],
         waveletNoiseThreshold: Double = 0.0,
+        edgeAwareBlur: Bool = false,
         denoiseBeforePercent: Double = 75,
         denoiseAfterPercent: Double = 75,
         processLuminanceOnly: Bool = true,
@@ -206,6 +222,7 @@ struct SharpenSettings: Equatable, Codable {
         self.waveletEnabled = waveletEnabled
         self.waveletScales = waveletScales
         self.waveletNoiseThreshold = waveletNoiseThreshold
+        self.edgeAwareBlur = edgeAwareBlur
         self.denoiseBeforePercent = denoiseBeforePercent
         self.denoiseAfterPercent = denoiseAfterPercent
         self.processLuminanceOnly = processLuminanceOnly

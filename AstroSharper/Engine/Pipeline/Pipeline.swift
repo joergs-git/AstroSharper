@@ -19,6 +19,11 @@ final class Pipeline {
     // app launch (where a SwiftUI splash already covers it) and gives a
     // smooth-from-tick-zero live preview.
     private let unsharpPSO: MTLComputePipelineState
+    // Guided-filter trio for edge-aware unsharp blur (anti-halo). Built
+    // upfront with the rest so the first user toggle is instant.
+    private let guidedPackPSOInternal:    MTLComputePipelineState
+    private let guidedCoeffPSOInternal:   MTLComputePipelineState
+    private let guidedComposePSOInternal: MTLComputePipelineState
     private let divPSO:     MTLComputePipelineState
     private let mulPSO:     MTLComputePipelineState
     private let tonePSO:    MTLComputePipelineState
@@ -82,6 +87,9 @@ final class Pipeline {
             return try! dev.makeComputePipelineState(function: fn)
         }
         self.unsharpPSO = make("unsharp_mask")
+        self.guidedPackPSOInternal    = make("guided_pack")
+        self.guidedCoeffPSOInternal   = make("guided_coefficients")
+        self.guidedComposePSOInternal = make("guided_compose")
         self.divPSO     = make("lr_divide")
         self.mulPSO     = make("lr_multiply")
         self.tonePSO    = make("apply_tone_curve")
@@ -346,6 +354,7 @@ final class Pipeline {
                 amounts: sharpen.waveletScales.map { Float($0) },
                 baseSigma: 1.0,
                 noiseThreshold: Float(sharpen.waveletNoiseThreshold),
+                edgeAware: sharpen.edgeAwareBlur,
                 pipeline: self, commandBuffer: cmdBuf,
                 borrowed: &borrowed
             )
@@ -361,6 +370,7 @@ final class Pipeline {
                 sigma: Float(sharpen.radius),
                 amount: Float(sharpen.amount),
                 adaptive: sharpen.adaptive,
+                edgeAware: sharpen.edgeAwareBlur,
                 pipeline: self, commandBuffer: cmdBuf,
                 borrowed: &borrowed
             )
@@ -959,6 +969,9 @@ final class Pipeline {
     var stackPipeline: MTLComputePipelineState { stackPSO }
     var subtractPipeline: MTLComputePipelineState { subPSO }
     var waddPipeline: MTLComputePipelineState { waddPSO }
+    var guidedPackPSO:    MTLComputePipelineState { guidedPackPSOInternal }
+    var guidedCoeffPSO:   MTLComputePipelineState { guidedCoeffPSOInternal }
+    var guidedComposePSO: MTLComputePipelineState { guidedComposePSOInternal }
 }
 
 /// Mirror of the Metal `SaturationParams` struct; sent via `setBytes`.
