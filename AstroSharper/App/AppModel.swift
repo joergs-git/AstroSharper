@@ -2383,6 +2383,13 @@ final class AppModel: ObservableObject {
                 try ImageTexture.write(texture: tex, to: outURL, bitDepth: .uint16)
                 DispatchQueue.main.async {
                     self.registerOutput(url: outURL, autoSwitch: true)
+                    // After registerOutput + switchToSection runs, the
+                    // new entry sits in catalog but previewFileID was
+                    // set to whatever the stash had OR the first file
+                    // — not the new one. Explicit highlight selects +
+                    // previews the just-exported frame so the user
+                    // sees their pick, not the alphabetical first.
+                    self.highlightLatestOutput(url: outURL)
                     self.jobStatus = .done(processed: 1, outputDir: outFolder)
                     NSLog("Exported frame %d → %@", frameIndex + 1, outURL.lastPathComponent)
                 }
