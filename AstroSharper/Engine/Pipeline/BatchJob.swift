@@ -63,11 +63,11 @@ final class BatchJob {
                 return
             }
 
-            // Build tone-curve LUT once. solarDualZone short-circuits the
-            // control-points path with the asinh + linear fixed curve;
-            // fires regardless of the main `enabled` toggle.
+            // Build tone-curve LUT once. Gated on `toneCurve.enabled` —
+            // dual-zone is a different LUT shape, not an override of the
+            // section toggle. If the user disabled Tone Curve, no LUT.
             let lut: MTLTexture?
-            if config.toneCurve.solarDualZone {
+            if config.toneCurve.enabled && config.toneCurve.solarDualZone {
                 lut = ToneCurveLUT.buildSolarDualZone(device: MetalDevice.shared.device)
             } else if config.toneCurve.enabled {
                 lut = ToneCurveLUT.build(points: config.toneCurve.controlPoints, device: MetalDevice.shared.device)

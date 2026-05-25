@@ -1720,12 +1720,20 @@ final class AppModel: ObservableObject {
         // is the "single source of truth for auto" the user asked
         // for: one toggle, no surprise interactions with stale
         // checkbox states.
-        perItemOpts.useAutoPSF = luckyStack.autoNuke ? true : luckyStack.autoPSF
+        // AutoPSF is sharpening — gate it on `sharpen.enabled`. When the
+        // user explicitly disabled the Sharpen section, NO sharpening
+        // fires, including the AutoNuke-driven AutoPSF Wiener post-pass.
+        // This matches the user-expectation that Sharpen OFF means OFF.
+        // To get AutoPSF without manual sharpen settings: enable Sharpen
+        // section, leave manual sliders at defaults; AutoNuke ON then
+        // drives the post-stack deconv.
+        let autoPSFWanted = luckyStack.autoNuke ? true : luckyStack.autoPSF
+        perItemOpts.useAutoPSF = sharpen.enabled && autoPSFWanted
         perItemOpts.autoPSFSNR = luckyStack.autoNuke ? 100 : luckyStack.autoPSFSNR
         // C.2 cascade (auto-ROI fallback). AutoNuke leaves it OFF on
         // purpose: AutoNuke is the "do everything safely" preset, and
         // auto-ROI is opt-in until the bracket validates per-subject.
-        perItemOpts.useAutoPSFAutoROI = luckyStack.autoNuke ? false : luckyStack.autoPSFAutoROI
+        perItemOpts.useAutoPSFAutoROI = sharpen.enabled && (luckyStack.autoNuke ? false : luckyStack.autoPSFAutoROI)
         perItemOpts.validateDrift = luckyStack.validateDrift
         // RFF user setting → per-run options. Auto = pass nil so the
         // engine's σ-aware formula computes the fractions per disc
@@ -1781,9 +1789,20 @@ final class AppModel: ObservableObject {
         perItemOpts.drizzleAASigma = Float(luckyStack.drizzleAASigma)
 
         if luckyStack.bakeInProcessing {
-            let lut: MTLTexture? = toneCurve.enabled
-                ? ToneCurveLUT.build(points: toneCurve.controlPoints, device: MetalDevice.shared.device)
-                : nil
+            // LUT selection: dual-zone takes priority when on, but the
+            // whole tone subsystem is gated on tone.enabled — if the user
+            // has explicitly disabled the Tone Curve section, no LUT is
+            // built and no tone modification (including dual-zone) fires
+            // in the bake-in path. Symmetric to PreviewView.ensureLUT
+            // and BatchJob's LUT builder.
+            let lut: MTLTexture?
+            if toneCurve.enabled && toneCurve.solarDualZone {
+                lut = ToneCurveLUT.buildSolarDualZone(device: MetalDevice.shared.device)
+            } else if toneCurve.enabled {
+                lut = ToneCurveLUT.build(points: toneCurve.controlPoints, device: MetalDevice.shared.device)
+            } else {
+                lut = nil
+            }
             perItemOpts.bakeIn = LuckyStackBakeIn(
                 sharpen: sharpen,
                 toneCurve: toneCurve,

@@ -1279,8 +1279,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         let nothingActive = !tone.autoWB
             && !tone.chromaticAlignment
             && !sharpen.enabled
-            && !tone.solarDualZone   // Solar Dual-Zone overrides the curve regardless of tone.enabled
-            && (!tone.enabled || (!toneCurveActive && bcIsIdentity && satIsIdentity))
+            && (!tone.enabled || (!toneCurveActive && !tone.solarDualZone && bcIsIdentity && satIsIdentity))
         if nothingActive {
             afterTex = nil
             view?.needsDisplay = true
@@ -1340,11 +1339,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     }
 
     private func ensureLUT(for tone: ToneCurveSettings) -> MTLTexture? {
-        // Solar Dual-Zone short-circuits the control-points path with a
-        // fixed asinh-lower-half / linear-upper-half curve that exposes
-        // off-limb prominences while preserving disc surface detail.
-        // Independent of `tone.enabled` — when this flag is on, the
-        // tone-curve fires regardless of the main toggle.
+        // Tone subsystem is gated on `tone.enabled` — if the user
+        // disabled the Tone Curve section, NOTHING tone-side fires
+        // (including solarDualZone). Dual-zone is just a different
+        // LUT shape selected when the section is enabled.
+        guard tone.enabled else { return nil }
         if tone.solarDualZone {
             if lutTex != nil, lastLUTSolarDualZone { return lutTex }
             let newLUT = ToneCurveLUT.buildSolarDualZone(device: MetalDevice.shared.device)
@@ -1353,7 +1352,6 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             lastLUTPoints = []
             return newLUT
         }
-        guard tone.enabled else { return nil }
         if lutTex != nil, !lastLUTSolarDualZone, lastLUTPoints == tone.controlPoints { return lutTex }
         let newLUT = ToneCurveLUT.build(points: tone.controlPoints, device: MetalDevice.shared.device)
         lutTex = newLUT
