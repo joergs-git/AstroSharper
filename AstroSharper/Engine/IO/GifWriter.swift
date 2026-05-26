@@ -38,6 +38,7 @@ enum GifWriter {
         targetFrameCount: Int,
         fps: Int,
         crop: CGRect?,
+        bakeIn: BakeInExporter.Options? = nil,
         progress: ((Double) -> Void)? = nil
     ) throws {
         guard !frameRange.isEmpty else { throw WriteError.emptyRange }
@@ -112,19 +113,55 @@ enum GifWriter {
         let outH = ch_
         var rgba = [UInt8](repeating: 0, count: outW * outH * 4)
 
+        // Bake-in path: per-frame Pipeline.process produces RGBA8
+        // directly, so we skip the raw-bytes demosaic / mono-broadcast
+        // helper and feed the processed buffer to makeCGImage.
+        let bakeCtx: BakeInExporter.Context? = bakeIn.map {
+            BakeInExporter.Context(options: BakeInExporter.Options(
+                sharpen: $0.sharpen,
+                toneCurve: $0.toneCurve,
+                outputBitDepth: 8
+            ))
+        }
+
         for (i, frameIdx) in pickedIndices.enumerated() {
-            guard reader.canReadFrame(at: frameIdx) else { continue }
-            reader.withFrameBytes(at: frameIdx) { ptr, _ in
-                fillRGBA(
-                    ptr: ptr,
-                    srcW: srcW, srcH: srcH,
-                    cx: cx, cy: cy, cw: outW, ch: outH,
-                    isBayer: isBayer, mono16: mono16,
-                    colorID: h.colorID,
-                    rgba: &rgba
+            // Per-frame width/height — bake-in with resize can shrink
+            // them, so the CGImage size must come from each FrameOut,
+            // not the pre-loop outW/outH.
+            var frameW = outW
+            var frameH = outH
+            if let ctx = bakeCtx {
+                let frame = try ctx.processedFrame(
+                    sourceURL: source,
+                    frameIndex: frameIdx,
+                    crop: (cx == 0 && cy == 0 && cw == srcW && ch_ == srcH) ? nil
+                          : CGRect(x: cx, y: cy, width: cw, height: ch_)
                 )
+                frameW = frame.width
+                frameH = frame.height
+                if rgba.count != frame.data.count {
+                    rgba = [UInt8](repeating: 0, count: frame.data.count)
+                }
+                frame.data.withUnsafeBytes { raw in
+                    let src = raw.bindMemory(to: UInt8.self).baseAddress!
+                    rgba.withUnsafeMutableBufferPointer { dst in
+                        memcpy(dst.baseAddress, src, frame.data.count)
+                    }
+                }
+            } else {
+                guard reader.canReadFrame(at: frameIdx) else { continue }
+                reader.withFrameBytes(at: frameIdx) { ptr, _ in
+                    fillRGBA(
+                        ptr: ptr,
+                        srcW: srcW, srcH: srcH,
+                        cx: cx, cy: cy, cw: outW, ch: outH,
+                        isBayer: isBayer, mono16: mono16,
+                        colorID: h.colorID,
+                        rgba: &rgba
+                    )
+                }
             }
-            if let cg = makeCGImage(rgba: rgba, width: outW, height: outH) {
+            if let cg = makeCGImage(rgba: rgba, width: frameW, height: frameH) {
                 CGImageDestinationAddImage(dest, cg, frameProps as CFDictionary)
             }
             if i % 4 == 0 || i == outCount - 1 {

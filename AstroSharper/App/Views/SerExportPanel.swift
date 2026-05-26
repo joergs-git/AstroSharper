@@ -56,6 +56,17 @@ struct SerExportPanel: View {
     @State private var writing: Bool = false
     @State private var writeProgress: Double = 0
     @State private var lastResult: String? = nil
+    /// When true, every exported frame is run through the current
+    /// Sharpen + Tone chain before write. SER bake-in re-types the
+    /// output as 16-bit RGB and breaks scientific linearity (use only
+    /// for showcase/replay). GIF bake-in is WYSIWYG against the live
+    /// preview.
+    @State private var bakeInProcessing: Bool = false
+    /// 1 = full-res, 2 = ½×½, 4, 8, 16. Shrinks output WxH by the
+    /// divisor on the GPU during bake-in. Resize > 1 implicitly
+    /// requires bake-in (the resize happens inside the GPU pipeline
+    /// pass), so toggling it auto-enables `bakeInProcessing`.
+    @State private var resizeDivisor: Int = 1
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -155,7 +166,54 @@ struct SerExportPanel: View {
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
             }
+
+            Divider().padding(.vertical, 2)
+            HStack {
+                Text("Resize")
+                    .font(.system(size: 11))
+                    .frame(width: 60, alignment: .leading)
+                Picker("", selection: $resizeDivisor) {
+                    Text("1:1").tag(1)
+                    Text("1:2").tag(2)
+                    Text("1:4").tag(4)
+                    Text("1:8").tag(8)
+                    Text("1:16").tag(16)
+                }
+                .pickerStyle(.menu)
+                .frame(width: 80)
+                .help("Downsample the output by this factor on the GPU after Sharpen + Tone. 1:2 = ½×½ (¼ the area). Requires Bake-in.")
+                if resizeDivisor > 1 {
+                    Text(resizedDimensionLabel)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Toggle("Bake in Sharpen + Tone", isOn: $bakeInProcessing)
+                .font(.system(size: 11))
+                .disabled(resizeDivisor > 1)  // forced ON when resizing
+                .onChange(of: resizeDivisor) { _, new in
+                    if new > 1 { bakeInProcessing = true }
+                }
+                .help("Run every exported frame through the current Sharpen + Tone settings (what the live preview shows). Off = raw frame bytes.")
+            if bakeInProcessing {
+                Text(format == .ser
+                     ? "⚠︎ Output .ser will be 16-bit RGB and no longer scientifically linear. Use only for replay / showcase, NOT for re-stacking."
+                     : "GIF will exactly match the live preview.")
+                    .font(.system(size: 10))
+                    .foregroundColor(format == .ser ? .orange : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+    }
+
+    private var resizedDimensionLabel: String {
+        guard let dims = sourceDims else { return "" }
+        let w = (app.serCropRect?.width).map(Double.init)  ?? dims.w
+        let h = (app.serCropRect?.height).map(Double.init) ?? dims.h
+        let dw = max(2, Int(w) / resizeDivisor)
+        let dh = max(2, Int(h) / resizeDivisor)
+        return "→ \(dw)×\(dh) px"
     }
 
     private var footer: some View {
@@ -316,8 +374,17 @@ struct SerExportPanel: View {
             return
         }
         let base = sourceURL.deletingPathExtension().lastPathComponent
-        let fname = String(format: "%@_trim_%d-%d.ser", base, trimStart, trimEnd)
+        let suffix = bakeInProcessing ? "_baked" : ""
+        let fname = String(format: "%@_trim_%d-%d%@.ser", base, trimStart, trimEnd, suffix)
         let outURL = AppModel.uniqueOutputURL(outFolder.appendingPathComponent(fname))
+        let bakeOpts: BakeInExporter.Options? = bakeInProcessing
+            ? BakeInExporter.Options(
+                sharpen: app.sharpen,
+                toneCurve: app.toneCurve,
+                outputBitDepth: 16,
+                resizeDivisor: resizeDivisor
+              )
+            : nil
         writing = true; writeProgress = 0; lastResult = nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -326,6 +393,7 @@ struct SerExportPanel: View {
                     output: outURL,
                     frameRange: trimStart...trimEnd,
                     crop: crop,
+                    bakeIn: bakeOpts,
                     progress: { f in DispatchQueue.main.async { writeProgress = f } }
                 )
                 DispatchQueue.main.async {
@@ -356,10 +424,19 @@ struct SerExportPanel: View {
             return
         }
         let base = sourceURL.deletingPathExtension().lastPathComponent
-        let fname = String(format: "%@_%d-%d_%dfps.gif", base, trimStart, trimEnd, fps)
+        let suffix = bakeInProcessing ? "_baked" : ""
+        let fname = String(format: "%@_%d-%d_%dfps%@.gif", base, trimStart, trimEnd, fps, suffix)
         let outURL = AppModel.uniqueOutputURL(outFolder.appendingPathComponent(fname))
         let captureFPS = fps
         let captureTarget = targetFrames
+        let bakeOpts: BakeInExporter.Options? = bakeInProcessing
+            ? BakeInExporter.Options(
+                sharpen: app.sharpen,
+                toneCurve: app.toneCurve,
+                outputBitDepth: 8,
+                resizeDivisor: resizeDivisor
+              )
+            : nil
         writing = true; writeProgress = 0; lastResult = nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -370,6 +447,7 @@ struct SerExportPanel: View {
                     targetFrameCount: captureTarget,
                     fps: captureFPS,
                     crop: crop,
+                    bakeIn: bakeOpts,
                     progress: { f in DispatchQueue.main.async { writeProgress = f } }
                 )
                 DispatchQueue.main.async {

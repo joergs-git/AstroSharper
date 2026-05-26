@@ -54,6 +54,7 @@ enum SerWriter {
         output: URL,
         frameRange: ClosedRange<Int>,
         crop: CGRect?,
+        bakeIn: BakeInExporter.Options? = nil,
         progress: ((Double) -> Void)? = nil
     ) throws {
         guard !frameRange.isEmpty else { throw WriteError.emptyRange }
@@ -86,7 +87,7 @@ enum SerWriter {
         let frameEnd   = max(frameStart, min(frameRange.upperBound, h.frameCount - 1))
         let count = frameEnd - frameStart + 1
 
-        // Build output header — copy source bytes, override 3 fields.
+        // Build output header — copy source bytes, override fields.
         let srcHeaderBytes = try Data(contentsOf: source, options: .alwaysMapped).prefix(178)
         guard srcHeaderBytes.count == 178 else {
             throw WriteError.openFailed("Header too short")
@@ -101,12 +102,28 @@ enum SerWriter {
         //   30   ImageHeight
         //   34   PixelDepthPerPlane
         //   38   FrameCount
+        let colorOff:  Int = 18
         let widthOff:  Int = 26
         let heightOff: Int = 30
+        let depthOff:  Int = 34
         let frameOff:  Int = 38
-        writeInt32LE(&hdr, offset: widthOff,  value: Int32(cw))
-        writeInt32LE(&hdr, offset: heightOff, value: Int32(ch_))
+        // Resolve output dimensions. Bake-in with resizeDivisor > 1
+        // shrinks the frame on the GPU; the header must reflect those
+        // smaller dims, not the source crop.
+        let div = max(1, bakeIn?.resizeDivisor ?? 1)
+        let hdrW = max(2, cw / div)
+        let hdrH = max(2, ch_ / div)
+        writeInt32LE(&hdr, offset: widthOff,  value: Int32(hdrW))
+        writeInt32LE(&hdr, offset: heightOff, value: Int32(hdrH))
         writeInt32LE(&hdr, offset: frameOff,  value: Int32(count))
+        // Bake-in flips the SER from whatever the source was (mono /
+        // Bayer / RGB-8) to 16-bit RGB. Reason: the processing
+        // pipeline outputs demosaiced RGB and tone-mapped values; we
+        // preserve maximum dynamic range by writing 16-bit per channel.
+        if bakeIn != nil {
+            writeInt32LE(&hdr, offset: colorOff, value: Int32(SerColorID.rgb.rawValue))
+            writeInt32LE(&hdr, offset: depthOff, value: 16)
+        }
 
         // Create + open the output file.
         let fm = FileManager.default
@@ -121,8 +138,32 @@ enum SerWriter {
 
         try outFH.write(contentsOf: hdr)
 
-        // Per-frame write. For a full-frame copy we can blast the
-        // bytes straight through. For a crop we slice rows.
+        // Bake-in path: every frame goes through Sharpen + Tone on the
+        // GPU and is re-encoded as 16-bit RGB (3×UInt16 per pixel, LE).
+        // Crop happens inside processedFrame() via texture getBytes.
+        if let opts = bakeIn {
+            let ctx = BakeInExporter.Context(options: BakeInExporter.Options(
+                sharpen: opts.sharpen,
+                toneCurve: opts.toneCurve,
+                outputBitDepth: 16
+            ))
+            for (i, idx) in (frameStart...frameEnd).enumerated() {
+                let frame = try ctx.processedFrame(
+                    sourceURL: source,
+                    frameIndex: idx,
+                    crop: (cx == 0 && cy == 0 && cw == srcW && ch_ == srcH) ? nil
+                          : CGRect(x: cx, y: cy, width: cw, height: ch_)
+                )
+                try outFH.write(contentsOf: frame.data)
+                if i % 8 == 0 || i == count - 1 {
+                    progress?(Double(i + 1) / Double(count))
+                }
+            }
+            return
+        }
+
+        // Raw-copy path. For a full-frame copy we blast bytes straight
+        // through. For a crop we slice rows.
         let rowBytes = cw * bpp
         let srcRowBytes = srcW * bpp
         let isFullFrame = (cx == 0 && cy == 0 && cw == srcW && ch_ == srcH)
