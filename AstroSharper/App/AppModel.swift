@@ -236,6 +236,21 @@ final class AppModel: ObservableObject {
     /// doesn't inherit the previous file's range.
     @Published var serTrimStart: Int? = nil
     @Published var serTrimEnd: Int? = nil
+
+    /// Export crop region in SOURCE PIXEL coordinates. nil = no crop
+    /// (full frame). Engine cropper guarantees no aspect distortion —
+    /// the rect is applied verbatim (output dims = rect.size). Both
+    /// portrait and landscape aspect ratios supported. Reset to nil
+    /// on every new SER file load. Live overlay on preview shows the
+    /// rect when set.
+    @Published var serCropRect: CGRect? = nil
+    /// User-chosen aspect-ratio preset for the crop. The crop rect
+    /// auto-snaps to this ratio when the user adjusts size/position.
+    /// `.free` lets the user pick arbitrary dimensions.
+    @Published var serCropAspect: SerCropAspect = .free
+    /// True while the export panel is open — the preview gates its
+    /// overlay rendering on this.
+    @Published var serExportPanelOpen: Bool = false
     /// Remembers the last-viewed frame index per SER URL so switching
     /// section away and back (Inputs → Outputs → Inputs) restores the
     /// scrubber instead of resetting to frame 0. Stored only in-memory
@@ -496,6 +511,12 @@ final class AppModel: ObservableObject {
     ///
     /// Never prompts; the sandbox default is the silent fallback when both
     /// of the user-facing locations refuse writes (e.g. read-only NAS).
+    /// Public wrapper for views that need to resolve where outputs land
+    /// (e.g. the SER Export panel). Just forwards to the existing logic.
+    func resolveWritableOutputFolderPublic(implicit suggestion: URL?) -> URL? {
+        return resolveWritableOutputFolder(implicit: suggestion)
+    }
+
     private func resolveWritableOutputFolder(implicit suggestion: URL?) -> URL? {
         // Picked > current auto > implicit suggestion > sandbox fallback.
         if let picked = pickedOutputFolder, canWriteAt(folder: picked) {

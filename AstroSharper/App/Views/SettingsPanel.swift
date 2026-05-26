@@ -845,7 +845,7 @@ private struct SectionContainer<Content: View>: View {
 
 // MARK: - Labeled slider
 
-private struct LabeledSlider: View {
+struct LabeledSlider: View {
     let label: String
     @Binding var value: Double
     let range: ClosedRange<Double>

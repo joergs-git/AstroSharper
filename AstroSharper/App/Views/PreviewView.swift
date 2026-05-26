@@ -35,6 +35,18 @@ struct PreviewView: View {
         MetalPreviewRepresentable()
             .background(Color.black)
             .overlay(placeholderOverlay)
+            .overlay {
+                // Live crop overlay — only when the user has set a crop
+                // rect via the Export panel. The source pixel coords get
+                // mapped to view coords using the same uniform letterbox
+                // fit logic the Metal shader uses (no distortion).
+                if let r = app.serCropRect,
+                   let dim = app.previewStats.dimensions,
+                   dim.width > 0 && dim.height > 0 {
+                    Self.cropOverlay(rectInSource: r, srcW: dim.width, srcH: dim.height)
+                        .allowsHitTesting(false)
+                }
+            }
             .overlay(alignment: .bottomLeading) {
                 if app.hudVisible && app.previewFileID != nil {
                     PreviewStatsHUD(
@@ -273,6 +285,54 @@ struct PreviewView: View {
                 Text("Open a folder with ⌘O or drag one in")
                     .font(.caption)
                     .foregroundColor(.secondary.opacity(0.7))
+            }
+        }
+    }
+
+    /// Visualise the crop rect over the preview. The Metal shader uses
+    /// a uniform letterbox fit (no axis distortion), so we replicate
+    /// that math here: scale = min(viewW/srcW, viewH/srcH), then center
+    /// the fitted content. Outside the rect we tint dim, inside we draw
+    /// a thin yellow stroke with corner ticks so the user can see crop
+    /// edges even at low zoom.
+    @ViewBuilder
+    static func cropOverlay(rectInSource r: CGRect, srcW: Int, srcH: Int) -> some View {
+        GeometryReader { geo in
+            let viewW = geo.size.width
+            let viewH = geo.size.height
+            let sw = CGFloat(srcW)
+            let sh = CGFloat(srcH)
+            let scale = min(viewW / sw, viewH / sh)
+            let fittedW = sw * scale
+            let fittedH = sh * scale
+            let offsetX = (viewW - fittedW) * 0.5
+            let offsetY = (viewH - fittedH) * 0.5
+            let cropX = offsetX + r.origin.x * scale
+            let cropY = offsetY + r.origin.y * scale
+            let cropW = r.width * scale
+            let cropH = r.height * scale
+
+            ZStack(alignment: .topLeading) {
+                // Dim outside the crop window. A single black-with-alpha
+                // mask, with the crop rect blendModed back to clear so
+                // only the surround stays dimmed.
+                Rectangle()
+                    .fill(Color.black.opacity(0.45))
+                    .mask {
+                        Rectangle()
+                            .overlay(
+                                Rectangle()
+                                    .frame(width: max(0, cropW), height: max(0, cropH))
+                                    .position(x: cropX + cropW * 0.5, y: cropY + cropH * 0.5)
+                                    .blendMode(.destinationOut)
+                            )
+                            .compositingGroup()
+                    }
+                // Inside-rect stroke.
+                Rectangle()
+                    .stroke(Color.yellow.opacity(0.9), lineWidth: 1.5)
+                    .frame(width: max(0, cropW), height: max(0, cropH))
+                    .position(x: cropX + cropW * 0.5, y: cropY + cropH * 0.5)
             }
         }
     }
@@ -764,10 +824,12 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 // correctly refuses to read past the mapped data).
                 let realCount = serReader?.readableFrameCount ?? h.frameCount
                 app.previewSerFrameCount = realCount
-                // Trim range is per-file — reset on every new SER load
-                // so a fresh capture starts with the full range available.
+                // Trim range + crop region are per-file — reset on
+                // every new SER load so a fresh capture starts clean.
                 app.serTrimStart = nil
                 app.serTrimEnd = nil
+                app.serCropRect = nil
+                app.serCropAspect = .free
                 // Restore the last-viewed frame for this SER when the
                 // user round-trips between sections. Clamp to the
                 // actual readable range in case the file was truncated.

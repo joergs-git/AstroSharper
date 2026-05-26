@@ -130,6 +130,22 @@ struct SerScrubBar: View {
                     .foregroundColor(.purple)
             }
 
+            // Export panel — opens a popover with crop + format + fps
+            // + fileSize estimate + Export button.
+            Button {
+                app.serExportPanelOpen = true
+            } label: {
+                Image(systemName: "tray.and.arrow.up")
+                    .font(.system(size: 14))
+            }
+            .buttonStyle(.plain)
+            .disabled(!usable)
+            .help("Open the Trim+Crop+Export panel — save the selected range as a shorter .ser or animated GIF.")
+            .popover(isPresented: $app.serExportPanelOpen) {
+                SerExportPanel()
+                    .environmentObject(app)
+            }
+
             // Export-current-frame → TIFF in outputs folder.
             // Pinned use case: solar Hα prominence captures where
             // stacking softens wisp morphology — scrub to the sharpest
