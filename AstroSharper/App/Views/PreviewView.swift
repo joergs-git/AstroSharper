@@ -350,6 +350,10 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     /// keeps the next 4 upcoming frames warm so NAS-based SERs don't
     /// freeze on per-frame I/O.
     private let serPrefetcher = SerFramePrefetcher(device: MetalDevice.shared.device)
+    /// CPU-side low-res scrub cache — no Metal-kernel contention with
+    /// the full-res prefetcher / main load. Drives drag-preview on
+    /// 4 GB+ SERs where full-res decodes are too slow per scrub step.
+    private let serScrubCache = SerScrubLowResCache(device: MetalDevice.shared.device)
 
     /// Texture pixel dimensions of the currently-shown preview, exposed so
     /// the ZoomableMTKView can compute fit-scale for anchored zooming.
@@ -765,15 +769,14 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 // actual readable range in case the file was truncated.
                 let remembered = app.rememberedSerFrameIndices[url] ?? 0
                 app.previewSerFrameIndex = max(0, min(realCount - 1, remembered))
-                // Prefetcher URL bind so subsequent scrub-loads write
-                // into the right cache. Sparse-prefill DISABLED for
-                // now (2026-05-26): on 4 GB+ SERs the parallel
-                // disk + Metal pressure with the main frame-0 decode
-                // produced a black preview. Re-enable once the proper
-                // low-res CPU-side scrub cache lands (separate decode
-                // pipeline, no Metal-queue contention).
+                // Bind both caches to this SER. Full-res prefetcher
+                // handles release / play-time decodes; low-res scrub
+                // cache handles drag previews. Low-res prefill runs
+                // CPU-side (no Metal contention) so even on 4 GB+
+                // SERs the main frame-0 load isn't starved.
                 serPrefetcher.setURL(url)
-                // serPrefetcher.prefillSparse(totalFrames: realCount)
+                serScrubCache.setURL(url)
+                serScrubCache.prefillSparse(totalFrames: realCount)
                 stats.totalFrames = realCount
                 stats.dimensions = (h.imageWidth, h.imageHeight)
                 stats.bitDepth = h.pixelDepthPerPlane
@@ -1144,9 +1147,45 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         guard entry.isSER else { loadCurrentSerFrame(); return }
         let frameIndex = app.previewSerFrameIndex
         serPrefetcher.setURL(entry.url)
+        serScrubCache.setURL(entry.url)
+
+        // Drag-active path: low-res scrub cache only. Decoupled from
+        // the Metal-kernel-bound full-res prefetcher, so it stays
+        // responsive on 4 GB+ SERs where each full-res decode is
+        // 300-500 ms. Request the EXACT frame's thumb in the background
+        // (lands on the next drag pulse) and show nearest-cached now.
+        if app.isSerScrubbing {
+            serScrubCache.requestThumb(at: frameIndex)
+            let lowRes = serScrubCache.cachedThumb(at: frameIndex)
+                ?? serScrubCache.nearestCachedThumb(to: frameIndex)?.texture
+            if let lowRes {
+                paintScrubLowRes(lowRes, flipped: entry.meridianFlipped, frameIndex: frameIndex)
+                return
+            }
+            // Low-res cache also missed (e.g. first drag right after
+            // load, before any thumb has decoded). Skip the full-res
+            // sync decode here — it would block the main thread for
+            // hundreds of milliseconds on a 4 GB SER. The next pulse
+            // will likely have a thumb ready. If we have any prior
+            // texture in `beforeTex`, just leave it visible.
+            return
+        }
+
+        // Idle / release: full-res decode of the exact frame.
         serPrefetcher.prefetch(after: frameIndex, totalFrames: app.previewSerFrameCount)
         guard let raw = serPrefetcher.loadFrameSync(at: frameIndex) else { return }
         let tex: MTLTexture = entry.meridianFlipped
+            ? RotateTexture.rotate180(raw, device: MetalDevice.shared.device)
+            : raw
+        afterTex = nil
+        beforeTex = tex
+        app.previewStats.currentFrame = frameIndex + 1
+        app.previewStats.currentSharpness = nil
+        view?.draw()
+    }
+
+    private func paintScrubLowRes(_ raw: MTLTexture, flipped: Bool, frameIndex: Int) {
+        let tex: MTLTexture = flipped
             ? RotateTexture.rotate180(raw, device: MetalDevice.shared.device)
             : raw
         afterTex = nil
