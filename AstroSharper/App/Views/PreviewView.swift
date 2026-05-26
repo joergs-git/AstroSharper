@@ -765,12 +765,15 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 // actual readable range in case the file was truncated.
                 let remembered = app.rememberedSerFrameIndices[url] ?? 0
                 app.previewSerFrameIndex = max(0, min(realCount - 1, remembered))
-                // Kick the scrub-cache prefill — the prefetcher will
-                // background-decode 16 frames spaced evenly across the
-                // SER so the very first drag has visual feedback all
-                // along the bar, not just at the start.
+                // Prefetcher URL bind so subsequent scrub-loads write
+                // into the right cache. Sparse-prefill DISABLED for
+                // now (2026-05-26): on 4 GB+ SERs the parallel
+                // disk + Metal pressure with the main frame-0 decode
+                // produced a black preview. Re-enable once the proper
+                // low-res CPU-side scrub cache lands (separate decode
+                // pipeline, no Metal-queue contention).
                 serPrefetcher.setURL(url)
-                serPrefetcher.prefillSparse(totalFrames: realCount)
+                // serPrefetcher.prefillSparse(totalFrames: realCount)
                 stats.totalFrames = realCount
                 stats.dimensions = (h.imageWidth, h.imageHeight)
                 stats.bitDepth = h.pixelDepthPerPlane
