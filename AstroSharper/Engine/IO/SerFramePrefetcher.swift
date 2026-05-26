@@ -32,15 +32,14 @@ import Metal
 
 final class SerFramePrefetcher {
     private let device: MTLDevice
-    // Concurrent — sparse prefill (16 frames spread across the SER on
-    // load) needs parallel decodes to prime the cache quickly on 4 GB+
-    // files; serial would be 16 × disk-read latency = 6 s+ before
-    // scrubbing has cache hits. The internal cache mutations are
-    // already lock-protected, so concurrent dispatch is safe.
+    // Serial — concurrent dispatch saturated the shared Metal command
+    // queue (16 unpack-kernel dispatches in flight) and produced a black
+    // frame 0 on 4 GB+ SERs (user-reported 2026-05-26). Serial keeps the
+    // GPU pipeline predictable; the sparse-prefill prime is slower (16 ×
+    // disk-read latency) but no longer races the main frame-0 decode.
     private let prefetchQueue = DispatchQueue(
         label: "com.joergsflow.AstroSharper.serPrefetch",
-        qos: .userInitiated,
-        attributes: .concurrent
+        qos: .userInitiated
     )
     private let lock = NSLock()
 
