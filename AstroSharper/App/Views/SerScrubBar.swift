@@ -63,11 +63,10 @@ struct SerScrubBar: View {
                 frameIndex: $app.previewSerFrameIndex,
                 frameCount: frameCount
             )
-            // Hit area 40 px (visual track + knob stay 4/13 px centred);
-            // generous click forgiveness — user no longer has to pixel-
-            // hunt the 13-px knob to start a drag, the entire row height
-            // around the track is now active.
-            .frame(height: 40)
+            // Hit area 60 px (visual track + knob stay 4/13 px centred).
+            // Doubled per user feedback — drag/click works anywhere in
+            // the row band, no need to pixel-hunt the 13-px knob.
+            .frame(height: 60)
             .disabled(!usable)
             .opacity(usable ? 1 : 0.4)
 

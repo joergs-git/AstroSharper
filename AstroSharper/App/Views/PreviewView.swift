@@ -1125,17 +1125,15 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     }
 
     /// Synchronous scrub-frame load: decode + paint INLINE on the main
-    /// thread (no background-queue → `main.async` hop). The async hop
-    /// didn't land mid-gesture, so the preview only refreshed on release.
-    /// Cache hits are instant; a miss decodes here directly (tens of ms
-    /// for a large frame — acceptable for a visual scan, and it's gated
-    /// to ~30/s). Falls back to the async `loadCurrentSerFrame` for AVI.
+    /// thread (no background-queue → `main.async` hop). Cache hits are
+    /// instant; a miss decodes here directly (tens of ms for a large
+    /// frame — acceptable for a visual scan, and it's gated to ~30/s).
+    /// Falls back to the async `loadCurrentSerFrame` for AVI.
     ///
-    /// During an active drag (`app.isSerScrubbing == true`) we never
-    /// decode — we just snap to the nearest already-cached frame and
-    /// paint that. Keeps the UI smooth on remote / huge files where
-    /// each decode is tens of milliseconds. Drag release falls back
-    /// to the full-res path via `serScrubSettleSubject`.
+    /// Speed-up: SER-load primes the cache with 16 sparse frames
+    /// (prefillSparse), so scrubbing near a prefilled position hits
+    /// cache and returns instantly. Hot lookahead (prefetch(after:))
+    /// warms the next 4 frames around the current position.
     private func loadScrubFrameSync() {
         guard let id = app.previewFileID,
               let entry = app.catalog.files.first(where: { $0.id == id })
@@ -1143,29 +1141,9 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         guard entry.isSER else { loadCurrentSerFrame(); return }
         let frameIndex = app.previewSerFrameIndex
         serPrefetcher.setURL(entry.url)
-
-        // Drag-active path: nearest cached, zero new decodes.
-        if app.isSerScrubbing {
-            guard let (_, raw) = serPrefetcher.nearestCachedFrame(to: frameIndex) else {
-                // Cache empty (e.g. first drag immediately after load,
-                // before sparse-prefill landed): one synchronous decode
-                // to get something on screen, then return.
-                guard let raw = serPrefetcher.loadFrameSync(at: frameIndex) else { return }
-                paintScrubTex(raw, flipped: entry.meridianFlipped, frameIndex: frameIndex)
-                return
-            }
-            paintScrubTex(raw, flipped: entry.meridianFlipped, frameIndex: frameIndex)
-            return
-        }
-
-        // Idle / not-dragging: full-res decode of the exact frame.
         serPrefetcher.prefetch(after: frameIndex, totalFrames: app.previewSerFrameCount)
         guard let raw = serPrefetcher.loadFrameSync(at: frameIndex) else { return }
-        paintScrubTex(raw, flipped: entry.meridianFlipped, frameIndex: frameIndex)
-    }
-
-    private func paintScrubTex(_ raw: MTLTexture, flipped: Bool, frameIndex: Int) {
-        let tex: MTLTexture = flipped
+        let tex: MTLTexture = entry.meridianFlipped
             ? RotateTexture.rotate180(raw, device: MetalDevice.shared.device)
             : raw
         afterTex = nil
