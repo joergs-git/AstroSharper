@@ -830,20 +830,17 @@ enum LuckyStack {
                 }
                 await onProgress(.writing)
 
-                // Optional bake-in: route the stacked texture through the
-                // user's current sharpen + tone pipeline before writing so
-                // the saved file matches the live preview.
-                var final: MTLTexture
-                if let bake = options.bakeIn {
-                    final = pipeline.process(
-                        input: stacked,
-                        sharpen: bake.sharpen,
-                        toneCurve: bake.toneCurve,
-                        toneCurveLUT: bake.toneCurveLUT
-                    )
-                } else {
-                    final = stacked
-                }
+                // Final-image variable. Initialised to the bare stack;
+                // mutates through AutoPSF (linear PSF correction) FIRST,
+                // then bake-in (Sharpen + Tone) — the only physically
+                // correct order. The previous order applied bake-in
+                // first, so Wiener deconv ran on top of an already-
+                // sharpened + tone-mapped image (non-linear), producing
+                // visible ringing + over-sharpened halos that the user
+                // reported as "schrott" on Sun presets with bake-in on.
+                // Wiener assumes linear-light photons → must precede
+                // non-linear tone-curve + sharpen-overshoot operations.
+                var final: MTLTexture = stacked
 
                 // Auto-PSF post-pass (Block C.1 v0): estimate σ from the
                 // limb LSF and apply Wiener deconv, wrapped by dual-
@@ -1098,6 +1095,21 @@ enum LuckyStack {
                         let cascadeNote = notes.isEmpty ? "all cascade paths bailed" : notes.joined(separator: "; ")
                         NSLog("AutoPSF: estimation skipped (%@); bare stack written, dual-stage denoise also skipped since it wraps the deconv it has nothing to do without", cascadeNote)
                     }
+                }
+
+                // Bake-in (Sharpen + Tone) AFTER AutoPSF. Wiener has
+                // already corrected for the PSF on linear data; now the
+                // user's sharpen + tone-curve get a clean PSF-corrected
+                // input. Sun-Hα-Prominence with dual-zone tone curve
+                // works correctly here because dual-zone is non-linear
+                // (asinh) and runs LAST, on already-deconvolved data.
+                if let bake = options.bakeIn {
+                    final = pipeline.process(
+                        input: final,
+                        sharpen: bake.sharpen,
+                        toneCurve: bake.toneCurve,
+                        toneCurveLUT: bake.toneCurveLUT
+                    )
                 }
 
                 // Stack-end auto-recovery (always-on). Mean-stacking lifts
