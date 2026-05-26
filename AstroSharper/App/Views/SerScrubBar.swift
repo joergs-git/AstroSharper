@@ -130,6 +130,7 @@ struct SerScrubBar: View {
 /// presents new frames LIVE while dragging (the modal loop blocks
 /// CoreAnimation commits, freezing the preview until release).
 private struct ScrubTrack: View {
+    @EnvironmentObject private var app: AppModel
     @Binding var frameIndex: Int
     let frameCount: Int
 
@@ -162,9 +163,20 @@ private struct ScrubTrack: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        // Mark dragging on the first event so PreviewView's
+                        // observer can switch to the cheap nearest-cached
+                        // path instead of decoding every position.
+                        if !app.isSerScrubbing { app.isSerScrubbing = true }
                         let f = min(max(0, value.location.x / w), 1)
                         let idx = Int((Double(f) * Double(upper)).rounded())
                         if idx != frameIndex { frameIndex = idx }
+                    }
+                    .onEnded { _ in
+                        // Release: drop drag-state. The observer in
+                        // PreviewView will then trigger a full-res
+                        // decode of the landed frame so the final
+                        // image is exact, not a snapped neighbour.
+                        app.isSerScrubbing = false
                     }
             )
         }

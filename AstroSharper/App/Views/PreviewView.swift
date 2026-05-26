@@ -522,6 +522,16 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             .removeDuplicates()
             .sink { [weak self] _ in self?.serScrubIndexChanged() }
             .store(in: &cancellables)
+
+        // Drag release: when isSerScrubbing flips true → false, the
+        // settle subject fires a full-res decode of the LANDED frame
+        // (no longer the nearest-cached neighbour the drag showed).
+        app.$isSerScrubbing
+            .removeDuplicates()
+            .sink { [weak self] dragging in
+                if !dragging { self?.serScrubSettleSubject.send(()) }
+            }
+            .store(in: &cancellables)
         // SER playback stopped → run the percentile recompute + pipeline
         // on whichever frame the user landed on. During playback both are
         // skipped (NAS reads cap at much lower fps than the timer wants),
@@ -755,6 +765,12 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 // actual readable range in case the file was truncated.
                 let remembered = app.rememberedSerFrameIndices[url] ?? 0
                 app.previewSerFrameIndex = max(0, min(realCount - 1, remembered))
+                // Kick the scrub-cache prefill — the prefetcher will
+                // background-decode 16 frames spaced evenly across the
+                // SER so the very first drag has visual feedback all
+                // along the bar, not just at the start.
+                serPrefetcher.setURL(url)
+                serPrefetcher.prefillSparse(totalFrames: realCount)
                 stats.totalFrames = realCount
                 stats.dimensions = (h.imageWidth, h.imageHeight)
                 stats.bitDepth = h.pixelDepthPerPlane
@@ -1114,6 +1130,12 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     /// Cache hits are instant; a miss decodes here directly (tens of ms
     /// for a large frame — acceptable for a visual scan, and it's gated
     /// to ~30/s). Falls back to the async `loadCurrentSerFrame` for AVI.
+    ///
+    /// During an active drag (`app.isSerScrubbing == true`) we never
+    /// decode — we just snap to the nearest already-cached frame and
+    /// paint that. Keeps the UI smooth on remote / huge files where
+    /// each decode is tens of milliseconds. Drag release falls back
+    /// to the full-res path via `serScrubSettleSubject`.
     private func loadScrubFrameSync() {
         guard let id = app.previewFileID,
               let entry = app.catalog.files.first(where: { $0.id == id })
@@ -1121,9 +1143,29 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         guard entry.isSER else { loadCurrentSerFrame(); return }
         let frameIndex = app.previewSerFrameIndex
         serPrefetcher.setURL(entry.url)
+
+        // Drag-active path: nearest cached, zero new decodes.
+        if app.isSerScrubbing {
+            guard let (_, raw) = serPrefetcher.nearestCachedFrame(to: frameIndex) else {
+                // Cache empty (e.g. first drag immediately after load,
+                // before sparse-prefill landed): one synchronous decode
+                // to get something on screen, then return.
+                guard let raw = serPrefetcher.loadFrameSync(at: frameIndex) else { return }
+                paintScrubTex(raw, flipped: entry.meridianFlipped, frameIndex: frameIndex)
+                return
+            }
+            paintScrubTex(raw, flipped: entry.meridianFlipped, frameIndex: frameIndex)
+            return
+        }
+
+        // Idle / not-dragging: full-res decode of the exact frame.
         serPrefetcher.prefetch(after: frameIndex, totalFrames: app.previewSerFrameCount)
         guard let raw = serPrefetcher.loadFrameSync(at: frameIndex) else { return }
-        let tex: MTLTexture = entry.meridianFlipped
+        paintScrubTex(raw, flipped: entry.meridianFlipped, frameIndex: frameIndex)
+    }
+
+    private func paintScrubTex(_ raw: MTLTexture, flipped: Bool, frameIndex: Int) {
+        let tex: MTLTexture = flipped
             ? RotateTexture.rotate180(raw, device: MetalDevice.shared.device)
             : raw
         afterTex = nil

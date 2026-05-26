@@ -221,6 +221,14 @@ final class AppModel: ObservableObject {
     // SER. Set by the preview coordinator after reading the SER header;
     // re-set to (0, 0) when the active file isn't SER.
     @Published var previewSerFrameIndex: Int = 0
+    /// True while the user is actively dragging the SER scrub knob.
+    /// Set by ScrubTrack's DragGesture (onChanged → true, onEnded →
+    /// false). PreviewView's scrub-index-changed observer switches to
+    /// "show nearest already-cached frame, skip new decodes" while
+    /// this is true — keeps the UI responsive on remote / huge files.
+    /// On release, falls back to the normal full-res decode path so
+    /// the landed frame is exact.
+    @Published var isSerScrubbing: Bool = false
     /// Remembers the last-viewed frame index per SER URL so switching
     /// section away and back (Inputs → Outputs → Inputs) restores the
     /// scrubber instead of resetting to frame 0. Stored only in-memory

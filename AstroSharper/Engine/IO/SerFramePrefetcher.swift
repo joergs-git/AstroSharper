@@ -92,6 +92,62 @@ final class SerFramePrefetcher {
         return tex
     }
 
+    /// Return the cached frame whose index is closest to `target`, or
+    /// nil if the cache is empty. Used by the scrub bar to show
+    /// instant feedback during a drag — instead of decoding every
+    /// scrub position (slow on remote files / huge frames), the UI
+    /// snaps to whichever nearby frame is already decoded.
+    func nearestCachedFrame(to target: Int) -> (index: Int, texture: MTLTexture)? {
+        lock.lock(); defer { lock.unlock() }
+        guard !cache.isEmpty else { return nil }
+        var bestIdx = -1
+        var bestDist = Int.max
+        for k in cache.keys {
+            let d = abs(k - target)
+            if d < bestDist { bestDist = d; bestIdx = k }
+        }
+        guard let tex = cache[bestIdx] else { return nil }
+        return (bestIdx, tex)
+    }
+
+    /// Background-fill the cache with frames spaced evenly across the
+    /// SER, up to `capacity` slots. Called once per SER-load so a
+    /// fresh drag immediately has scrub-preview material everywhere.
+    /// Frames currently cached or pending are skipped, so calling this
+    /// multiple times is harmless. Quietly aborts if the URL changes
+    /// while loading (setURL clears `currentURL`).
+    func prefillSparse(totalFrames: Int) {
+        guard totalFrames > 0, let url = lockedURL() else { return }
+        let slots = capacity
+        var toFetch: [Int] = []
+        lock.lock()
+        for i in 0..<slots {
+            // Spread evenly: frame 0, frame N/slots, ..., frame N-1
+            let target = (slots == 1) ? 0 : Int(Double(i) * Double(totalFrames - 1) / Double(slots - 1))
+            if cache[target] != nil { continue }
+            if pendingLoads.contains(target) { continue }
+            pendingLoads.insert(target)
+            toFetch.append(target)
+        }
+        lock.unlock()
+        for target in toFetch {
+            prefetchQueue.async { [weak self] in
+                guard let self else { return }
+                guard self.urlStillMatches(url) else {
+                    self.markPendingDone(index: target)
+                    return
+                }
+                let tex = try? SerFrameLoader.loadFrame(
+                    url: url, frameIndex: target, device: self.device
+                )
+                if let tex {
+                    self.insert(index: target, texture: tex, ifURLMatches: url)
+                }
+                self.markPendingDone(index: target)
+            }
+        }
+    }
+
     /// Schedule the next `lookAhead` frames after `index` for
     /// background loading. No-op when the next frames are already
     /// cached or pending.
