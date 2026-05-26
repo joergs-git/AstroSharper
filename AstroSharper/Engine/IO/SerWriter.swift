@@ -108,11 +108,16 @@ enum SerWriter {
         let depthOff:  Int = 34
         let frameOff:  Int = 38
         // Resolve output dimensions. Bake-in with resizeDivisor > 1
-        // shrinks the frame on the GPU; the header must reflect those
-        // smaller dims, not the source crop.
+        // shrinks the frame on the GPU; rotation 90/270 swaps width
+        // and height. Header must reflect the final on-disk frame
+        // size, not the source crop.
         let div = max(1, bakeIn?.resizeDivisor ?? 1)
-        let hdrW = max(2, cw / div)
-        let hdrH = max(2, ch_ / div)
+        let postResizeW = max(2, cw / div)
+        let postResizeH = max(2, ch_ / div)
+        let rot = bakeIn?.rotationDegrees ?? 0
+        let (hdrW, hdrH): (Int, Int) = (rot == 90 || rot == 270)
+            ? (postResizeH, postResizeW)
+            : (postResizeW, postResizeH)
         writeInt32LE(&hdr, offset: widthOff,  value: Int32(hdrW))
         writeInt32LE(&hdr, offset: heightOff, value: Int32(hdrH))
         writeInt32LE(&hdr, offset: frameOff,  value: Int32(count))

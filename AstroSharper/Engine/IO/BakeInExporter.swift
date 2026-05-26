@@ -31,15 +31,25 @@ enum BakeInExporter {
         /// readback is correspondingly smaller. Keeps GIFs manageable
         /// for 4 GB SER sources.
         let resizeDivisor: Int
+        /// 0 / 90 / 180 / 270 — clockwise rotation applied to each
+        /// output frame AFTER resize, in CPU. For 90 / 270 the output
+        /// width and height swap.
+        let rotationDegrees: Int
 
         init(sharpen: SharpenSettings,
              toneCurve: ToneCurveSettings,
              outputBitDepth: Int,
-             resizeDivisor: Int = 1) {
+             resizeDivisor: Int = 1,
+             rotationDegrees: Int = 0) {
             self.sharpen = sharpen
             self.toneCurve = toneCurve
             self.outputBitDepth = outputBitDepth
             self.resizeDivisor = max(1, resizeDivisor)
+            // Snap to nearest multiple of 90 in 0..<360.
+            var r = rotationDegrees % 360
+            if r < 0 { r += 360 }
+            let snapped = ((r + 45) / 90) * 90 % 360
+            self.rotationDegrees = snapped
         }
     }
 
@@ -203,33 +213,50 @@ enum BakeInExporter {
             // Re-bind cw / ch to the actual output dims for the packer below.
             let pcw = outW
             let pch = outH
-            // 7) Pack Float16 RGBA → output. GIF needs RGBA8 (alpha
-            //    forced to 255). SER bake-in always writes 16-bit RGB
-            //    (3 channels, no alpha — SER doesn't carry alpha).
+            // 7) Pack Float16 RGBA → output, applying CPU rotation
+            //    during the pixel walk. For rotation 0 the dst index
+            //    increments linearly; for 90/180/270 we re-map (sx, sy)
+            //    in the source buffer to (dx, dy) in the destination.
+            //    Doing it during pack avoids a second pass + extra
+            //    allocation. For 90/270 the output width and height
+            //    swap.
+            let rot = options.rotationDegrees
+            let (dstW, dstH): (Int, Int) = (rot == 90 || rot == 270)
+                ? (pch, pcw) : (pcw, pch)
+
             if options.outputBitDepth == 8 {
-                var rgba = Data(count: pcw * pch * 4)
+                var rgba = Data(count: dstW * dstH * 4)
                 rgba.withUnsafeMutableBytes { raw in
                     let p = raw.bindMemory(to: UInt8.self).baseAddress!
-                    for i in 0..<(pcw * pch) {
-                        p[i * 4 + 0] = float16ToU8(f16Buf[i * 4 + 0])
-                        p[i * 4 + 1] = float16ToU8(f16Buf[i * 4 + 1])
-                        p[i * 4 + 2] = float16ToU8(f16Buf[i * 4 + 2])
-                        p[i * 4 + 3] = 255
+                    for sy in 0..<pch {
+                        for sx in 0..<pcw {
+                            let (dx, dy) = rotMap(sx: sx, sy: sy, pcw: pcw, pch: pch, rot: rot)
+                            let dstIdx = (dy * dstW + dx) * 4
+                            let srcIdx = (sy * pcw + sx) * 4
+                            p[dstIdx + 0] = float16ToU8(f16Buf[srcIdx + 0])
+                            p[dstIdx + 1] = float16ToU8(f16Buf[srcIdx + 1])
+                            p[dstIdx + 2] = float16ToU8(f16Buf[srcIdx + 2])
+                            p[dstIdx + 3] = 255
+                        }
                     }
                 }
-                return FrameOut(width: pcw, height: pch, bytesPerPixel: 4, data: rgba)
+                return FrameOut(width: dstW, height: dstH, bytesPerPixel: 4, data: rgba)
             } else {
-                // 16-bit RGB interleaved, little-endian (SER spec).
-                var rgb = Data(count: pcw * pch * 6)
+                var rgb = Data(count: dstW * dstH * 6)
                 rgb.withUnsafeMutableBytes { raw in
                     let p = raw.bindMemory(to: UInt16.self).baseAddress!
-                    for i in 0..<(pcw * pch) {
-                        p[i * 3 + 0] = float16ToU16(f16Buf[i * 4 + 0])
-                        p[i * 3 + 1] = float16ToU16(f16Buf[i * 4 + 1])
-                        p[i * 3 + 2] = float16ToU16(f16Buf[i * 4 + 2])
+                    for sy in 0..<pch {
+                        for sx in 0..<pcw {
+                            let (dx, dy) = rotMap(sx: sx, sy: sy, pcw: pcw, pch: pch, rot: rot)
+                            let dstIdx = (dy * dstW + dx) * 3
+                            let srcIdx = (sy * pcw + sx) * 4
+                            p[dstIdx + 0] = float16ToU16(f16Buf[srcIdx + 0])
+                            p[dstIdx + 1] = float16ToU16(f16Buf[srcIdx + 1])
+                            p[dstIdx + 2] = float16ToU16(f16Buf[srcIdx + 2])
+                        }
                     }
                 }
-                return FrameOut(width: pcw, height: pch, bytesPerPixel: 6, data: rgb)
+                return FrameOut(width: dstW, height: dstH, bytesPerPixel: 6, data: rgb)
             }
         }
     }
@@ -250,6 +277,19 @@ enum BakeInExporter {
     // The pipeline outputs values in [0…1] linear-ish. We clamp before
     // quantising so spikes above 1.0 (rare; can happen during sharpen
     // overshoot at 1.0 boundary) don't wrap UInt8.
+
+    /// Maps a source-buffer (sx, sy) to a destination-buffer (dx, dy)
+    /// for clockwise rotation. pcw/pch are the pre-rotation dims; the
+    /// caller pre-computes the post-rotation dstW/dstH.
+    @inline(__always)
+    private static func rotMap(sx: Int, sy: Int, pcw: Int, pch: Int, rot: Int) -> (Int, Int) {
+        switch rot {
+        case 90:  return (pch - 1 - sy, sx)        // clockwise 90°
+        case 180: return (pcw - 1 - sx, pch - 1 - sy)
+        case 270: return (sy, pcw - 1 - sx)        // clockwise 270°
+        default:  return (sx, sy)
+        }
+    }
 
     @inline(__always)
     private static func float16ToU8(_ raw: UInt16) -> UInt8 {

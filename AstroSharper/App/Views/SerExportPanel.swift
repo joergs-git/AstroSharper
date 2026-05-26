@@ -67,6 +67,11 @@ struct SerExportPanel: View {
     /// requires bake-in (the resize happens inside the GPU pipeline
     /// pass), so toggling it auto-enables `bakeInProcessing`.
     @State private var resizeDivisor: Int = 1
+    /// 0 / 90 / 180 / 270 — clockwise rotation of every exported
+    /// frame. Default 0 (no rotation). Non-zero forces bake-in
+    /// (rotation happens after the GPU pipeline pass so we always
+    /// have demosaiced RGB to rotate).
+    @State private var rotationDegrees: Int = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -189,13 +194,36 @@ struct SerExportPanel: View {
                 }
             }
 
+            HStack {
+                Text("Rotate")
+                    .font(.system(size: 11))
+                    .frame(width: 60, alignment: .leading)
+                Picker("", selection: $rotationDegrees) {
+                    Text("0°").tag(0)
+                    Text("90°").tag(90)
+                    Text("180°").tag(180)
+                    Text("270°").tag(270)
+                }
+                .pickerStyle(.menu)
+                .frame(width: 80)
+                .help("Clockwise rotation applied to every exported frame. 90° / 270° swap width and height. Requires Bake-in.")
+                if rotationDegrees != 0 {
+                    Image(systemName: "rotate.right.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+            }
+
             Toggle("Bake in Sharpen + Tone", isOn: $bakeInProcessing)
                 .font(.system(size: 11))
-                .disabled(resizeDivisor > 1)  // forced ON when resizing
+                .disabled(resizeDivisor > 1 || rotationDegrees != 0)
                 .onChange(of: resizeDivisor) { _, new in
                     if new > 1 { bakeInProcessing = true }
                 }
-                .help("Run every exported frame through the current Sharpen + Tone settings (what the live preview shows). Off = raw frame bytes.")
+                .onChange(of: rotationDegrees) { _, new in
+                    if new != 0 { bakeInProcessing = true }
+                }
+                .help("Run every exported frame through the current Sharpen + Tone settings (what the live preview shows). Off = raw frame bytes. Auto-enabled when Resize or Rotate are non-default.")
             if bakeInProcessing {
                 Text(format == .ser
                      ? "⚠︎ Output .ser will be 16-bit RGB and no longer scientifically linear. Use only for replay / showcase, NOT for re-stacking."
@@ -382,7 +410,8 @@ struct SerExportPanel: View {
                 sharpen: app.sharpen,
                 toneCurve: app.toneCurve,
                 outputBitDepth: 16,
-                resizeDivisor: resizeDivisor
+                resizeDivisor: resizeDivisor,
+                rotationDegrees: rotationDegrees
               )
             : nil
         writing = true; writeProgress = 0; lastResult = nil
@@ -434,7 +463,8 @@ struct SerExportPanel: View {
                 sharpen: app.sharpen,
                 toneCurve: app.toneCurve,
                 outputBitDepth: 8,
-                resizeDivisor: resizeDivisor
+                resizeDivisor: resizeDivisor,
+                rotationDegrees: rotationDegrees
               )
             : nil
         writing = true; writeProgress = 0; lastResult = nil
