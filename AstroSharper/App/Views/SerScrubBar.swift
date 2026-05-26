@@ -85,6 +85,51 @@ struct SerScrubBar: View {
                 .foregroundColor(.secondary)
                 .frame(width: 130, alignment: .trailing)
 
+            // Trim controls: set start / end to the current scrub
+            // position, reset both. The visual range overlay on the
+            // ScrubTrack updates live. Compact buttons; the bigger
+            // export panel (frame count, fps, file size, output
+            // format) opens elsewhere in a follow-up step.
+            Button {
+                let n = app.previewSerFrameIndex
+                // If end is already set lower than the new start, reset
+                // end so we don't end up with an inverted range.
+                if let e = app.serTrimEnd, e <= n { app.serTrimEnd = nil }
+                app.serTrimStart = n
+            } label: {
+                Image(systemName: "arrowtriangle.right.square")
+                    .font(.system(size: 13))
+            }
+            .buttonStyle(.plain)
+            .disabled(!usable)
+            .help("Trim — set range START to current frame.")
+            Button {
+                let n = app.previewSerFrameIndex
+                if let s = app.serTrimStart, s >= n { app.serTrimStart = nil }
+                app.serTrimEnd = n
+            } label: {
+                Image(systemName: "arrowtriangle.left.square")
+                    .font(.system(size: 13))
+            }
+            .buttonStyle(.plain)
+            .disabled(!usable)
+            .help("Trim — set range END to current frame.")
+            if app.serTrimStart != nil || app.serTrimEnd != nil {
+                Button {
+                    app.serTrimStart = nil
+                    app.serTrimEnd = nil
+                } label: {
+                    Image(systemName: "xmark.circle")
+                        .font(.system(size: 13))
+                        .foregroundColor(.purple)
+                }
+                .buttonStyle(.plain)
+                .help("Clear the trim range.")
+                Text(trimRangeLabel)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.purple)
+            }
+
             // Export-current-frame → TIFF in outputs folder.
             // Pinned use case: solar Hα prominence captures where
             // stacking softens wisp morphology — scrub to the sharpest
@@ -119,6 +164,23 @@ struct SerScrubBar: View {
         .padding(.vertical, 4)
         .background(Color(NSColor.underPageBackgroundColor))
     }
+
+    /// Compact human label for the live trim range, e.g.
+    /// "245-892 (648f, 21.6s @ 30 fps)". Surfaces frame count + run
+    /// length at the current SER frame rate so the user sees how
+    /// much they've selected for export.
+    private var trimRangeLabel: String {
+        let total = app.previewSerFrameCount
+        guard total > 0 else { return "" }
+        let s = app.serTrimStart ?? 0
+        let e = app.serTrimEnd ?? max(0, total - 1)
+        let n = max(0, e - s + 1)
+        // SER frame rate isn't easily available here; assume 30 fps
+        // as a display estimate. The export panel will offer the
+        // actual fps choice.
+        let secs = Double(n) / 30.0
+        return String(format: "%d-%d (%df, %.1fs)", s, e, n, secs)
+    }
 }
 
 /// Drag-gesture frame scrubber. Maps the cursor's x-position along the
@@ -140,15 +202,45 @@ private struct ScrubTrack: View {
             let frac = Double(min(max(0, frameIndex), upper)) / Double(upper)
             let knobX = CGFloat(frac) * w
 
+            // Trim marker positions (nil = no trim set on that side)
+            let trimStartX: CGFloat? = app.serTrimStart.map {
+                CGFloat(min(max(0, $0), upper)) / CGFloat(upper) * w
+            }
+            let trimEndX: CGFloat? = app.serTrimEnd.map {
+                CGFloat(min(max(0, $0), upper)) / CGFloat(upper) * w
+            }
+
             ZStack(alignment: .leading) {
                 // Track groove.
                 Capsule()
                     .fill(Color.secondary.opacity(0.25))
                     .frame(height: 4)
+                // Trim range fill — semi-transparent purple between the
+                // start and end markers, visible at all times once any
+                // trim is set so the user can SEE the export window.
+                if let s = trimStartX, let e = trimEndX, e > s {
+                    Capsule()
+                        .fill(Color.purple.opacity(0.35))
+                        .frame(width: e - s, height: 8)
+                        .offset(x: s)
+                }
                 // Filled portion up to the knob.
                 Capsule()
                     .fill(Color.accentColor.opacity(0.7))
                     .frame(width: knobX, height: 4)
+                // Trim start marker — thin vertical pin.
+                if let s = trimStartX {
+                    Rectangle()
+                        .fill(Color.purple)
+                        .frame(width: 2, height: 18)
+                        .offset(x: s - 1)
+                }
+                if let e = trimEndX {
+                    Rectangle()
+                        .fill(Color.purple)
+                        .frame(width: 2, height: 18)
+                        .offset(x: e - 1)
+                }
                 // Knob.
                 Circle()
                     .fill(Color.white)

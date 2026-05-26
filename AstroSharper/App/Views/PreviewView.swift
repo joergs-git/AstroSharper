@@ -764,6 +764,10 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 // correctly refuses to read past the mapped data).
                 let realCount = serReader?.readableFrameCount ?? h.frameCount
                 app.previewSerFrameCount = realCount
+                // Trim range is per-file — reset on every new SER load
+                // so a fresh capture starts with the full range available.
+                app.serTrimStart = nil
+                app.serTrimEnd = nil
                 // Restore the last-viewed frame for this SER when the
                 // user round-trips between sections. Clamp to the
                 // actual readable range in case the file was truncated.

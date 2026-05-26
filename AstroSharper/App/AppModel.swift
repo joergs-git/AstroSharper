@@ -229,6 +229,13 @@ final class AppModel: ObservableObject {
     /// On release, falls back to the normal full-res decode path so
     /// the landed frame is exact.
     @Published var isSerScrubbing: Bool = false
+
+    /// Trim range for the SER export feature. nil = no trim (full
+    /// range). Both clamped to [0, previewSerFrameCount-1] when set.
+    /// Reset to nil on every new SER file load so a fresh capture
+    /// doesn't inherit the previous file's range.
+    @Published var serTrimStart: Int? = nil
+    @Published var serTrimEnd: Int? = nil
     /// Remembers the last-viewed frame index per SER URL so switching
     /// section away and back (Inputs → Outputs → Inputs) restores the
     /// scrubber instead of resetting to frame 0. Stored only in-memory
