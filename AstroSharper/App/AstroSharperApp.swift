@@ -91,6 +91,17 @@ struct AstroSharperApp: App {
         .defaultSize(width: 600, height: 700)
         .windowResizability(.contentSize)
 
+        // SER Trim + Crop + Export — its own NSWindow (not a popover)
+        // so the user can drag it off the preview area and watch the
+        // live crop overlay while tuning the rect.
+        Window("SER Trim · Crop · Export", id: "ser-export") {
+            SerExportPanel()
+                .environmentObject(appModel)
+        }
+        .defaultPosition(.topTrailing)
+        .defaultSize(width: 420, height: 560)
+        .windowResizability(.contentSize)
+
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("About AstroSharper") { showingAbout = true }

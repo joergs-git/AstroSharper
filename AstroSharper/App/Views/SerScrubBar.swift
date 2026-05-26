@@ -6,6 +6,7 @@ import SwiftUI
 
 struct SerScrubBar: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         // Guard against degenerate ranges: SwiftUI's Slider requires a
@@ -130,21 +131,18 @@ struct SerScrubBar: View {
                     .foregroundColor(.purple)
             }
 
-            // Export panel — opens a popover with crop + format + fps
-            // + fileSize estimate + Export button.
+            // Export panel — opens its own draggable NSWindow (not a
+            // popover) so the user can park it off-screen-side and
+            // still see the live crop overlay on the preview.
             Button {
-                app.serExportPanelOpen = true
+                openWindow(id: "ser-export")
             } label: {
-                Image(systemName: "tray.and.arrow.up")
+                Image(systemName: "square.on.square")
                     .font(.system(size: 14))
             }
             .buttonStyle(.plain)
             .disabled(!usable)
-            .help("Open the Trim+Crop+Export panel — save the selected range as a shorter .ser or animated GIF.")
-            .popover(isPresented: $app.serExportPanelOpen) {
-                SerExportPanel()
-                    .environmentObject(app)
-            }
+            .help("Open the Trim · Crop · Export window — save the selected range as a shorter .ser or animated GIF. The window is draggable so it won't cover the preview.")
 
             // Export-current-frame → TIFF in outputs folder.
             // Pinned use case: solar Hα prominence captures where
