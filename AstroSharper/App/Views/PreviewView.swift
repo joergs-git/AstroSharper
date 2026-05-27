@@ -603,7 +603,25 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         app.$serPlaybackActive
             .removeDuplicates()
             .sink { [weak self] active in
-                guard let self, !active, self.beforeTex != nil else { return }
+                guard let self else { return }
+                // Tune the prefetcher's look-ahead — playback needs a
+                // deeper buffer than scrubbing so the serial decode
+                // queue can stay ahead of the timer on slow-disk SERs
+                // (the "fast bursts then stalls" symptom). And on
+                // start, fire one extra prefetch from the current
+                // frame so the buffer is pre-warmed before tick 1.
+                self.serPrefetcher.setPlaybackMode(active)
+                if active {
+                    self.serPrefetcher.prefetch(
+                        after: self.app.previewSerFrameIndex,
+                        totalFrames: self.app.previewSerFrameCount
+                    )
+                    return
+                }
+                // Playback STOP — settle the landed frame with the
+                // full pipeline. (The previous unconditional path; now
+                // gated on `active == false`.)
+                guard self.beforeTex != nil else { return }
                 self.refreshDisplayAutoRange()
                 self.view?.needsDisplay = true
                 self.reprocess()

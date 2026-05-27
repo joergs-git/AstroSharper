@@ -54,12 +54,33 @@ final class SerFramePrefetcher {
     private let capacity: Int
     /// How many upcoming frames to schedule on each prefetch call.
     /// 4 covers ~250 ms at 18 fps, comfortably ahead of the timer.
-    private let lookAhead: Int
+    /// Bumped to `playbackLookAhead` (12) while the user is playing
+    /// the SER, so the serial decode queue stays deep enough that a
+    /// 100 ms NAS read can't visibly stall a 30 fps timer.
+    private var lookAhead: Int
+    private let idleLookAhead: Int
+    private let playbackLookAhead: Int
 
     init(device: MTLDevice, capacity: Int = 16, lookAhead: Int = 4) {
         self.device = device
         self.capacity = max(2, capacity)
-        self.lookAhead = max(1, min(capacity - 1, lookAhead))
+        let la = max(1, min(capacity - 1, lookAhead))
+        self.lookAhead = la
+        self.idleLookAhead = la
+        // capacity - 1 would max-fill but risk evicting frames the
+        // user just played (visible content still on screen). 12 of
+        // 16 leaves headroom while giving ~400 ms of buffer at 30 fps.
+        self.playbackLookAhead = max(la, min(capacity - 4, 12))
+    }
+
+    /// Toggle playback mode. ON = deeper look-ahead so the serial
+    /// decode queue can stay ahead of the playback timer even on
+    /// slow-disk SERs. Returns the new look-ahead size.
+    @discardableResult
+    func setPlaybackMode(_ on: Bool) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        lookAhead = on ? playbackLookAhead : idleLookAhead
+        return lookAhead
     }
 
     /// Switch to a different SER (or clear when nil). Drops the

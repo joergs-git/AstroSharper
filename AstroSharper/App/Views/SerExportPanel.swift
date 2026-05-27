@@ -46,9 +46,8 @@ enum SerExportFormat: String, CaseIterable, Identifiable {
 
 struct SerExportPanel: View {
     @EnvironmentObject private var app: AppModel
-    @State private var format: SerExportFormat = .ser
-    @State private var fps: Int = 30
-    @State private var targetFrames: Int = 60     // GIF only
+    // Crop %s remain @State — they're a pure UI mirror of the source-
+    // pixel `app.serCropRect` and get re-synced from it on appear.
     @State private var cropX: Double = 0
     @State private var cropY: Double = 0
     @State private var cropW: Double = 1.0
@@ -56,22 +55,10 @@ struct SerExportPanel: View {
     @State private var writing: Bool = false
     @State private var writeProgress: Double = 0
     @State private var lastResult: String? = nil
-    /// When true, every exported frame is run through the current
-    /// Sharpen + Tone chain before write. SER bake-in re-types the
-    /// output as 16-bit RGB and breaks scientific linearity (use only
-    /// for showcase/replay). GIF bake-in is WYSIWYG against the live
-    /// preview.
-    @State private var bakeInProcessing: Bool = false
-    /// 1 = full-res, 2 = ½×½, 4, 8, 16. Shrinks output WxH by the
-    /// divisor on the GPU during bake-in. Resize > 1 implicitly
-    /// requires bake-in (the resize happens inside the GPU pipeline
-    /// pass), so toggling it auto-enables `bakeInProcessing`.
-    @State private var resizeDivisor: Int = 1
-    /// 0 / 90 / 180 / 270 — clockwise rotation of every exported
-    /// frame. Default 0 (no rotation). Non-zero forces bake-in
-    /// (rotation happens after the GPU pipeline pass so we always
-    /// have demosaiced RGB to rotate).
-    @State private var rotationDegrees: Int = 0
+    // NOTE: format / fps / targetFrames / bakeInProcessing /
+    // resizeDivisor / rotationDegrees now live on AppModel (prefix
+    // `serExport…`) so they survive closing + re-opening this Window.
+    // Read via `app.serExport…`, bind via `$app.serExport…`.
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -150,18 +137,18 @@ struct SerExportPanel: View {
     private var outputSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Output").font(.system(size: 11, weight: .semibold))
-            Picker("Format", selection: $format) {
+            Picker("Format", selection: $app.serExportFormat) {
                 ForEach(SerExportFormat.allCases) { f in
                     Text(f.rawValue).tag(f)
                 }
             }
             .pickerStyle(.segmented)
-            if format == .gif {
+            if app.serExportFormat == .gif {
                 LabeledSlider(label: "FPS",
-                              value: Binding(get: { Double(fps) }, set: { fps = Int($0) }),
+                              value: Binding(get: { Double(app.serExportFPS) }, set: { app.serExportFPS = Int($0) }),
                               range: 5...60, format: "%.0f")
                 LabeledSlider(label: "Frames",
-                              value: Binding(get: { Double(targetFrames) }, set: { targetFrames = Int($0) }),
+                              value: Binding(get: { Double(app.serExportTargetFrames) }, set: { app.serExportTargetFrames = Int($0) }),
                               range: 10...600, format: "%.0f")
                 Text(estimateGIFLabel)
                     .font(.system(size: 10, design: .monospaced))
@@ -177,7 +164,7 @@ struct SerExportPanel: View {
                 Text("Resize")
                     .font(.system(size: 11))
                     .frame(width: 60, alignment: .leading)
-                Picker("", selection: $resizeDivisor) {
+                Picker("", selection: $app.serExportResizeDivisor) {
                     Text("1:1").tag(1)
                     Text("1:2").tag(2)
                     Text("1:4").tag(4)
@@ -187,7 +174,7 @@ struct SerExportPanel: View {
                 .pickerStyle(.menu)
                 .frame(width: 80)
                 .help("Downsample the output by this factor on the GPU after Sharpen + Tone. 1:2 = ½×½ (¼ the area). Requires Bake-in.")
-                if resizeDivisor > 1 {
+                if app.serExportResizeDivisor > 1 {
                     Text(resizedDimensionLabel)
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundColor(.secondary)
@@ -198,7 +185,7 @@ struct SerExportPanel: View {
                 Text("Rotate")
                     .font(.system(size: 11))
                     .frame(width: 60, alignment: .leading)
-                Picker("", selection: $rotationDegrees) {
+                Picker("", selection: $app.serExportRotationDegrees) {
                     Text("0°").tag(0)
                     Text("90°").tag(90)
                     Text("180°").tag(180)
@@ -207,40 +194,45 @@ struct SerExportPanel: View {
                 .pickerStyle(.menu)
                 .frame(width: 80)
                 .help("Clockwise rotation applied to every exported frame. 90° / 270° swap width and height. Requires Bake-in.")
-                if rotationDegrees != 0 {
+                if app.serExportRotationDegrees != 0 {
                     Image(systemName: "rotate.right.fill")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
             }
 
-            Toggle("Bake in Sharpen + Tone", isOn: $bakeInProcessing)
+            Toggle("Bake in Sharpen + Tone", isOn: $app.serExportBakeIn)
                 .font(.system(size: 11))
-                .disabled(resizeDivisor > 1 || rotationDegrees != 0)
-                .onChange(of: resizeDivisor) { _, new in
-                    if new > 1 { bakeInProcessing = true }
-                }
-                .onChange(of: rotationDegrees) { _, new in
-                    if new != 0 { bakeInProcessing = true }
-                }
-                .help("Run every exported frame through the current Sharpen + Tone settings (what the live preview shows). Off = raw frame bytes. Auto-enabled when Resize or Rotate are non-default.")
-            if bakeInProcessing {
-                Text(format == .ser
+                .disabled(app.serExportResizeDivisor > 1 || app.serExportRotationDegrees != 0)
+                .help("Run every exported frame through the current Sharpen + Tone settings (what the live preview shows). Off = raw frame bytes. Auto-enabled at Export time when Resize or Rotate are non-default.")
+            if effectiveBakeIn {
+                Text(app.serExportFormat == .ser
                      ? "⚠︎ Output .ser will be 16-bit RGB and no longer scientifically linear. Use only for replay / showcase, NOT for re-stacking."
                      : "GIF will exactly match the live preview.")
                     .font(.system(size: 10))
-                    .foregroundColor(format == .ser ? .orange : .secondary)
+                    .foregroundColor(app.serExportFormat == .ser ? .orange : .secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    /// True when bake-in is either user-selected OR forced by a
+    /// non-default Resize / Rotate. Single source of truth — the UI
+    /// shows the warning based on this, and runExport flips
+    /// `serExportBakeIn` to match before dispatching the write so the
+    /// chosen bake state is also persisted for next time.
+    private var effectiveBakeIn: Bool {
+        app.serExportBakeIn ||
+        app.serExportResizeDivisor > 1 ||
+        app.serExportRotationDegrees != 0
     }
 
     private var resizedDimensionLabel: String {
         guard let dims = sourceDims else { return "" }
         let w = (app.serCropRect?.width).map(Double.init)  ?? dims.w
         let h = (app.serCropRect?.height).map(Double.init) ?? dims.h
-        let dw = max(2, Int(w) / resizeDivisor)
-        let dh = max(2, Int(h) / resizeDivisor)
+        let dw = max(2, Int(w) / app.serExportResizeDivisor)
+        let dh = max(2, Int(h) / app.serExportResizeDivisor)
         return "→ \(dw)×\(dh) px"
     }
 
@@ -322,9 +314,9 @@ struct SerExportPanel: View {
         let h = (app.serCropRect?.height).map(Double.init) ?? dims.h
         // Animated GIF: ~0.5 B/px after LZW, conservative. Frame
         // count = min(targetFrames, trimFrameCount).
-        let frames = min(targetFrames, trimFrameCount)
+        let frames = min(app.serExportTargetFrames, trimFrameCount)
         let bytes = Int(w * h * 0.5) * frames + 1024
-        return "≈ \(formatBytes(bytes)) · \(frames) frames @ \(fps) fps = \(String(format: "%.1f", Double(frames) / Double(fps)))s"
+        return "≈ \(formatBytes(bytes)) · \(frames) frames @ \(app.serExportFPS) fps = \(String(format: "%.1f", Double(frames) / Double(app.serExportFPS)))s"
     }
 
     private func formatBytes(_ b: Int) -> String {
@@ -383,7 +375,18 @@ struct SerExportPanel: View {
     // MARK: - Run
 
     private func runExport() {
-        switch format {
+        // Belt-and-suspenders: Resize > 1 / Rotation != 0 BOTH require
+        // the bake-in path (the GPU pipeline does the scale + rotate).
+        // The toggle is auto-flipped by .onChange handlers in the
+        // panel, but if SwiftUI ever fails to deliver the change (e.g.
+        // observed-value update racing with a button tap), the export
+        // would silently lose the rotation. Forcing the flag here at
+        // dispatch time makes it bulletproof and also persists the
+        // chosen bake state for the next window-open.
+        if app.serExportResizeDivisor > 1 || app.serExportRotationDegrees != 0 {
+            app.serExportBakeIn = true
+        }
+        switch app.serExportFormat {
         case .ser: runSerExport()
         case .gif: runGifExport()
         }
@@ -402,16 +405,16 @@ struct SerExportPanel: View {
             return
         }
         let base = sourceURL.deletingPathExtension().lastPathComponent
-        let suffix = bakeInProcessing ? "_baked" : ""
+        let suffix = app.serExportBakeIn ? "_baked" : ""
         let fname = String(format: "%@_trim_%d-%d%@.ser", base, trimStart, trimEnd, suffix)
         let outURL = AppModel.uniqueOutputURL(outFolder.appendingPathComponent(fname))
-        let bakeOpts: BakeInExporter.Options? = bakeInProcessing
+        let bakeOpts: BakeInExporter.Options? = app.serExportBakeIn
             ? BakeInExporter.Options(
                 sharpen: app.sharpen,
                 toneCurve: app.toneCurve,
                 outputBitDepth: 16,
-                resizeDivisor: resizeDivisor,
-                rotationDegrees: rotationDegrees
+                resizeDivisor: app.serExportResizeDivisor,
+                rotationDegrees: app.serExportRotationDegrees
               )
             : nil
         writing = true; writeProgress = 0; lastResult = nil
@@ -453,18 +456,18 @@ struct SerExportPanel: View {
             return
         }
         let base = sourceURL.deletingPathExtension().lastPathComponent
-        let suffix = bakeInProcessing ? "_baked" : ""
-        let fname = String(format: "%@_%d-%d_%dfps%@.gif", base, trimStart, trimEnd, fps, suffix)
+        let suffix = app.serExportBakeIn ? "_baked" : ""
+        let fname = String(format: "%@_%d-%d_%dfps%@.gif", base, trimStart, trimEnd, app.serExportFPS, suffix)
         let outURL = AppModel.uniqueOutputURL(outFolder.appendingPathComponent(fname))
-        let captureFPS = fps
-        let captureTarget = targetFrames
-        let bakeOpts: BakeInExporter.Options? = bakeInProcessing
+        let captureFPS = app.serExportFPS
+        let captureTarget = app.serExportTargetFrames
+        let bakeOpts: BakeInExporter.Options? = app.serExportBakeIn
             ? BakeInExporter.Options(
                 sharpen: app.sharpen,
                 toneCurve: app.toneCurve,
                 outputBitDepth: 8,
-                resizeDivisor: resizeDivisor,
-                rotationDegrees: rotationDegrees
+                resizeDivisor: app.serExportResizeDivisor,
+                rotationDegrees: app.serExportRotationDegrees
               )
             : nil
         writing = true; writeProgress = 0; lastResult = nil

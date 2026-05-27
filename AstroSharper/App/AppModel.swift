@@ -251,6 +251,18 @@ final class AppModel: ObservableObject {
     /// True while the export panel is open — the preview gates its
     /// overlay rendering on this.
     @Published var serExportPanelOpen: Bool = false
+
+    /// Export-panel settings hoisted to the model so they SURVIVE
+    /// closing + re-opening the SerExportPanel window. Otherwise
+    /// SwiftUI @State resets on each Window re-open and the user has
+    /// to re-pick resize / rotation / format / fps for every export.
+    /// User workflow: tune once, export N variants in a row.
+    @Published var serExportFormat: SerExportFormat = .ser
+    @Published var serExportFPS: Int = 30
+    @Published var serExportTargetFrames: Int = 60
+    @Published var serExportBakeIn: Bool = false
+    @Published var serExportResizeDivisor: Int = 1
+    @Published var serExportRotationDegrees: Int = 0
     /// Remembers the last-viewed frame index per SER URL so switching
     /// section away and back (Inputs → Outputs → Inputs) restores the
     /// scrubber instead of resetting to frame 0. Stored only in-memory
