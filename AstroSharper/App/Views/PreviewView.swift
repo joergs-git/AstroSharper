@@ -850,6 +850,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 // correctly refuses to read past the mapped data).
                 let realCount = serReader?.readableFrameCount ?? h.frameCount
                 app.previewSerFrameCount = realCount
+                // Derive the actual capture FPS from the SER's optional
+                // per-frame timestamp trailer (FireCapture / SharpCap /
+                // ASIStudio populate it; some older tools don't). nil →
+                // scrub bar falls back to a 30 fps display estimate.
+                app.previewSerCapturedFPS = serReader?.capturedFPS
                 // Trim range + crop region are per-file — reset on
                 // every new SER load so a fresh capture starts clean.
                 app.serTrimStart = nil
@@ -909,6 +914,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         } else {
             app.previewSerFrameCount = 0
             app.previewSerFrameIndex = 0
+            app.previewSerCapturedFPS = nil
         }
         app.previewStats = stats
 

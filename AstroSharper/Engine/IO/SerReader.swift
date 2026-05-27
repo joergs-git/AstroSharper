@@ -159,6 +159,50 @@ final class SerReader {
         return offset >= 0 && offset + bpf <= data.count
     }
 
+    /// Derived capture FPS from the SER's optional per-frame timestamp
+    /// trailer. Returns nil if the trailer is absent (most capture
+    /// tools do populate it — FireCapture, SharpCap, ASIStudio — but
+    /// some don't) or if it's degenerate (single frame, zero span).
+    ///
+    /// SER timestamp trailer layout: at offset `178 + N × bytesPerFrame`
+    /// there are N × Int64 .NET ticks (100 ns) values, little-endian.
+    /// fps = (N - 1) / ((last - first) / 10^7 seconds).
+    var capturedFPS: Double? {
+        let n = readableFrameCount
+        guard n >= 2 else { return nil }
+        let trailerStart = frameDataOffset + n * header.bytesPerFrame
+        let trailerSize = n * MemoryLayout<Int64>.size
+        guard data.count >= trailerStart + trailerSize else { return nil }
+        let firstTs = readInt64LE(at: trailerStart)
+        let lastTs = readInt64LE(at: trailerStart + (n - 1) * MemoryLayout<Int64>.size)
+        guard lastTs > firstTs else { return nil }
+        let ticksPerSecond: Double = 10_000_000  // .NET 100 ns ticks
+        let seconds = Double(lastTs - firstTs) / ticksPerSecond
+        guard seconds > 0 else { return nil }
+        let fps = Double(n - 1) / seconds
+        // Sanity-clamp to plausible astrophotography rates. A bogus
+        // trailer (zero-filled, wrong endianness, …) shouldn't drive
+        // a nonsense UI number.
+        guard fps.isFinite, fps >= 0.5, fps <= 1000 else { return nil }
+        return fps
+    }
+
+    /// Read a little-endian Int64 from the mapped data at `offset`.
+    private func readInt64LE(at offset: Int) -> Int64 {
+        return data.withUnsafeBytes { raw -> Int64 in
+            guard let base = raw.baseAddress else { return 0 }
+            let p = base.advanced(by: offset)
+            // Unaligned load — Apple Silicon allows it but go through
+            // a byte-wise reassembly to stay strictly conformant.
+            var v: Int64 = 0
+            for i in 0..<8 {
+                let byte = p.advanced(by: i).load(as: UInt8.self)
+                v |= Int64(byte) << (i * 8)
+            }
+            return v
+        }
+    }
+
     func withFrameBytes<R>(at index: Int, _ body: (UnsafePointer<UInt8>, Int) throws -> R) rethrows -> R {
         precondition(index >= 0 && index < header.frameCount, "frame index out of range")
         let bpf = header.bytesPerFrame

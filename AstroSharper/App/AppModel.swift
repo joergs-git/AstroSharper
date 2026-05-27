@@ -277,6 +277,10 @@ final class AppModel: ObservableObject {
     /// folder open.
     var rememberedSerFrameIndices: [URL: Int] = [:]
     @Published var previewSerFrameCount: Int = 0
+    /// Captured FPS derived from the SER's per-frame timestamp
+    /// trailer. nil when the trailer is missing or degenerate; the
+    /// scrub bar then falls back to a 30 fps display estimate.
+    @Published var previewSerCapturedFPS: Double? = nil
 
     /// Handle to the in-flight lucky-stack engine task, so the progress
     /// overlay's Stop button can cancel it. nil when no stack is running.
@@ -2373,11 +2377,15 @@ final class AppModel: ObservableObject {
         guard canPlaySerFrames else { return }
         serPlaybackActive = true
         serPlaybackTimer?.invalidate()
-        // Effective rate = blinkRate × speed multiplier. Floor the
-        // interval at 8 ms (~125 fps) — beyond that the decode/upload
-        // can't keep up and the user sees stutter rather than speed.
-        let effectiveRate = max(0.5, blinkRate) * serPlaybackSpeedMultiplier
-        let interval = max(0.008, 1.0 / effectiveRate)
+        // Timer fires at a CONSTANT cadence (blinkRate). Speed
+        // multiplier scales the FRAME STRIDE per tick instead of the
+        // timer rate. Reason: cramming the timer to 288 Hz at 16×
+        // hit the 125 fps decode ceiling AND made successive ticks
+        // land on the same low-res cache neighbour, so the user
+        // perceived no speed-up at all. Stepping by N frames per
+        // tick gives real Nx visual advancement that's not bounded
+        // by the decode rate.
+        let interval = 1.0 / max(0.5, blinkRate)
         serPlaybackTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.advanceSerFrame() }
         }
@@ -2389,7 +2397,13 @@ final class AppModel: ObservableObject {
     }
     private func advanceSerFrame() {
         guard previewSerFrameCount > 0 else { stopSerPlayback(); return }
-        previewSerFrameIndex = (previewSerFrameIndex + 1) % previewSerFrameCount
+        // Per-tick stride = speed multiplier (1 / 2 / 4 / 8 / 16).
+        // At constant timer rate this is what makes 16× actually feel
+        // 16× — each tick advances 16 frames in the source, so the
+        // user sees the content fly by even when the decode buffer
+        // can't keep up with the per-frame paint rate.
+        let step = max(1, Int(serPlaybackSpeedMultiplier.rounded()))
+        previewSerFrameIndex = (previewSerFrameIndex + step) % previewSerFrameCount
     }
     func stepSerFrame(by delta: Int) {
         guard previewSerFrameCount > 0 else { return }

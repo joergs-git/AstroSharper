@@ -188,16 +188,25 @@ struct SerScrubBar: View {
         .background(Color(NSColor.underPageBackgroundColor))
     }
 
-    /// Current playback time vs total, formatted MM:SS (or HH:MM:SS
-    /// for the rare > 1 h case). 30 fps assumption matches the trim
-    /// label — the SER format's per-frame timestamp field is rarely
-    /// populated by capture tools we see in the wild, so a fixed
-    /// display rate is the lowest-surprise choice.
+    /// Current playback time vs total, formatted M:SS (or H:MM:SS
+    /// for > 1 h captures). Uses the SER's REAL capture FPS when
+    /// the timestamp trailer is present (FireCapture / SharpCap /
+    /// ASIStudio all write it); falls back to 30 fps otherwise. The
+    /// fps source is reflected with a "~" prefix on the estimated
+    /// case so the user can tell which is which.
     private var playbackTimeLabel: String {
-        let fps = 30.0
+        let fps = displayFPS
         let cur = Double(app.previewSerFrameIndex) / fps
         let tot = Double(max(0, app.previewSerFrameCount - 1)) / fps
-        return "\(Self.formatTime(cur)) / \(Self.formatTime(tot))"
+        let prefix = app.previewSerCapturedFPS == nil ? "~" : ""
+        return "\(prefix)\(Self.formatTime(cur)) / \(Self.formatTime(tot))"
+    }
+
+    /// Single source of truth for the displayed frame rate. Captured
+    /// FPS from the SER trailer wins; 30 fps is the conservative
+    /// fallback. Used by both the playback time and the trim label.
+    var displayFPS: Double {
+        app.previewSerCapturedFPS ?? 30.0
     }
 
     static func formatTime(_ seconds: Double) -> String {
@@ -221,10 +230,8 @@ struct SerScrubBar: View {
         let s = app.serTrimStart ?? 0
         let e = app.serTrimEnd ?? max(0, total - 1)
         let n = max(0, e - s + 1)
-        // SER frame rate isn't easily available here; assume 30 fps
-        // as a display estimate. The export panel will offer the
-        // actual fps choice.
-        let secs = Double(n) / 30.0
+        // Real capture FPS when available, else 30 fps fallback.
+        let secs = Double(n) / displayFPS
         return String(format: "%d-%d (%df, %.1fs)", s, e, n, secs)
     }
 }
