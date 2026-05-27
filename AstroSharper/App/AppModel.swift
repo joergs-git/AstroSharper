@@ -258,11 +258,17 @@ final class AppModel: ObservableObject {
     /// to re-pick resize / rotation / format / fps for every export.
     /// User workflow: tune once, export N variants in a row.
     @Published var serExportFormat: SerExportFormat = .ser
-    @Published var serExportFPS: Int = 30
+    @Published var serExportFPS: Int = 10
     @Published var serExportTargetFrames: Int = 60
     @Published var serExportBakeIn: Bool = false
     @Published var serExportResizeDivisor: Int = 1
     @Published var serExportRotationDegrees: Int = 0
+    /// Frame stride: 1 = every frame, 2 = every other, 5 = every 5th.
+    /// Applied to BOTH .ser and .gif exports. The cheap lever for
+    /// shrinking output file size when the user doesn't care about
+    /// every single source frame (e.g. a 1000-frame SER → 200-frame
+    /// SER at stride 5, same trim range, ⅕ the bytes).
+    @Published var serExportFrameStride: Int = 1
     /// Remembers the last-viewed frame index per SER URL so switching
     /// section away and back (Inputs → Outputs → Inputs) restores the
     /// scrubber instead of resetting to frame 0. Stored only in-memory

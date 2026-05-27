@@ -144,12 +144,37 @@ struct SerExportPanel: View {
             }
             .pickerStyle(.segmented)
             if app.serExportFormat == .gif {
-                LabeledSlider(label: "FPS",
-                              value: Binding(get: { Double(app.serExportFPS) }, set: { app.serExportFPS = Int($0) }),
-                              range: 5...60, format: "%.0f")
+                // FPS — discrete picker (1, 2, 5, 10, 15, 20, 24, 30, 60).
+                // Continuous sliders for fps invite weird values like
+                // "37 fps" that no playback target wants. Discrete picker
+                // covers the common targets (1=time-lapse, 10=cinematic,
+                // 24=film, 30=display, 60=smooth).
+                HStack {
+                    Text("FPS")
+                        .font(.system(size: 11))
+                        .frame(width: 60, alignment: .leading)
+                    Picker("", selection: $app.serExportFPS) {
+                        Text("1").tag(1)
+                        Text("2").tag(2)
+                        Text("5").tag(5)
+                        Text("10").tag(10)
+                        Text("15").tag(15)
+                        Text("20").tag(20)
+                        Text("24").tag(24)
+                        Text("30").tag(30)
+                        Text("60").tag(60)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 80)
+                }
+                // Frames target — full range 2 ... trim length. User
+                // had to live with 10...600 before; the GIF writer
+                // already evenly sub-samples to whatever target lands
+                // here.
                 LabeledSlider(label: "Frames",
                               value: Binding(get: { Double(app.serExportTargetFrames) }, set: { app.serExportTargetFrames = Int($0) }),
-                              range: 10...600, format: "%.0f")
+                              range: 2 ... Double(max(2, trimFrameCount)),
+                              format: "%.0f")
                 Text(estimateGIFLabel)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
@@ -158,6 +183,29 @@ struct SerExportPanel: View {
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
             }
+            // Frame stride — applies to BOTH formats. Cheap way to
+            // shrink output size when source has more frames than
+            // necessary. Stride 2 = every other frame, etc.
+            HStack {
+                Text("Stride")
+                    .font(.system(size: 11))
+                    .frame(width: 60, alignment: .leading)
+                Picker("", selection: $app.serExportFrameStride) {
+                    Text("1 (all)").tag(1)
+                    Text("every 2nd").tag(2)
+                    Text("every 3rd").tag(3)
+                    Text("every 5th").tag(5)
+                    Text("every 10th").tag(10)
+                }
+                .pickerStyle(.menu)
+                .frame(width: 110)
+                if app.serExportFrameStride > 1 {
+                    Text("\(strideEffectiveFrameCount) frames out")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .help("Subsample the trim range — write every Nth source frame. Reduces output file size by 1/N. Works for SER and GIF.")
 
             Divider().padding(.vertical, 2)
             HStack {
@@ -297,26 +345,47 @@ struct SerExportPanel: View {
         return max(0, min(total, e - s + 1))
     }
 
+    /// Effective frame count after applying the stride. Stride 1 →
+    /// trimFrameCount; stride 5 → ceil(trimFrameCount / 5).
+    private var strideEffectiveFrameCount: Int {
+        let stride = max(1, app.serExportFrameStride)
+        let n = trimFrameCount
+        return max(1, (n + stride - 1) / stride)
+    }
+
     private var estimateSERLabel: String {
         guard let dims = sourceDims else { return "" }
-        let w = (app.serCropRect?.width).map(Double.init)  ?? dims.w
-        let h = (app.serCropRect?.height).map(Double.init) ?? dims.h
-        // bit depth heuristic: SER source is 8 or 16-bit / channel.
-        // Conservative estimate at 16-bit mono = 2 B/px; OSC bayer
-        // 8-bit = 1 B/px. We use 16-bit to be safe on size estimate.
-        let bytes = Int(w * h * 2.0) * trimFrameCount + 178
-        return "≈ \(formatBytes(bytes)) (16-bit mono est.)"
+        let cropW = (app.serCropRect?.width).map(Double.init)  ?? dims.w
+        let cropH = (app.serCropRect?.height).map(Double.init) ?? dims.h
+        // Resize divides both axes, swallowing 1/div² of the pixels.
+        let div = max(1, Double(app.serExportResizeDivisor))
+        let w = max(2.0, cropW / div)
+        let h = max(2.0, cropH / div)
+        // Bake-in writes 16-bit RGB (6 B/px); raw bayer/mono SER is
+        // 1 or 2 B/px. Use 6 B/px when bake-in is ON (or implicitly
+        // forced by resize/rotation), else 2 B/px conservative.
+        let bakedOn = app.serExportBakeIn || app.serExportResizeDivisor > 1 || app.serExportRotationDegrees != 0
+        let bpp = bakedOn ? 6.0 : 2.0
+        let frames = strideEffectiveFrameCount
+        let bytes = Int(w * h * bpp) * frames + 178
+        let what = bakedOn ? "16-bit RGB baked" : "16-bit mono est."
+        return "≈ \(formatBytes(bytes)) · \(frames) frames · \(Int(w))×\(Int(h)) · \(what)"
     }
 
     private var estimateGIFLabel: String {
         guard let dims = sourceDims else { return "" }
-        let w = (app.serCropRect?.width).map(Double.init)  ?? dims.w
-        let h = (app.serCropRect?.height).map(Double.init) ?? dims.h
-        // Animated GIF: ~0.5 B/px after LZW, conservative. Frame
-        // count = min(targetFrames, trimFrameCount).
-        let frames = min(app.serExportTargetFrames, trimFrameCount)
+        let cropW = (app.serCropRect?.width).map(Double.init)  ?? dims.w
+        let cropH = (app.serCropRect?.height).map(Double.init) ?? dims.h
+        let div = max(1, Double(app.serExportResizeDivisor))
+        let w = max(2.0, cropW / div)
+        let h = max(2.0, cropH / div)
+        // Animated GIF: ~0.5 B/px after LZW, conservative. Effective
+        // frame count = min(targetFrames, strided frame count).
+        let stridedCount = strideEffectiveFrameCount
+        let frames = min(app.serExportTargetFrames, stridedCount)
         let bytes = Int(w * h * 0.5) * frames + 1024
-        return "≈ \(formatBytes(bytes)) · \(frames) frames @ \(app.serExportFPS) fps = \(String(format: "%.1f", Double(frames) / Double(app.serExportFPS)))s"
+        let secs = Double(frames) / Double(max(1, app.serExportFPS))
+        return "≈ \(formatBytes(bytes)) · \(frames) frames · \(Int(w))×\(Int(h)) @ \(app.serExportFPS) fps = \(String(format: "%.1f", secs))s"
     }
 
     private func formatBytes(_ b: Int) -> String {
@@ -426,6 +495,7 @@ struct SerExportPanel: View {
                     frameRange: trimStart...trimEnd,
                     crop: crop,
                     bakeIn: bakeOpts,
+                    frameStride: app.serExportFrameStride,
                     progress: { f in DispatchQueue.main.async { writeProgress = f } }
                 )
                 DispatchQueue.main.async {
@@ -481,6 +551,7 @@ struct SerExportPanel: View {
                     fps: captureFPS,
                     crop: crop,
                     bakeIn: bakeOpts,
+                    frameStride: app.serExportFrameStride,
                     progress: { f in DispatchQueue.main.async { writeProgress = f } }
                 )
                 DispatchQueue.main.async {

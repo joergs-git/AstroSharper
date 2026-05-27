@@ -55,6 +55,7 @@ enum SerWriter {
         frameRange: ClosedRange<Int>,
         crop: CGRect?,
         bakeIn: BakeInExporter.Options? = nil,
+        frameStride: Int = 1,
         progress: ((Double) -> Void)? = nil
     ) throws {
         guard !frameRange.isEmpty else { throw WriteError.emptyRange }
@@ -85,7 +86,16 @@ enum SerWriter {
 
         let frameStart = max(0, min(frameRange.lowerBound, h.frameCount - 1))
         let frameEnd   = max(frameStart, min(frameRange.upperBound, h.frameCount - 1))
-        let count = frameEnd - frameStart + 1
+        // Stride-aware index list. stride=1 → [start, start+1, …, end];
+        // stride=5 → [start, start+5, start+10, …]. The output SER's
+        // header `frameCount` reflects this subsampled count, not the
+        // raw range length.
+        let stride = max(1, frameStride)
+        let pickedIndices: [Int] = Swift.stride(
+            from: frameStart, through: frameEnd, by: stride
+        ).map { $0 }
+        let count = pickedIndices.count
+        guard count > 0 else { throw WriteError.emptyRange }
 
         // Build output header — copy source bytes, override fields.
         let srcHeaderBytes = try Data(contentsOf: source, options: .alwaysMapped).prefix(178)
@@ -147,12 +157,12 @@ enum SerWriter {
         // GPU and is re-encoded as 16-bit RGB (3×UInt16 per pixel, LE).
         // Crop happens inside processedFrame() via texture getBytes.
         if let opts = bakeIn {
-            let ctx = BakeInExporter.Context(options: BakeInExporter.Options(
-                sharpen: opts.sharpen,
-                toneCurve: opts.toneCurve,
-                outputBitDepth: 16
-            ))
-            for (i, idx) in (frameStart...frameEnd).enumerated() {
+            // Pass the caller's Options through verbatim so resize +
+            // rotation reach the GPU pipeline. Re-wrapping with only
+            // sharpen/tone/depth silently dropped them and produced
+            // full-size unrotated SERs.
+            let ctx = BakeInExporter.Context(options: opts)
+            for (i, idx) in pickedIndices.enumerated() {
                 let frame = try ctx.processedFrame(
                     sourceURL: source,
                     frameIndex: idx,
@@ -176,7 +186,7 @@ enum SerWriter {
         // Reusable row buffer for the crop path.
         var rowBuf = [UInt8](repeating: 0, count: rowBytes)
 
-        for (i, idx) in (frameStart...frameEnd).enumerated() {
+        for (i, idx) in pickedIndices.enumerated() {
             guard reader.canReadFrame(at: idx) else {
                 throw WriteError.writeFailed("Source frame \(idx) not readable.")
             }

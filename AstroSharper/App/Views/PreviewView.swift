@@ -1198,9 +1198,51 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     /// wall-clock to ~30 decodes/s. During playback it always loads (the
     /// timer drives the cadence). The settle subject (debounced) lands
     /// the exact final frame + full pipeline once the drag stops.
+    /// Playback-only paint path: hits the prefetcher cache, paints
+    /// instantly on hit, and ALWAYS re-arms the prefetch queue so the
+    /// upcoming N frames stay warm. On miss it does NOTHING (no async
+    /// dispatch, no Metal contention with the serial prefetcher) — the
+    /// previously painted frame stays on screen until the prefetcher's
+    /// serial decode catches up.
+    private func playbackPaintCachedFrame() {
+        guard let id = app.previewFileID,
+              let entry = app.catalog.files.first(where: { $0.id == id }),
+              entry.isSER else { return }
+        let idx = app.previewSerFrameIndex
+        serPrefetcher.setURL(entry.url)
+        serPrefetcher.prefetch(after: idx, totalFrames: app.previewSerFrameCount)
+        guard let cached = serPrefetcher.cachedFrame(at: idx) else { return }
+        serDispatchSeq += 1
+        let tex = entry.meridianFlipped
+            ? RotateTexture.rotate180(cached, device: MetalDevice.shared.device)
+            : cached
+        applyLoadedSerFrame(
+            tex: tex,
+            dispatchedID: id,
+            dispatchedSeq: serDispatchSeq,
+            frameIndex: idx
+        )
+    }
+
     private func serScrubIndexChanged() {
         if app.serPlaybackActive {
-            loadCurrentSerFrame()
+            // Playback path — CACHE ONLY, no fresh async load.
+            //
+            // The old per-tick `loadCurrentSerFrame()` fanned out
+            // async dispatches onto a global queue; each one called
+            // `SerFrameLoader.loadFrame` which serialises on
+            // `MetalDevice.shared.commandQueue.waitUntilCompleted`.
+            // The prefetcher's serial queue queues buffers there too.
+            // Result: every tick stacks more Metal command buffers
+            // behind the prefetch, so for the first 200-500 ms after
+            // Play we got a "Standbild" (nothing paints) followed by
+            // a burst (everything completes at once).
+            //
+            // Now: we ONLY paint cached frames + keep the prefetcher
+            // refilling. Cache misses just skip the tick — the screen
+            // keeps the last painted frame, the prefetcher catches up
+            // on the next tick. Smooth (slower) > stuttery (bursty).
+            playbackPaintCachedFrame()
             return
         }
         let now = CACurrentMediaTime()

@@ -39,6 +39,7 @@ enum GifWriter {
         fps: Int,
         crop: CGRect?,
         bakeIn: BakeInExporter.Options? = nil,
+        frameStride: Int = 1,
         progress: ((Double) -> Void)? = nil
     ) throws {
         guard !frameRange.isEmpty else { throw WriteError.emptyRange }
@@ -67,19 +68,29 @@ enum GifWriter {
 
         let frameStart = max(0, min(frameRange.lowerBound, h.frameCount - 1))
         let frameEnd   = max(frameStart, min(frameRange.upperBound, h.frameCount - 1))
-        let totalAvail = frameEnd - frameStart + 1
+        // Stride first: subsample the trim range to every Nth frame
+        // BEFORE the GIF's even-spaced target pick. Two orthogonal
+        // levers: stride reduces the candidate pool (cheap source-
+        // frame skip); targetFrameCount caps the GIF length.
+        let stride = max(1, frameStride)
+        let stridedCandidates: [Int] = Swift.stride(
+            from: frameStart, through: frameEnd, by: stride
+        ).map { $0 }
+        let totalAvail = stridedCandidates.count
+        guard totalAvail > 0 else { throw WriteError.emptyRange }
         let outCount = max(1, min(targetFrameCount, totalAvail))
 
-        // Pick evenly-spaced frame indices.
+        // Pick evenly-spaced indices INTO stridedCandidates (so the
+        // final indices are also stride-aligned).
         var pickedIndices: [Int] = []
         pickedIndices.reserveCapacity(outCount)
         if outCount == 1 {
-            pickedIndices.append(frameStart)
+            pickedIndices.append(stridedCandidates[0])
         } else {
             for i in 0..<outCount {
                 let t = Double(i) / Double(outCount - 1)
-                let idx = frameStart + Int((t * Double(totalAvail - 1)).rounded())
-                pickedIndices.append(idx)
+                let pos = Int((t * Double(totalAvail - 1)).rounded())
+                pickedIndices.append(stridedCandidates[pos])
             }
         }
 
@@ -116,12 +127,14 @@ enum GifWriter {
         // Bake-in path: per-frame Pipeline.process produces RGBA8
         // directly, so we skip the raw-bytes demosaic / mono-broadcast
         // helper and feed the processed buffer to makeCGImage.
+        //
+        // CRITICAL: pass the caller's Options through verbatim. An
+        // earlier version rebuilt the Options here with only sharpen
+        // / tone / outputBitDepth — silently dropping resizeDivisor
+        // AND rotationDegrees. That made every GIF render at full
+        // size with no rotation, no matter what the user picked.
         let bakeCtx: BakeInExporter.Context? = bakeIn.map {
-            BakeInExporter.Context(options: BakeInExporter.Options(
-                sharpen: $0.sharpen,
-                toneCurve: $0.toneCurve,
-                outputBitDepth: 8
-            ))
+            BakeInExporter.Context(options: $0)
         }
 
         for (i, frameIdx) in pickedIndices.enumerated() {
