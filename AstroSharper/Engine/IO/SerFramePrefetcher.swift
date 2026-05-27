@@ -32,15 +32,28 @@ import Metal
 
 final class SerFramePrefetcher {
     private let device: MTLDevice
-    // Serial — concurrent dispatch saturated the shared Metal command
-    // queue (16 unpack-kernel dispatches in flight) and produced a black
-    // frame 0 on 4 GB+ SERs (user-reported 2026-05-26). Serial keeps the
-    // GPU pipeline predictable; the sparse-prefill prime is slower (16 ×
-    // disk-read latency) but no longer races the main frame-0 decode.
-    private let prefetchQueue = DispatchQueue(
-        label: "com.joergsflow.AstroSharper.serPrefetch",
-        qos: .userInitiated
-    )
+    // Bounded-parallel decoder pool (max 2 concurrent decodes).
+    //
+    // Earlier this was a serial DispatchQueue because an unbounded
+    // concurrent dispatch on a 4 GB SER produced black-frame-zero
+    // (16+ kernel dispatches racing the initial frame-0 decode).
+    // Serial fixed that race but capped throughput at 1 frame's
+    // worth of disk-I/O + Metal-dispatch latency — which on a 4 GB
+    // SER is too slow to keep up with an 18 fps playback timer
+    // (the "Standbild → burst → Standbild" stutter).
+    //
+    // OperationQueue.maxConcurrentOperationCount = 2 gives us two
+    // workers — enough to hide disk-read latency behind GPU dispatch
+    // — without saturating the shared Metal command queue. The
+    // pending-set guard prevents double-decoding the same frame from
+    // multiple workers.
+    private let decodeQueue: OperationQueue = {
+        let q = OperationQueue()
+        q.name = "com.joergsflow.AstroSharper.serPrefetch"
+        q.maxConcurrentOperationCount = 2
+        q.qualityOfService = .userInitiated
+        return q
+    }()
     private let lock = NSLock()
 
     private var currentURL: URL? = nil
@@ -96,6 +109,11 @@ final class SerFramePrefetcher {
         // wake up — `currentURL` no longer matches.
         pendingLoads.removeAll()
         lock.unlock()
+        // Cancel in-flight decode operations whose URL guard is now
+        // stale. They'd no-op via the urlStillMatches check anyway,
+        // but cancelling frees the worker thread for the new URL's
+        // prefetch faster.
+        decodeQueue.cancelAllOperations()
     }
 
     /// Synchronous cache lookup. nil = miss.
@@ -157,7 +175,7 @@ final class SerFramePrefetcher {
         }
         lock.unlock()
         for target in toFetch {
-            prefetchQueue.async { [weak self] in
+            decodeQueue.addOperation { [weak self] in
                 guard let self else { return }
                 guard self.urlStillMatches(url) else {
                     self.markPendingDone(index: target)
@@ -191,7 +209,7 @@ final class SerFramePrefetcher {
         }
         lock.unlock()
         for target in toFetch {
-            prefetchQueue.async { [weak self] in
+            decodeQueue.addOperation { [weak self] in
                 guard let self else { return }
                 guard self.urlStillMatches(url) else {
                     self.markPendingDone(index: target)

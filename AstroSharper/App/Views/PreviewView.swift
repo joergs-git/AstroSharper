@@ -605,22 +605,30 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             .sink { [weak self] active in
                 guard let self else { return }
                 // Tune the prefetcher's look-ahead — playback needs a
-                // deeper buffer than scrubbing so the serial decode
-                // queue can stay ahead of the timer on slow-disk SERs
-                // (the "fast bursts then stalls" symptom). And on
-                // start, fire one extra prefetch from the current
-                // frame so the buffer is pre-warmed before tick 1.
+                // deeper buffer than scrubbing so the (now bounded-
+                // parallel) decode queue can stay ahead of the timer.
                 self.serPrefetcher.setPlaybackMode(active)
                 if active {
-                    self.serPrefetcher.prefetch(
-                        after: self.app.previewSerFrameIndex,
-                        totalFrames: self.app.previewSerFrameCount
-                    )
+                    let idx = self.app.previewSerFrameIndex
+                    let total = self.app.previewSerFrameCount
+                    // Fire prefetch on BOTH caches. The full-res
+                    // prefetcher has 12-deep lookahead; the low-res
+                    // cache materialises thumbs around the playhead
+                    // so playbackPaintCachedFrame's tier-2 fallback
+                    // has something to show on cache misses (avoids
+                    // the "Standbild for the first 3 runs" symptom).
+                    self.serPrefetcher.prefetch(after: idx, totalFrames: total)
+                    // Request low-res thumbs around the playhead so
+                    // tier-2 has neighbours to fall back on.
+                    let lowResBudget = 8
+                    for off in 0..<lowResBudget {
+                        let i = (idx + off) % max(1, total)
+                        self.serScrubCache.requestThumb(at: i)
+                    }
                     return
                 }
                 // Playback STOP — settle the landed frame with the
-                // full pipeline. (The previous unconditional path; now
-                // gated on `active == false`.)
+                // full pipeline.
                 guard self.beforeTex != nil else { return }
                 self.refreshDisplayAutoRange()
                 self.view?.needsDisplay = true
@@ -1198,30 +1206,62 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     /// wall-clock to ~30 decodes/s. During playback it always loads (the
     /// timer drives the cadence). The settle subject (debounced) lands
     /// the exact final frame + full pipeline once the drag stops.
-    /// Playback-only paint path: hits the prefetcher cache, paints
-    /// instantly on hit, and ALWAYS re-arms the prefetch queue so the
-    /// upcoming N frames stay warm. On miss it does NOTHING (no async
-    /// dispatch, no Metal contention with the serial prefetcher) — the
-    /// previously painted frame stays on screen until the prefetcher's
-    /// serial decode catches up.
+    /// Playback paint path — three-tier fallback like a real video
+    /// player so motion stays visible even when the full-res decoder
+    /// is still loading the requested frame:
+    ///
+    ///   1. Full-res cache hit → paint instantly (best case).
+    ///   2. Full-res miss → paint the low-res thumb at this index
+    ///      (or the nearest cached thumb). User sees motion
+    ///      immediately, slightly soft, rather than a frozen frame
+    ///      waiting for disk + Metal.
+    ///   3. Both miss → keep the previously painted frame on screen.
+    ///
+    /// On every tick we ALSO re-arm both caches so the upcoming
+    /// frames stay warm. The bounded-parallel prefetcher (max 2
+    /// decode workers) replaced the old serial queue, so the full-
+    /// res buffer fills ~2× faster.
     private func playbackPaintCachedFrame() {
         guard let id = app.previewFileID,
               let entry = app.catalog.files.first(where: { $0.id == id }),
               entry.isSER else { return }
         let idx = app.previewSerFrameIndex
+        let total = app.previewSerFrameCount
         serPrefetcher.setURL(entry.url)
-        serPrefetcher.prefetch(after: idx, totalFrames: app.previewSerFrameCount)
-        guard let cached = serPrefetcher.cachedFrame(at: idx) else { return }
-        serDispatchSeq += 1
-        let tex = entry.meridianFlipped
-            ? RotateTexture.rotate180(cached, device: MetalDevice.shared.device)
-            : cached
-        applyLoadedSerFrame(
-            tex: tex,
-            dispatchedID: id,
-            dispatchedSeq: serDispatchSeq,
-            frameIndex: idx
-        )
+        serScrubCache.setURL(entry.url)
+        serPrefetcher.prefetch(after: idx, totalFrames: total)
+        // Ask the low-res cache to materialise this exact index too —
+        // cheap, and the next tick can hit it while the full-res
+        // decode is still in flight.
+        serScrubCache.requestThumb(at: idx)
+
+        // Tier 1: full-res cache hit.
+        if let cached = serPrefetcher.cachedFrame(at: idx) {
+            serDispatchSeq += 1
+            let tex = entry.meridianFlipped
+                ? RotateTexture.rotate180(cached, device: MetalDevice.shared.device)
+                : cached
+            applyLoadedSerFrame(
+                tex: tex,
+                dispatchedID: id,
+                dispatchedSeq: serDispatchSeq,
+                frameIndex: idx
+            )
+            return
+        }
+
+        // Tier 2: low-res fallback. Paint the thumb at idx if cached,
+        // else the nearest cached thumb. This keeps motion visible
+        // while the full-res decoder catches up.
+        let lowRes = serScrubCache.cachedThumb(at: idx)
+            ?? serScrubCache.nearestCachedThumb(to: idx)?.texture
+        if let lowRes {
+            paintScrubLowRes(lowRes, flipped: entry.meridianFlipped, frameIndex: idx)
+            return
+        }
+        // Tier 3: nothing usable — leave the last painted frame on
+        // screen. Frame counter still advances; the next tick has a
+        // higher chance of hitting cache.
     }
 
     private func serScrubIndexChanged() {
