@@ -81,10 +81,19 @@ struct SerScrubBar: View {
             .disabled(!usable || app.previewSerFrameIndex >= app.previewSerFrameCount - 1)
             .keyboardShortcut(.rightArrow, modifiers: [])
 
-            Text("Frame \(app.previewSerFrameIndex + 1)/\(app.previewSerFrameCount)")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.secondary)
-                .frame(width: 130, alignment: .trailing)
+            // Frame counter on top + a wall-clock playback time below.
+            // Same 30-fps display convention as the trim-range label,
+            // so both readouts agree: a 648-frame trim displayed as
+            // "21.6 s" in the trim label maps to "0:21" here.
+            VStack(alignment: .trailing, spacing: 1) {
+                Text("Frame \(app.previewSerFrameIndex + 1)/\(app.previewSerFrameCount)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+                Text(playbackTimeLabel)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary.opacity(0.75))
+            }
+            .frame(width: 130, alignment: .trailing)
 
             // Trim controls: set start / end to the current scrub
             // position, reset both. The visual range overlay on the
@@ -177,6 +186,29 @@ struct SerScrubBar: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(Color(NSColor.underPageBackgroundColor))
+    }
+
+    /// Current playback time vs total, formatted MM:SS (or HH:MM:SS
+    /// for the rare > 1 h case). 30 fps assumption matches the trim
+    /// label — the SER format's per-frame timestamp field is rarely
+    /// populated by capture tools we see in the wild, so a fixed
+    /// display rate is the lowest-surprise choice.
+    private var playbackTimeLabel: String {
+        let fps = 30.0
+        let cur = Double(app.previewSerFrameIndex) / fps
+        let tot = Double(max(0, app.previewSerFrameCount - 1)) / fps
+        return "\(Self.formatTime(cur)) / \(Self.formatTime(tot))"
+    }
+
+    static func formatTime(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
+        }
+        return String(format: "%d:%02d", m, s)
     }
 
     /// Compact human label for the live trim range, e.g.
