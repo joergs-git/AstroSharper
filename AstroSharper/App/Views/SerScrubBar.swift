@@ -106,6 +106,7 @@ struct SerScrubBar: View {
                 // end so we don't end up with an inverted range.
                 if let e = app.serTrimEnd, e <= n { app.serTrimEnd = nil }
                 app.serTrimStart = n
+                persistTrim()
             } label: {
                 Image(systemName: "arrowtriangle.right.square")
                     .font(.system(size: 13))
@@ -117,6 +118,7 @@ struct SerScrubBar: View {
                 let n = app.previewSerFrameIndex
                 if let s = app.serTrimStart, s >= n { app.serTrimStart = nil }
                 app.serTrimEnd = n
+                persistTrim()
             } label: {
                 Image(systemName: "arrowtriangle.left.square")
                     .font(.system(size: 13))
@@ -128,6 +130,7 @@ struct SerScrubBar: View {
                 Button {
                     app.serTrimStart = nil
                     app.serTrimEnd = nil
+                    persistTrim()
                 } label: {
                     Image(systemName: "xmark.circle")
                         .font(.system(size: 13))
@@ -207,6 +210,15 @@ struct SerScrubBar: View {
     /// fallback. Used by both the playback time and the trim label.
     var displayFPS: Double {
         app.previewSerCapturedFPS ?? 30.0
+    }
+
+    /// Save the current trim pair into the per-URL memory so a
+    /// round-trip through the export-preview window (or any other
+    /// file switch) restores it on re-open of the same SER.
+    private func persistTrim() {
+        guard let id = app.previewFileID,
+              let entry = app.catalog.files.first(where: { $0.id == id }) else { return }
+        app.rememberedSerTrimRanges[entry.url] = (app.serTrimStart, app.serTrimEnd)
     }
 
     static func formatTime(_ seconds: Double) -> String {

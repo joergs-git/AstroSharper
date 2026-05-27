@@ -855,10 +855,19 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 // ASIStudio populate it; some older tools don't). nil →
                 // scrub bar falls back to a 30 fps display estimate.
                 app.previewSerCapturedFPS = serReader?.capturedFPS
-                // Trim range + crop region are per-file — reset on
-                // every new SER load so a fresh capture starts clean.
-                app.serTrimStart = nil
-                app.serTrimEnd = nil
+                // Trim range + crop region are per-file. Restore from
+                // the per-URL memory if the user previously set marks
+                // on this SER — keeps the IN/OUT positions across
+                // re-export rounds with different settings. Clamp to
+                // the readable range in case the file was truncated.
+                if let pair = app.rememberedSerTrimRanges[url] {
+                    let last = max(0, realCount - 1)
+                    app.serTrimStart = pair.0.map { max(0, min(last, $0)) }
+                    app.serTrimEnd = pair.1.map { max(0, min(last, $0)) }
+                } else {
+                    app.serTrimStart = nil
+                    app.serTrimEnd = nil
+                }
                 app.serCropRect = nil
                 app.serCropAspect = .free
                 // Restore the last-viewed frame for this SER when the

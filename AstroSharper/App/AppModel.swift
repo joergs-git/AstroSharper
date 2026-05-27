@@ -276,6 +276,17 @@ final class AppModel: ObservableObject {
     /// selection within the same section, indirectly). Cleared on
     /// folder open.
     var rememberedSerFrameIndices: [URL: Int] = [:]
+    /// Per-URL trim range memory. When the user sets trim markers on
+    /// a SER, exports, and later returns to the same source, the
+    /// trim is restored from this dict so they don't have to re-pick
+    /// the IN/OUT positions for follow-up exports with different
+    /// resize / rotation / fps settings.
+    var rememberedSerTrimRanges: [URL: (Int?, Int?)] = [:]
+    /// URL of the just-exported file to show in the Export Preview
+    /// window. Set by SerExportPanel after a successful write; the
+    /// Window scene observes this and opens via openWindow().
+    /// nil = no preview pending.
+    @Published var exportPreviewURL: URL? = nil
     @Published var previewSerFrameCount: Int = 0
     /// Captured FPS derived from the SER's per-frame timestamp
     /// trailer. nil when the trailer is missing or degenerate; the

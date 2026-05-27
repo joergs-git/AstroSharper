@@ -46,6 +46,7 @@ enum SerExportFormat: String, CaseIterable, Identifiable {
 
 struct SerExportPanel: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.openWindow) private var openWindow
     // Crop %s remain @State — they're a pure UI mirror of the source-
     // pixel `app.serCropRect` and get re-synced from it on appear.
     @State private var cropX: Double = 0
@@ -500,9 +501,16 @@ struct SerExportPanel: View {
                 )
                 DispatchQueue.main.async {
                     writing = false
-                    lastResult = "Saved \(outURL.lastPathComponent)"
-                    app.registerOutput(url: outURL, autoSwitch: true)
-                    app.highlightLatestOutput(url: outURL)
+                    lastResult = "Written: \(outURL.lastPathComponent) — review in preview window"
+                    // Open the Export Preview window so the user can
+                    // inspect the result at 1:1 and decide Keep vs
+                    // Discard. DO NOT auto-register or auto-switch
+                    // here — keeping the main preview on the source
+                    // SER means the trim / crop / resize / rotation
+                    // settings stay live for an immediate re-export
+                    // with adjusted parameters.
+                    app.exportPreviewURL = outURL
+                    openWindow(id: "export-preview")
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -556,9 +564,12 @@ struct SerExportPanel: View {
                 )
                 DispatchQueue.main.async {
                     writing = false
-                    lastResult = "Saved \(outURL.lastPathComponent)"
-                    app.registerOutput(url: outURL, autoSwitch: true)
-                    app.highlightLatestOutput(url: outURL)
+                    lastResult = "Written: \(outURL.lastPathComponent) — review in preview window"
+                    // Same as SER export: open the Export Preview
+                    // window for Keep / Discard, don't auto-switch
+                    // the main preview off the source.
+                    app.exportPreviewURL = outURL
+                    openWindow(id: "export-preview")
                 }
             } catch {
                 DispatchQueue.main.async {
