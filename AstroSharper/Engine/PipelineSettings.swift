@@ -451,3 +451,46 @@ struct ToneCurveSettings: Equatable, Codable {
         self.solarDualZone = solarDualZone
     }
 }
+
+/// Coloring + channel-mixer pass, applied AFTER the tone curve.
+///
+/// Two independent layers:
+///
+///   - Tint (hue + strength) — picks a target colour from the hue
+///     wheel and mixes it into every pixel. On mono sources this
+///     paints the luminance with that colour (e.g. solar Hα → warm
+///     red-orange); on OSC sources it acts as a colour cast.
+///
+///   - Channel mixer (per-R/G/B offset + gain) — Photoshop-style.
+///     `gain` multiplies the channel (1.0 = identity, > 1 boosts,
+///     < 1 attenuates); `offset` adds afterwards (-1…+1 typical
+///     range, 0 = identity). Lets the user push specific channels
+///     independently — e.g. lift R + suppress B for an extra warm
+///     sun pass, or pull G down for OSC magenta correction.
+///
+/// Both layers are gated on a single `enabled` toggle (the section
+/// header). Pipeline applies tint FIRST (operating on linear-ish
+/// post-tone values), then channel-mixer.
+struct ColoringSettings: Equatable, Codable {
+    var enabled: Bool = false
+
+    /// Hue 0…360°. 0 = red, 60 = yellow, 120 = green, 180 = cyan,
+    /// 240 = blue, 300 = magenta. Default 15° = warm orange-red,
+    /// matching solar Hα preset.
+    var hue: Double = 15.0
+
+    /// Tint mix strength 0…1. 0 = pass-through (no tint), 1 = full
+    /// replacement with the tint colour scaled by source luminance.
+    /// Default 0 so a fresh "enabled" toggle doesn't immediately
+    /// recolor the image — the user has to dial it in.
+    var strength: Double = 0.0
+
+    // Channel mixer — defaults are identity so an enabled-without-
+    // dialing-anything Coloring section passes the image through.
+    var rGain:   Double = 1.0
+    var gGain:   Double = 1.0
+    var bGain:   Double = 1.0
+    var rOffset: Double = 0.0
+    var gOffset: Double = 0.0
+    var bOffset: Double = 0.0
+}

@@ -536,6 +536,9 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         app.$toneCurve.removeDuplicates()
             .sink { [weak self] _ in self?.reprocessSubject.send(()) }
             .store(in: &cancellables)
+        app.$coloring.removeDuplicates()
+            .sink { [weak self] _ in self?.reprocessSubject.send(()) }
+            .store(in: &cancellables)
         app.$previewFileID.removeDuplicates()
             .sink { [weak self] _ in self?.loadCurrentFile() }
             .store(in: &cancellables)
@@ -1528,6 +1531,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
 
         let sharpen = app.sharpen
         let tone = app.toneCurve
+        let coloring = app.coloring
 
         // Identity short-circuit at the call site too — when the user has
         // nothing turned on, don't kick a background pipeline pass at all.
@@ -1568,6 +1572,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 sharpen: sharpen,
                 toneCurve: tone,
                 toneCurveLUT: lut,
+                coloring: coloring,
                 preview: preview,
                 onStageChange: { [weak self] stage in
                     // Pipeline runs on background queue; UI state must be

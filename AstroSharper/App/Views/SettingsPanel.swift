@@ -24,6 +24,8 @@ struct SettingsPanel: View {
                 Divider()
                 ToneCurveSection()
                 Divider()
+                ColoringSection()
+                Divider()
                 StabilizeSection()
                 Divider()
                 OutputFolderSection()
@@ -678,6 +680,166 @@ struct ToneCurveSection: View {
         case .inputs:  return "📥  process selection → OUTPUTS"
         case .outputs: return "🔁  re-process outputs → OUTPUTS"
         }
+    }
+}
+
+// MARK: - Coloring (hue tint + channel mixer)
+
+/// A "Coloring" section that sits under Tone. Two independent layers
+/// on the same enable switch:
+///   - Hue tint + strength — colorize a mono capture (Sun Hα → warm
+///     red-orange) or paint a cast onto an OSC capture.
+///   - Per-channel R/G/B gain + offset (Photoshop-style "channel
+///     mixer") — push specific channels independently without
+///     dragging the tone curve around.
+struct ColoringSection: View {
+    @EnvironmentObject private var app: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionContainer(
+                title: "STEP 2b: COLORING",
+                icon: "paintpalette",
+                isOn: $app.coloring.enabled,
+                highlight: false
+            ) {
+                // Hue + strength.
+                HStack(spacing: 8) {
+                    Text("Hue")
+                        .font(.system(size: 11))
+                        .frame(width: 80, alignment: .leading)
+                    Slider(value: $app.coloring.hue, in: 0...360, step: 1)
+                    Text("\(Int(app.coloring.hue))°")
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(width: 40, alignment: .trailing)
+                        .foregroundColor(.secondary)
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(hueSwatchColor)
+                        .frame(width: 16, height: 16)
+                        .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.secondary.opacity(0.3), lineWidth: 0.5))
+                }
+                .help("Target hue applied to the image. 0° = red, 60° = yellow, 120° = green, 180° = cyan, 240° = blue, 300° = magenta. The Strength slider below controls how much.")
+                HStack(spacing: 8) {
+                    Text("Strength")
+                        .font(.system(size: 11))
+                        .frame(width: 80, alignment: .leading)
+                    Slider(value: $app.coloring.strength, in: 0...1, step: 0.01)
+                    Text(String(format: "%.0f%%", app.coloring.strength * 100))
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(width: 40, alignment: .trailing)
+                        .foregroundColor(.secondary)
+                    Button("Reset") {
+                        app.coloring.strength = 0
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .disabled(app.coloring.strength < 1e-4)
+                }
+                .help("How strongly the hue tint mixes in. 0% = original colour. 100% = pure luminance × hue (perfect for colorizing mono captures).")
+
+                // Preset chips. Each sets hue + strength to a sensible
+                // baseline; the user can fine-tune from there.
+                HStack(spacing: 6) {
+                    Text("Presets")
+                        .font(.system(size: 11))
+                        .frame(width: 80, alignment: .leading)
+                    Button("Sun Hα") {
+                        app.coloring.hue = 15; app.coloring.strength = 0.8
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    Button("Sun Na") {
+                        app.coloring.hue = 45; app.coloring.strength = 0.6
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    Button("Moon-Warm") {
+                        app.coloring.hue = 30; app.coloring.strength = 0.35
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    Button("Off") {
+                        app.coloring.strength = 0
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    Spacer()
+                }
+                .help("Quick-set buttons for common targets. Adjust Hue / Strength afterwards to taste.")
+
+                Divider().padding(.vertical, 2)
+                Text("Channel Mixer")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+
+                // R/G/B gain + offset. Identity = gain 1.0, offset 0.0.
+                channelRow(label: "R", color: .red,
+                           gain: $app.coloring.rGain, offset: $app.coloring.rOffset)
+                channelRow(label: "G", color: .green,
+                           gain: $app.coloring.gGain, offset: $app.coloring.gOffset)
+                channelRow(label: "B", color: .blue,
+                           gain: $app.coloring.bGain, offset: $app.coloring.bOffset)
+
+                HStack {
+                    Spacer()
+                    Button("Reset Channel Mixer") {
+                        app.coloring.rGain = 1.0; app.coloring.gGain = 1.0; app.coloring.bGain = 1.0
+                        app.coloring.rOffset = 0; app.coloring.gOffset = 0; app.coloring.bOffset = 0
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .disabled(channelMixerIsIdentity)
+                }
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
+    /// One row of the channel mixer: a coloured chip + gain slider +
+    /// offset slider. Compact so all three channels fit in the panel
+    /// without scrolling.
+    @ViewBuilder
+    private func channelRow(label: String, color: Color,
+                            gain: Binding<Double>, offset: Binding<Double>) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundColor(color)
+                .frame(width: 14)
+            Text("Gain")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            Slider(value: gain, in: 0...2, step: 0.01)
+            Text(String(format: "%.2f", gain.wrappedValue))
+                .font(.system(size: 10, design: .monospaced))
+                .frame(width: 36, alignment: .trailing)
+                .foregroundColor(.secondary)
+            Text("Off")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            Slider(value: offset, in: -0.5...0.5, step: 0.005)
+            Text(String(format: "%+.2f", offset.wrappedValue))
+                .font(.system(size: 10, design: .monospaced))
+                .frame(width: 40, alignment: .trailing)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    /// SwiftUI Color preview matching the current `coloring.hue`. Used
+    /// in the swatch next to the Hue slider so the user sees what
+    /// they're dialling in before changing Strength.
+    private var hueSwatchColor: Color {
+        Color(hue: app.coloring.hue / 360, saturation: 1.0, brightness: 1.0)
+    }
+
+    private var channelMixerIsIdentity: Bool {
+        abs(app.coloring.rGain - 1) < 1e-4
+            && abs(app.coloring.gGain - 1) < 1e-4
+            && abs(app.coloring.bGain - 1) < 1e-4
+            && abs(app.coloring.rOffset) < 1e-4
+            && abs(app.coloring.gOffset) < 1e-4
+            && abs(app.coloring.bOffset) < 1e-4
     }
 }
 

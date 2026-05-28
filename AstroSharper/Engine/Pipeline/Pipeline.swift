@@ -28,6 +28,7 @@ final class Pipeline {
     private let mulPSO:     MTLComputePipelineState
     private let tonePSO:    MTLComputePipelineState
     private let satPSO:     MTLComputePipelineState
+    private let coloringPSO: MTLComputePipelineState
     private let nrPSO:      MTLComputePipelineState
     private let wbPSO:      MTLComputePipelineState
     private let acdcPSO:    MTLComputePipelineState
@@ -94,6 +95,7 @@ final class Pipeline {
         self.mulPSO     = make("lr_multiply")
         self.tonePSO    = make("apply_tone_curve")
         self.satPSO     = make("apply_saturation")
+        self.coloringPSO = make("apply_coloring")
         self.nrPSO      = make("noise_reduce_bilateral")
         self.wbPSO      = make("apply_white_balance")
         self.acdcPSO    = make("shift_rb_channels")
@@ -168,6 +170,7 @@ final class Pipeline {
         sharpen: SharpenSettings,
         toneCurve: ToneCurveSettings,
         toneCurveLUT: MTLTexture? = nil,
+        coloring: ColoringSettings = ColoringSettings(),
         preview: Bool = false,
         onStageChange: ((PreviewStage?) -> Void)? = nil
     ) -> MTLTexture {
@@ -182,11 +185,20 @@ final class Pipeline {
         // the freshly-painted raw frame with a re-drawn-equal copy.
         let bcIsIdentity = abs(toneCurve.brightness) < 1e-4 && abs(toneCurve.contrast - 1.0) < 1e-4
         let satIsIdentity = abs(toneCurve.saturation - 1.0) < 1e-4
+        let coloringIsIdentity = !coloring.enabled
+            || (coloring.strength < 1e-4
+                && abs(coloring.rGain - 1.0) < 1e-4
+                && abs(coloring.gGain - 1.0) < 1e-4
+                && abs(coloring.bGain - 1.0) < 1e-4
+                && abs(coloring.rOffset) < 1e-4
+                && abs(coloring.gOffset) < 1e-4
+                && abs(coloring.bOffset) < 1e-4)
         let nothingActive = !toneCurve.autoWB
             && !toneCurve.chromaticAlignment
             && !toneCurve.channelNormalize
             && !toneCurve.reducePurpleFringe
             && !sharpen.enabled
+            && coloringIsIdentity
             && (!toneCurve.enabled || (toneCurveLUT == nil && bcIsIdentity && satIsIdentity))
         // Allocate a persistent output — not from pool, caller owns.
         let outDesc = MTLTextureDescriptor.texture2DDescriptor(
@@ -583,8 +595,7 @@ final class Pipeline {
 
         // Saturation runs even when the tone-curve sub-section is off — it's
         // an independent control on the same panel. Skipped at identity (1.0)
-        // so the no-op case costs nothing. Always last in the chain so it
-        // operates on the final RGB the user will see.
+        // so the no-op case costs nothing.
         if toneCurve.enabled, abs(toneCurve.saturation - 1.0) > 1e-4 {
             let result = borrow(width: w, height: h, format: input.pixelFormat)
             borrowed.append(result)
@@ -595,6 +606,37 @@ final class Pipeline {
                 var p = SaturationParamsCPU(saturation: Float(toneCurve.saturation))
                 enc.setBytes(&p, length: MemoryLayout<SaturationParamsCPU>.stride, index: 0)
                 let (tgC, tgS) = dispatchThreadgroups(for: result, pso: satPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            current = result
+        }
+
+        // Coloring (hue tint + channel mixer). Runs AFTER saturation so
+        // the user's hue selection isn't undone by a saturation = 0
+        // grayscale, and so the channel-mixer gains compound on the
+        // already-tonemapped values — what the user sees is what they
+        // dial in. Gated on `coloring.enabled` AND non-identity values
+        // so the no-op case costs nothing.
+        if coloring.enabled && !coloringIsIdentity {
+            let result = borrow(width: w, height: h, format: input.pixelFormat)
+            borrowed.append(result)
+            if let enc = finalCmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(coloringPSO)
+                enc.setTexture(current, index: 0)
+                enc.setTexture(result, index: 1)
+                var p = ColoringParamsCPU(
+                    tintColor: Pipeline.hueToRGB(hueDegrees: Float(coloring.hue)),
+                    strength: Float(coloring.strength),
+                    gain: SIMD3<Float>(Float(coloring.rGain),
+                                       Float(coloring.gGain),
+                                       Float(coloring.bGain)),
+                    offset: SIMD3<Float>(Float(coloring.rOffset),
+                                         Float(coloring.gOffset),
+                                         Float(coloring.bOffset))
+                )
+                enc.setBytes(&p, length: MemoryLayout<ColoringParamsCPU>.stride, index: 0)
+                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: coloringPSO)
                 enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
                 enc.endEncoding()
             }
@@ -977,6 +1019,39 @@ final class Pipeline {
 /// Mirror of the Metal `SaturationParams` struct; sent via `setBytes`.
 struct SaturationParamsCPU {
     var saturation: Float
+}
+
+extension Pipeline {
+    /// Map a hue (0…360°) to a fully-saturated, fully-bright unit-vector
+    /// RGB colour. Used by the Coloring pass to derive the tint colour
+    /// from the user's `coloring.hue` slider. Returns identity-white if
+    /// the input is non-finite.
+    @inline(__always)
+    static func hueToRGB(hueDegrees: Float) -> SIMD3<Float> {
+        guard hueDegrees.isFinite else { return SIMD3<Float>(1, 1, 1) }
+        let h = (hueDegrees.truncatingRemainder(dividingBy: 360) + 360)
+            .truncatingRemainder(dividingBy: 360)
+        let hp = h / 60.0           // 0…6
+        let x = 1.0 - abs(hp.truncatingRemainder(dividingBy: 2.0) - 1.0)
+        switch Int(hp) {
+        case 0: return SIMD3<Float>(1, x, 0)
+        case 1: return SIMD3<Float>(x, 1, 0)
+        case 2: return SIMD3<Float>(0, 1, x)
+        case 3: return SIMD3<Float>(0, x, 1)
+        case 4: return SIMD3<Float>(x, 0, 1)
+        default: return SIMD3<Float>(1, 0, x)   // 5 and the 6 boundary
+        }
+    }
+}
+
+/// Mirror of the Metal `ColoringParams` struct (tint + channel mixer).
+/// Metal `float3` is 16-byte aligned, so each SIMD3<Float> consumes 16
+/// bytes — match the order from the Metal-side struct exactly.
+struct ColoringParamsCPU {
+    var tintColor: SIMD3<Float>
+    var strength: Float
+    var gain: SIMD3<Float>
+    var offset: SIMD3<Float>
 }
 
 /// Mirror of the Metal `HighlightsShadowsParams` struct.

@@ -23,6 +23,7 @@ enum BakeInExporter {
     struct Options {
         let sharpen: SharpenSettings
         let toneCurve: ToneCurveSettings
+        let coloring: ColoringSettings
         /// 8 = pack to UInt8 RGB (GIF + 8-bit SER); 16 = pack to UInt16 RGB (SER).
         let outputBitDepth: Int
         /// 1 = full res, 2 = half (½×½ = ¼ area), 4 = quarter, 8, 16.
@@ -38,11 +39,13 @@ enum BakeInExporter {
 
         init(sharpen: SharpenSettings,
              toneCurve: ToneCurveSettings,
+             coloring: ColoringSettings = ColoringSettings(),
              outputBitDepth: Int,
              resizeDivisor: Int = 1,
              rotationDegrees: Int = 0) {
             self.sharpen = sharpen
             self.toneCurve = toneCurve
+            self.coloring = coloring
             self.outputBitDepth = outputBitDepth
             self.resizeDivisor = max(1, resizeDivisor)
             // Snap to nearest multiple of 90 in 0..<360.
@@ -100,12 +103,13 @@ enum BakeInExporter {
             let inputTex = try SerFrameLoader.loadFrame(
                 url: sourceURL, frameIndex: frameIndex, device: device
             )
-            // 2) Run the live Sharpen + Tone pipeline.
+            // 2) Run the live Sharpen + Tone + Coloring pipeline.
             let outTex = pipeline.process(
                 input: inputTex,
                 sharpen: options.sharpen,
                 toneCurve: options.toneCurve,
                 toneCurveLUT: lut,
+                coloring: options.coloring,
                 preview: false
             )
             // 3) Determine crop window (source pixels). The processed

@@ -730,6 +730,46 @@ kernel void apply_saturation(
     output.write(float4(mixed, c.a), gid);
 }
 
+// MARK: - Coloring (hue tint + channel mixer)
+//
+// One kernel handles both layers of the Coloring section so we save a
+// pass. Layer 1 (tint): mixes a target colour derived from the user's
+// hue selector into every pixel, weighted by the source luminance —
+// preserves dark/bright structure while painting the picture in the
+// tint colour. Layer 2 (channel mixer): per-R/G/B gain (multiplier)
+// + offset (additive). Identity is gain=1, offset=0.
+
+struct ColoringParams {
+    float3 tintColor;  // unit-vector RGB derived from CPU side from hue
+    float  strength;   // 0…1 tint mix amount
+    float3 gain;       // per-channel multiplier, identity = 1.0
+    float3 offset;     // per-channel additive, identity = 0.0
+};
+
+kernel void apply_coloring(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    constant ColoringParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    // Tint pass — preserve luminance, multiply by tint colour. For a
+    // mono input (R==G==B==L) this paints L * tintColor. For a colour
+    // input the mix() at strength < 1 retains some of the original
+    // chroma; at strength = 1 we fully replace with luma * tintColor.
+    float luma = dot(c.rgb, float3(0.2126, 0.7152, 0.0722));
+    float3 tinted = luma * p.tintColor;
+    float3 rgb = mix(c.rgb, tinted, p.strength);
+    // Channel mixer — gain then offset.
+    rgb = rgb * p.gain + p.offset;
+    // Clamp to [0, 1] so an aggressive gain + tone-curve combination
+    // doesn't push values into negative or > 1 ranges that the
+    // downstream gamma + sRGB transfer can't handle gracefully.
+    rgb = clamp(rgb, float3(0.0), float3(1.0));
+    output.write(float4(rgb, c.a), gid);
+}
+
 // MARK: - Gamma encode / decode (perceptual sRGB tone-op wrappers)
 //
 // Wraps the tone-curve / B+C / H+S / Saturation block so the user's

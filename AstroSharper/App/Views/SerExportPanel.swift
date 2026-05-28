@@ -482,6 +482,7 @@ struct SerExportPanel: View {
             ? BakeInExporter.Options(
                 sharpen: app.sharpen,
                 toneCurve: app.toneCurve,
+                coloring: app.coloring,
                 outputBitDepth: 16,
                 resizeDivisor: app.serExportResizeDivisor,
                 rotationDegrees: app.serExportRotationDegrees
@@ -543,6 +544,7 @@ struct SerExportPanel: View {
             ? BakeInExporter.Options(
                 sharpen: app.sharpen,
                 toneCurve: app.toneCurve,
+                coloring: app.coloring,
                 outputBitDepth: 8,
                 resizeDivisor: app.serExportResizeDivisor,
                 rotationDegrees: app.serExportRotationDegrees

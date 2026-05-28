@@ -76,6 +76,11 @@ final class AppModel: ObservableObject {
     @Published var sharpen = SharpenSettings()
     @Published var stabilize = StabilizeSettings()
     @Published var toneCurve = ToneCurveSettings()
+    /// Hue tint + channel-mixer pass that runs AFTER the tone curve.
+    /// Lets the user paint a solar/lunar colour onto a mono capture,
+    /// or push individual R/G/B channels on an OSC capture without
+    /// touching the main tone curve.
+    @Published var coloring = ColoringSettings()
 
     // Compare side panel — when on, two thumbnails appear next to the
     // preview: top = the currently displayed file (= the stacked /
