@@ -27,6 +27,10 @@ final class BatchJob {
         var sharpen: SharpenSettings
         var stabilize: StabilizeSettings
         var toneCurve: ToneCurveSettings
+        /// Per-channel gradation curves (Master + R/G/B). Mirrors
+        /// app.coloring so the Apply / batch path bakes whatever the
+        /// user sees in the live preview into the output file.
+        var coloring: ColoringSettings = ColoringSettings()
     }
 
     enum Event {
@@ -208,7 +212,8 @@ final class BatchJob {
                     input: frameTex,
                     sharpen: config.sharpen,
                     toneCurve: config.toneCurve,
-                    toneCurveLUT: lut
+                    toneCurveLUT: lut,
+                    coloring: config.coloring
                 )
 
                 let suffix = BatchJob.suffix(for: config)
@@ -229,7 +234,8 @@ final class BatchJob {
                     input: stack,
                     sharpen: config.sharpen,
                     toneCurve: config.toneCurve,
-                    toneCurveLUT: lut
+                    toneCurveLUT: lut,
+                    coloring: config.coloring
                 )
                 let outURL = outputDir.appendingPathComponent("stacked_\(Int(Date().timeIntervalSince1970)).tif")
                 try? ImageTexture.write(texture: processed, to: outURL)

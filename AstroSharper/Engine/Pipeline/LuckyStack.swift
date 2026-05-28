@@ -60,6 +60,10 @@ struct LuckyStackBakeIn {
     var sharpen: SharpenSettings
     var toneCurve: ToneCurveSettings
     var toneCurveLUT: MTLTexture?
+    /// Per-channel gradation curves (Master + R/G/B). Forwarded to
+    /// Pipeline.process so the stacked output bakes whatever the user
+    /// sees in the live preview.
+    var coloring: ColoringSettings = ColoringSettings()
 }
 
 /// Optional extra stack outputs requested per .ser, on top of the default
@@ -1108,7 +1112,8 @@ enum LuckyStack {
                         input: final,
                         sharpen: bake.sharpen,
                         toneCurve: bake.toneCurve,
-                        toneCurveLUT: bake.toneCurveLUT
+                        toneCurveLUT: bake.toneCurveLUT,
+                        coloring: bake.coloring
                     )
                 }
 

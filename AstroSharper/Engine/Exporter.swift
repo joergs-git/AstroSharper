@@ -66,6 +66,10 @@ enum Exporter {
         var sharpen: SharpenSettings
         var toneCurve: ToneCurveSettings
         var toneCurveLUT: MTLTexture?
+        /// Per-channel gradation curves (Master + R/G/B). Forwarded to
+        /// Pipeline.process so the export bakes whatever the user sees
+        /// in the live preview.
+        var coloring: ColoringSettings = ColoringSettings()
     }
 
     /// Exports `frames` to `destination`.
@@ -123,7 +127,8 @@ enum Exporter {
                 input: frame.texture,
                 sharpen: options.sharpen,
                 toneCurve: options.toneCurve,
-                toneCurveLUT: options.toneCurveLUT
+                toneCurveLUT: options.toneCurveLUT,
+                coloring: options.coloring
             )
             let baseName = frame.sourceURL.deletingPathExtension().lastPathComponent
             let outURL = folder.appendingPathComponent("\(baseName)_proc.\(options.format.sequenceExtension)")
@@ -194,7 +199,8 @@ enum Exporter {
                 input: frame.texture,
                 sharpen: options.sharpen,
                 toneCurve: options.toneCurve,
-                toneCurveLUT: options.toneCurveLUT
+                toneCurveLUT: options.toneCurveLUT,
+                coloring: options.coloring
             )
             guard let pb = makeBGRAPixelBuffer(width: w, height: h, adaptor: adaptor) else { continue }
             try renderTextureIntoBuffer(processed, into: pb, ciContext: ctx)
@@ -247,7 +253,8 @@ enum Exporter {
                 input: frame.texture,
                 sharpen: options.sharpen,
                 toneCurve: options.toneCurve,
-                toneCurveLUT: options.toneCurveLUT
+                toneCurveLUT: options.toneCurveLUT,
+                coloring: options.coloring
             )
             guard let cgImage = makeCGImage(from: processed, ciContext: ctx) else { continue }
             CGImageDestinationAddImage(dest, cgImage, frameProps as CFDictionary)

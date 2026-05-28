@@ -1396,7 +1396,8 @@ final class AppModel: ObservableObject {
             fps: playback.fps,
             sharpen: sharpen,
             toneCurve: toneCurve,
-            toneCurveLUT: lut
+            toneCurveLUT: lut,
+            coloring: coloring
         )
         jobStatus = .running(processed: 0, total: playback.frames.count)
         Exporter.export(
@@ -1905,7 +1906,8 @@ final class AppModel: ObservableObject {
             perItemOpts.bakeIn = LuckyStackBakeIn(
                 sharpen: sharpen,
                 toneCurve: toneCurve,
-                toneCurveLUT: lut
+                toneCurveLUT: lut,
+                coloring: coloring
             )
         }
 
@@ -2311,6 +2313,10 @@ final class AppModel: ObservableObject {
         let lut: MTLTexture? = includeTone && toneCurve.enabled
             ? ToneCurveLUT.build(points: toneCurve.controlPoints, device: MetalDevice.shared.device)
             : nil
+        // Apply Tone bakes the Coloring section as well — the user
+        // doesn't distinguish "tone" from "colour grading" once the
+        // curves panel is engaged. Bypassed when Tone wasn't ticked.
+        let c = includeTone ? coloring : ColoringSettings()
 
         let device = MetalDevice.shared.device
         let pipeline = self.stabilizerPipeline
@@ -2318,7 +2324,8 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             for (i, frame) in await self.playback.frames.enumerated() where target.contains(frame.id) {
                 let processed = pipeline.process(input: frame.texture, sharpen: s,
-                                                  toneCurve: t, toneCurveLUT: lut)
+                                                  toneCurve: t, toneCurveLUT: lut,
+                                                  coloring: c)
                 await MainActor.run {
                     self.playback.frames[i].texture = processed
                     self.playback.frames[i].appliedOps.append(opName)
@@ -2626,7 +2633,7 @@ final class AppModel: ObservableObject {
         job.run(
             inputs: selectedInputs,
             outputDir: outDir,
-            config: .init(sharpen: sharpen, stabilize: stabilize, toneCurve: toneCurve)
+            config: .init(sharpen: sharpen, stabilize: stabilize, toneCurve: toneCurve, coloring: coloring)
         ) { [weak self] event in
             guard let self else { return }
             switch event {
