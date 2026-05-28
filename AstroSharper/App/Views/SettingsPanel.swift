@@ -663,13 +663,13 @@ struct ToneCurveSection: View {
 
             LuckyRunButton(
                 disabled: false,
-                title: "Apply Tone Curve",
+                title: "Apply Tone & Coloring",
                 subtitle: toneApplySubtitle,
                 icon: "waveform.path"
             ) {
                 app.runToneOnActiveSection()
             }
-            .help("Apply the current tone curve to the active section: Memory edits in-place (ops accumulate), Inputs/Outputs writes a toned TIFF to the output folder.")
+            .help("Apply the current Tone Curve AND the Coloring (Step 2b) gradation curves to the active section: Memory edits in-place (ops accumulate), Inputs/Outputs writes a toned TIFF to the output folder. Both bakes are gated on the Tone Curve section being enabled — Tone OFF skips both.")
             }   // SectionContainer
         }       // outer VStack
     }
