@@ -1545,9 +1545,16 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             && (tone.controlPoints.count > 2
                 || tone.controlPoints.first != .zero
                 || tone.controlPoints.last != CGPoint(x: 1, y: 1))
+        // Coloring is its own gate — enabled section with at least one
+        // non-identity curve. Without this guard the call-site short-
+        // circuit below skips pipeline.process entirely when ONLY the
+        // Coloring section is dialled in, and the user's curve edits
+        // never reach the GPU (the bug the user just reported).
+        let coloringActive = coloring.enabled && !coloring.isIdentity
         let nothingActive = !tone.autoWB
             && !tone.chromaticAlignment
             && !sharpen.enabled
+            && !coloringActive
             && (!tone.enabled || (!toneCurveActive && !tone.solarDualZone && bcIsIdentity && satIsIdentity))
         if nothingActive {
             afterTex = nil
