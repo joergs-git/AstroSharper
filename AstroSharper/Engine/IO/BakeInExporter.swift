@@ -72,17 +72,46 @@ enum BakeInExporter {
         private let device: MTLDevice
 
         init(options: Options) {
-            self.options = options
+            // Strip per-frame auto-color decisions for video bake-in.
+            //
+            // auto-WB, channel-normalize, chromatic alignment and
+            // purple-fringe all compute their corrections from the
+            // CURRENT frame's statistics. On a single still image
+            // that's what the user wants. On a 60-frame GIF the
+            // per-frame measurements drift across frames (noise,
+            // seeing, drifting subject geometry), so every frame
+            // gets a slightly different correction → output strobes
+            // as the playback walks through them. The user just
+            // reported exactly this on an OSC GIF (autoWB +
+            // channelNormalize default-ON via OscDefaults).
+            //
+            // Manual Coloring curves stay live — those are pure per-
+            // pixel LUTs, frame-stable by construction. The user's
+            // Tone curve + B/C + Sat also stay live for the same
+            // reason.
+            var stableTone = options.toneCurve
+            stableTone.autoWB = false
+            stableTone.channelNormalize = false
+            stableTone.chromaticAlignment = false
+            stableTone.reducePurpleFringe = false
+            self.options = Options(
+                sharpen: options.sharpen,
+                toneCurve: stableTone,
+                coloring: options.coloring,
+                outputBitDepth: options.outputBitDepth,
+                resizeDivisor: options.resizeDivisor,
+                rotationDegrees: options.rotationDegrees
+            )
             self.device = MetalDevice.shared.device
             self.pipeline = Pipeline()
             // Build tone LUT once. Mirrors PreviewCoordinator.ensureLUT.
-            if !options.toneCurve.enabled {
+            if !stableTone.enabled {
                 self.lut = nil
-            } else if options.toneCurve.solarDualZone {
+            } else if stableTone.solarDualZone {
                 self.lut = ToneCurveLUT.buildSolarDualZone(device: device)
             } else {
                 self.lut = ToneCurveLUT.build(
-                    points: options.toneCurve.controlPoints,
+                    points: stableTone.controlPoints,
                     device: device
                 )
             }
