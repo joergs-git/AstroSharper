@@ -275,44 +275,53 @@ private struct ScrubTrack: View {
                 CGFloat(min(max(0, $0), upper)) / CGFloat(upper) * w
             }
 
+            // EVERY visual child carries `.allowsHitTesting(false)` —
+            // otherwise SwiftUI's per-child hit testing routes a click
+            // landing on the white Circle (knob) to the Circle itself,
+            // and because the Circle has no gesture the click is just
+            // swallowed. Result before this fix: clicks JUST OUTSIDE
+            // the knob worked, clicks DIRECTLY on the knob (the
+            // obvious target!) did nothing. With the shapes opting
+            // out of hit testing, the ZStack's contentShape rectangle
+            // is the only thing the gesture sees — so the whole 60-px
+            // row reacts identically whether you hit the knob or not.
             ZStack(alignment: .leading) {
-                // Track groove.
                 Capsule()
                     .fill(Color.secondary.opacity(0.25))
                     .frame(height: 4)
-                // Trim range fill — semi-transparent purple between the
-                // start and end markers, visible at all times once any
-                // trim is set so the user can SEE the export window.
+                    .allowsHitTesting(false)
                 if let s = trimStartX, let e = trimEndX, e > s {
                     Capsule()
                         .fill(Color.purple.opacity(0.35))
                         .frame(width: e - s, height: 8)
                         .offset(x: s)
+                        .allowsHitTesting(false)
                 }
-                // Filled portion up to the knob.
                 Capsule()
                     .fill(Color.accentColor.opacity(0.7))
                     .frame(width: knobX, height: 4)
-                // Trim start marker — thin vertical pin.
+                    .allowsHitTesting(false)
                 if let s = trimStartX {
                     Rectangle()
                         .fill(Color.purple)
                         .frame(width: 2, height: 18)
                         .offset(x: s - 1)
+                        .allowsHitTesting(false)
                 }
                 if let e = trimEndX {
                     Rectangle()
                         .fill(Color.purple)
                         .frame(width: 2, height: 18)
                         .offset(x: e - 1)
+                        .allowsHitTesting(false)
                 }
-                // Knob.
                 Circle()
                     .fill(Color.white)
                     .overlay(Circle().stroke(Color.secondary.opacity(0.4), lineWidth: 0.5))
                     .frame(width: 13, height: 13)
                     .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
                     .offset(x: knobX - 6.5)
+                    .allowsHitTesting(false)
             }
             .frame(maxHeight: .infinity, alignment: .center)
             .contentShape(Rectangle())
