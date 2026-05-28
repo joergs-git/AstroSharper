@@ -452,45 +452,45 @@ struct ToneCurveSettings: Equatable, Codable {
     }
 }
 
-/// Coloring + channel-mixer pass, applied AFTER the tone curve.
+/// Affinity Photo-style gradation curves. Four independent curves —
+/// Master + R + G + B — applied per pixel as a 1D LUT lookup:
+///   `out.{r,g,b} = {R,G,B}-curve(Master-curve(in.{r,g,b}))`
 ///
-/// Two independent layers:
+/// Each curve is a list of control points in normalised [0…1]²; the
+/// Catmull-Rom interpolator from `ToneCurveLUT.build` is reused. The
+/// default is identity (the diagonal y = x), so a fresh "enabled"
+/// toggle is a no-op until the user drags a point.
 ///
-///   - Tint (hue + strength) — picks a target colour from the hue
-///     wheel and mixes it into every pixel. On mono sources this
-///     paints the luminance with that colour (e.g. solar Hα → warm
-///     red-orange); on OSC sources it acts as a colour cast.
-///
-///   - Channel mixer (per-R/G/B offset + gain) — Photoshop-style.
-///     `gain` multiplies the channel (1.0 = identity, > 1 boosts,
-///     < 1 attenuates); `offset` adds afterwards (-1…+1 typical
-///     range, 0 = identity). Lets the user push specific channels
-///     independently — e.g. lift R + suppress B for an extra warm
-///     sun pass, or pull G down for OSC magenta correction.
-///
-/// Both layers are gated on a single `enabled` toggle (the section
-/// header). Pipeline applies tint FIRST (operating on linear-ish
-/// post-tone values), then channel-mixer.
+/// Replaces the prior hue + channel-mixer slider UX (2026-05-28) —
+/// gradation curves give the user finer control AND visually match
+/// Affinity Photo / Photoshop, which is what astrophoto users
+/// already know.
 struct ColoringSettings: Equatable, Codable {
     var enabled: Bool = false
+    var masterPoints: [CGPoint] = ColoringSettings.identityPoints
+    var rPoints:      [CGPoint] = ColoringSettings.identityPoints
+    var gPoints:      [CGPoint] = ColoringSettings.identityPoints
+    var bPoints:      [CGPoint] = ColoringSettings.identityPoints
 
-    /// Hue 0…360°. 0 = red, 60 = yellow, 120 = green, 180 = cyan,
-    /// 240 = blue, 300 = magenta. Default 15° = warm orange-red,
-    /// matching solar Hα preset.
-    var hue: Double = 15.0
+    /// Identity curve — endpoints only, y = x.
+    static var identityPoints: [CGPoint] {
+        [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 1)]
+    }
 
-    /// Tint mix strength 0…1. 0 = pass-through (no tint), 1 = full
-    /// replacement with the tint colour scaled by source luminance.
-    /// Default 0 so a fresh "enabled" toggle doesn't immediately
-    /// recolor the image — the user has to dial it in.
-    var strength: Double = 0.0
+    /// True when all four curves are at identity. Pipeline uses this
+    /// as the no-op short-circuit so an enabled-but-untouched
+    /// Coloring section costs nothing.
+    var isIdentity: Bool {
+        Self.isIdentityCurve(masterPoints)
+            && Self.isIdentityCurve(rPoints)
+            && Self.isIdentityCurve(gPoints)
+            && Self.isIdentityCurve(bPoints)
+    }
 
-    // Channel mixer — defaults are identity so an enabled-without-
-    // dialing-anything Coloring section passes the image through.
-    var rGain:   Double = 1.0
-    var gGain:   Double = 1.0
-    var bGain:   Double = 1.0
-    var rOffset: Double = 0.0
-    var gOffset: Double = 0.0
-    var bOffset: Double = 0.0
+    private static func isIdentityCurve(_ pts: [CGPoint]) -> Bool {
+        guard pts.count == 2 else { return false }
+        let s = pts.sorted { $0.x < $1.x }
+        return abs(s[0].x) < 1e-4 && abs(s[0].y) < 1e-4
+            && abs(s[1].x - 1) < 1e-4 && abs(s[1].y - 1) < 1e-4
+    }
 }

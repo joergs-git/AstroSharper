@@ -683,163 +683,120 @@ struct ToneCurveSection: View {
     }
 }
 
-// MARK: - Coloring (hue tint + channel mixer)
+// MARK: - Coloring (Affinity Photo-style gradation curves)
 
-/// A "Coloring" section that sits under Tone. Two independent layers
-/// on the same enable switch:
-///   - Hue tint + strength — colorize a mono capture (Sun Hα → warm
-///     red-orange) or paint a cast onto an OSC capture.
-///   - Per-channel R/G/B gain + offset (Photoshop-style "channel
-///     mixer") — push specific channels independently without
-///     dragging the tone curve around.
+/// "STEP 2b: COLORING" — four gradation curves (Master / R / G / B)
+/// composed per-channel: `out.r = R-curve(Master(in.r))`, same for
+/// G/B. Visually matches Affinity Photo's "Gradationskurven" dialog
+/// so the engine pattern is familiar to anyone coming from that
+/// world.
+///
+/// All four curves are drawn in their colors simultaneously; the
+/// channel picker selects which one's control points the user is
+/// dragging. The other three render at 55% opacity in the
+/// background so the relationship between them stays visible.
+private enum ColoringChannel: String, CaseIterable, Identifiable {
+    case master = "Master", r = "R", g = "G", b = "B"
+    var id: String { rawValue }
+    var color: Color {
+        switch self {
+        case .master: return .white
+        case .r:      return .red
+        case .g:      return .green
+        case .b:      return .blue
+        }
+    }
+}
+
 struct ColoringSection: View {
     @EnvironmentObject private var app: AppModel
+    @State private var channel: ColoringChannel = .master
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionContainer(
-                title: "STEP 2b: COLORING",
-                icon: "paintpalette",
+                title: "STEP 2b: COLORING (Curves)",
+                icon: "waveform.path",
                 isOn: $app.coloring.enabled,
                 highlight: false
             ) {
-                // Hue + strength.
-                HStack(spacing: 8) {
-                    Text("Hue")
-                        .font(.system(size: 11))
-                        .frame(width: 80, alignment: .leading)
-                    Slider(value: $app.coloring.hue, in: 0...360, step: 1)
-                    Text("\(Int(app.coloring.hue))°")
-                        .font(.system(size: 11, design: .monospaced))
-                        .frame(width: 40, alignment: .trailing)
-                        .foregroundColor(.secondary)
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(hueSwatchColor)
-                        .frame(width: 16, height: 16)
-                        .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.secondary.opacity(0.3), lineWidth: 0.5))
-                }
-                .help("Target hue applied to the image. 0° = red, 60° = yellow, 120° = green, 180° = cyan, 240° = blue, 300° = magenta. The Strength slider below controls how much.")
-                HStack(spacing: 8) {
-                    Text("Strength")
-                        .font(.system(size: 11))
-                        .frame(width: 80, alignment: .leading)
-                    Slider(value: $app.coloring.strength, in: 0...1, step: 0.01)
-                    Text(String(format: "%.0f%%", app.coloring.strength * 100))
-                        .font(.system(size: 11, design: .monospaced))
-                        .frame(width: 40, alignment: .trailing)
-                        .foregroundColor(.secondary)
-                    Button("Reset") {
-                        app.coloring.strength = 0
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 11))
-                    .disabled(app.coloring.strength < 1e-4)
-                }
-                .help("How strongly the hue tint mixes in. 0% = original colour. 100% = pure luminance × hue (perfect for colorizing mono captures).")
-
-                // Preset chips. Each sets hue + strength to a sensible
-                // baseline; the user can fine-tune from there.
+                // Channel picker + per-channel reset.
                 HStack(spacing: 6) {
-                    Text("Presets")
-                        .font(.system(size: 11))
-                        .frame(width: 80, alignment: .leading)
-                    Button("Sun Hα") {
-                        app.coloring.hue = 15; app.coloring.strength = 0.8
+                    Picker("", selection: $channel) {
+                        ForEach(ColoringChannel.allCases) { ch in
+                            Text(ch.rawValue).tag(ch)
+                        }
                     }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 11))
-                    Button("Sun Na") {
-                        app.coloring.hue = 45; app.coloring.strength = 0.6
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 11))
-                    Button("Moon-Warm") {
-                        app.coloring.hue = 30; app.coloring.strength = 0.35
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 11))
-                    Button("Off") {
-                        app.coloring.strength = 0
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 11))
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 220)
                     Spacer()
+                    Button("Reset \(channel.rawValue)") {
+                        bindingForChannel(channel).wrappedValue = ColoringSettings.identityPoints
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    Button("Reset All") {
+                        app.coloring.masterPoints = ColoringSettings.identityPoints
+                        app.coloring.rPoints      = ColoringSettings.identityPoints
+                        app.coloring.gPoints      = ColoringSettings.identityPoints
+                        app.coloring.bPoints      = ColoringSettings.identityPoints
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .disabled(app.coloring.isIdentity)
                 }
-                .help("Quick-set buttons for common targets. Adjust Hue / Strength afterwards to taste.")
+                .help("Channel: Master applies to all three (luma curve); R/G/B individually shift one channel only. The Coloring engine evaluates Master first, then the per-channel curve on the Master output.")
 
-                Divider().padding(.vertical, 2)
-                Text("Channel Mixer")
-                    .font(.system(size: 11, weight: .semibold))
+                // The editor — single source of truth for the active
+                // channel's points; the other three render at 55%
+                // opacity in their own colours via `overlayCurves`.
+                ToneCurveEditor(
+                    points: bindingForChannel(channel),
+                    histogram: app.previewHistogram,
+                    rgbHistogram: app.previewHistogramRGB,
+                    logHistogram: $app.histogramLogScale,
+                    overlayCurves: overlayCurvesExcluding(channel),
+                    curveColor: channel.color,
+                    showActionButtons: false
+                )
+
+                // Compact info line — "click to add, drag to move,
+                // right-click to remove" plus current channel name.
+                Text("Editing: \(channel.rawValue)  ·  click = add · drag = move · right-click on point = remove")
+                    .font(.system(size: 10))
                     .foregroundColor(.secondary)
-
-                // R/G/B gain + offset. Identity = gain 1.0, offset 0.0.
-                channelRow(label: "R", color: .red,
-                           gain: $app.coloring.rGain, offset: $app.coloring.rOffset)
-                channelRow(label: "G", color: .green,
-                           gain: $app.coloring.gGain, offset: $app.coloring.gOffset)
-                channelRow(label: "B", color: .blue,
-                           gain: $app.coloring.bGain, offset: $app.coloring.bOffset)
-
-                HStack {
-                    Spacer()
-                    Button("Reset Channel Mixer") {
-                        app.coloring.rGain = 1.0; app.coloring.gGain = 1.0; app.coloring.bGain = 1.0
-                        app.coloring.rOffset = 0; app.coloring.gOffset = 0; app.coloring.bOffset = 0
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 11))
-                    .disabled(channelMixerIsIdentity)
-                }
             }
         }
     }
 
     // MARK: - Helpers
 
-    /// One row of the channel mixer: a coloured chip + gain slider +
-    /// offset slider. Compact so all three channels fit in the panel
-    /// without scrolling.
-    @ViewBuilder
-    private func channelRow(label: String, color: Color,
-                            gain: Binding<Double>, offset: Binding<Double>) -> some View {
-        HStack(spacing: 6) {
-            Text(label)
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundColor(color)
-                .frame(width: 14)
-            Text("Gain")
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-            Slider(value: gain, in: 0...2, step: 0.01)
-            Text(String(format: "%.2f", gain.wrappedValue))
-                .font(.system(size: 10, design: .monospaced))
-                .frame(width: 36, alignment: .trailing)
-                .foregroundColor(.secondary)
-            Text("Off")
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-            Slider(value: offset, in: -0.5...0.5, step: 0.005)
-            Text(String(format: "%+.2f", offset.wrappedValue))
-                .font(.system(size: 10, design: .monospaced))
-                .frame(width: 40, alignment: .trailing)
-                .foregroundColor(.secondary)
+    /// Binding for the currently-picked channel's control points. The
+    /// editor reads + writes through this so a drag on the canvas
+    /// updates exactly one curve at a time.
+    private func bindingForChannel(_ ch: ColoringChannel) -> Binding<[CGPoint]> {
+        switch ch {
+        case .master: return $app.coloring.masterPoints
+        case .r:      return $app.coloring.rPoints
+        case .g:      return $app.coloring.gPoints
+        case .b:      return $app.coloring.bPoints
         }
     }
 
-    /// SwiftUI Color preview matching the current `coloring.hue`. Used
-    /// in the swatch next to the Hue slider so the user sees what
-    /// they're dialling in before changing Strength.
-    private var hueSwatchColor: Color {
-        Color(hue: app.coloring.hue / 360, saturation: 1.0, brightness: 1.0)
-    }
-
-    private var channelMixerIsIdentity: Bool {
-        abs(app.coloring.rGain - 1) < 1e-4
-            && abs(app.coloring.gGain - 1) < 1e-4
-            && abs(app.coloring.bGain - 1) < 1e-4
-            && abs(app.coloring.rOffset) < 1e-4
-            && abs(app.coloring.gOffset) < 1e-4
-            && abs(app.coloring.bOffset) < 1e-4
+    /// Build the overlay list — the three non-active channels in
+    /// their tagged colours so the user always sees the relationship
+    /// between Master / R / G / B even when only one is editable.
+    private func overlayCurvesExcluding(_ active: ColoringChannel) -> [(color: Color, points: [CGPoint])] {
+        var overlays: [(Color, [CGPoint])] = []
+        for ch in ColoringChannel.allCases where ch != active {
+            switch ch {
+            case .master: overlays.append((ch.color, app.coloring.masterPoints))
+            case .r:      overlays.append((ch.color, app.coloring.rPoints))
+            case .g:      overlays.append((ch.color, app.coloring.gPoints))
+            case .b:      overlays.append((ch.color, app.coloring.bPoints))
+            }
+        }
+        return overlays
     }
 }
 

@@ -25,6 +25,19 @@ struct ToneCurveEditor: View {
     /// the RGB overlay collapses and only luma is drawn.
     var rgbHistogram: ChannelHistogram = ChannelHistogram(r: [], g: [], b: [])
     @Binding var logHistogram: Bool
+    /// Additional curves drawn at lower opacity beneath the active
+    /// `points` curve. Used by the Coloring section to show the three
+    /// inactive channels (R/G/B/Master) so the user can see all four
+    /// curves at once but only edit the picked one — Affinity Photo
+    /// style. Empty for the default single-curve use.
+    var overlayCurves: [(color: Color, points: [CGPoint])] = []
+    /// Color of the active editable curve. Defaults to accentColor;
+    /// the Coloring section passes the picked channel's colour.
+    var curveColor: Color = .accentColor
+    /// When false, the bottom button row (Reset / Invert / Stretch /
+    /// Log Hist) is hidden — Coloring renders its own action row
+    /// outside the editor so the buttons can also drive Master/R/G/B.
+    var showActionButtons: Bool = true
 
     @State private var dragTarget: DragTarget = .none
     /// Generic hit radius for interior nodes.
@@ -80,7 +93,26 @@ struct ToneCurveEditor: View {
                     }
                     .stroke(Color.white.opacity(0.15), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
 
-                    // The curve itself
+                    // Background overlay curves (other channels in
+                    // Affinity-style multi-curve mode). Drawn first so
+                    // the active curve sits visually on top. 50%
+                    // opacity to keep the active one clearly readable.
+                    ForEach(Array(overlayCurves.enumerated()), id: \.offset) { _, c in
+                        Path { p in
+                            let sorted = c.points.sorted { $0.x < $1.x }
+                            let samples = 128
+                            for i in 0...samples {
+                                let t = CGFloat(i) / CGFloat(samples)
+                                let y = CGFloat(sampleCurve(t: Double(t), points: sorted))
+                                let pt = CGPoint(x: t * size.width, y: (1 - y) * size.height)
+                                if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+                            }
+                        }
+                        .stroke(c.color.opacity(0.55), lineWidth: 1.2)
+                        .allowsHitTesting(false)
+                    }
+
+                    // The active curve itself
                     Path { p in
                         let sorted = points.sorted { $0.x < $1.x }
                         let samples = 128
@@ -91,7 +123,7 @@ struct ToneCurveEditor: View {
                             if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
                         }
                     }
-                    .stroke(Color.accentColor, lineWidth: 1.5)
+                    .stroke(curveColor, lineWidth: 1.5)
 
                     // Control point dots (cosmetic — gesture handling lives on the overlay).
                     ForEach(Array(points.enumerated()), id: \.offset) { idx, pt in
@@ -102,11 +134,11 @@ struct ToneCurveEditor: View {
                             // Halo to make endpoints visually larger and clearly grabable.
                             if isEndpoint {
                                 Circle()
-                                    .stroke(Color.accentColor.opacity(0.30), lineWidth: 2)
+                                    .stroke(curveColor.opacity(0.30), lineWidth: 2)
                                     .frame(width: dotSize + 8, height: dotSize + 8)
                             }
                             Circle()
-                                .fill(isDragging ? Color.white : Color.accentColor)
+                                .fill(isDragging ? Color.white : curveColor)
                                 .frame(width: dotSize, height: dotSize)
                         }
                         .position(x: pt.x * size.width, y: (1 - pt.y) * size.height)
@@ -135,23 +167,25 @@ struct ToneCurveEditor: View {
             }
             .frame(height: 180)
 
-            HStack(spacing: 6) {
-                Button("Reset") { resetIdentity() }
-                    .controlSize(.small)
-                Button("Invert") { invert() }
-                    .controlSize(.small)
-                Button("Stretch") { stretchToHistogram() }
-                    .controlSize(.small)
-                    .disabled(histogram.isEmpty)
-                Toggle(isOn: $logHistogram) { Text("Log Hist") }
-                    .toggleStyle(.button)
-                    .controlSize(.small)
-                Spacer()
-            }
+            if showActionButtons {
+                HStack(spacing: 6) {
+                    Button("Reset") { resetIdentity() }
+                        .controlSize(.small)
+                    Button("Invert") { invert() }
+                        .controlSize(.small)
+                    Button("Stretch") { stretchToHistogram() }
+                        .controlSize(.small)
+                        .disabled(histogram.isEmpty)
+                    Toggle(isOn: $logHistogram) { Text("Log Hist") }
+                        .toggleStyle(.button)
+                        .controlSize(.small)
+                    Spacer()
+                }
 
-            Text("click = add · drag = move · right-click / ⇧click on point = remove")
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
+                Text("click = add · drag = move · right-click / ⇧click on point = remove")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
         }
     }
 
