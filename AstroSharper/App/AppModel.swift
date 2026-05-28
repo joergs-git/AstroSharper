@@ -2080,10 +2080,12 @@ final class AppModel: ObservableObject {
         let userSharpenEnabled  = sharpen.enabled
         let userStabilizeEnabled = stabilize.enabled
         let userToneEnabled      = toneCurve.enabled
+        let userColoringEnabled  = coloring.enabled
 
         sharpen = preset.sharpen
         stabilize = preset.stabilize
         toneCurve = preset.toneCurve
+        coloring = preset.coloring
 
         // Auto-apply: roll the enable flags back to the session state.
         // Explicit pick: leave the preset's own enabled flags in place.
@@ -2091,6 +2093,7 @@ final class AppModel: ObservableObject {
             sharpen.enabled   = userSharpenEnabled
             stabilize.enabled = userStabilizeEnabled
             toneCurve.enabled = userToneEnabled
+            coloring.enabled  = userColoringEnabled
         }
 
         // Pin the user's explicit pick so subsequent file-change auto-detect
@@ -2177,6 +2180,7 @@ final class AppModel: ObservableObject {
             sharpen: sharpen,
             stabilize: stabilize,
             toneCurve: toneCurve,
+            coloring: coloring,
             luckyMode: luckyStack.mode,
             luckyKeepPercent: luckyStack.keepPercent,
             luckyMultiAPGrid: luckyStack.multiAP.grid,
@@ -2196,6 +2200,7 @@ final class AppModel: ObservableObject {
         updated.sharpen = sharpen
         updated.stabilize = stabilize
         updated.toneCurve = toneCurve
+        updated.coloring = coloring
         updated.luckyMode = luckyStack.mode
         updated.luckyKeepPercent = luckyStack.keepPercent
         updated.luckyMultiAPGrid = luckyStack.multiAP.grid

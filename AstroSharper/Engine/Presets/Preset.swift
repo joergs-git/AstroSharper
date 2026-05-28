@@ -134,6 +134,11 @@ struct Preset: Codable, Identifiable, Equatable {
     var sharpen: SharpenSettings
     var stabilize: StabilizeSettings
     var toneCurve: ToneCurveSettings
+    /// Per-channel gradation curves (Step 2b Coloring). Optional in
+    /// the Codable shape (default is identity ColoringSettings()) so
+    /// presets saved before 2026-05-28 decode unchanged — old presets
+    /// simply land with Coloring disabled at identity.
+    var coloring: ColoringSettings = ColoringSettings()
     var luckyMode: LuckyStackMode
     var luckyKeepPercent: Int
     /// Multi-AP grid edge length: 0 = off, otherwise N → N×N AP grid.
@@ -169,6 +174,7 @@ struct Preset: Codable, Identifiable, Equatable {
         sharpen: SharpenSettings,
         stabilize: StabilizeSettings = StabilizeSettings(),
         toneCurve: ToneCurveSettings = ToneCurveSettings(),
+        coloring: ColoringSettings = ColoringSettings(),
         luckyMode: LuckyStackMode = .lightspeed,
         luckyKeepPercent: Int = 25,
         luckyMultiAPGrid: Int = 0,
@@ -187,6 +193,7 @@ struct Preset: Codable, Identifiable, Equatable {
         self.sharpen = sharpen
         self.stabilize = stabilize
         self.toneCurve = toneCurve
+        self.coloring = coloring
         self.luckyMode = luckyMode
         self.luckyKeepPercent = luckyKeepPercent
         self.luckyMultiAPGrid = luckyMultiAPGrid
