@@ -1080,6 +1080,53 @@ final class AppModel: ObservableObject {
         referenceFileID = nil
     }
 
+    // MARK: - Deletion from disk (moves files to Trash, then removes from list)
+
+    /// Confirm + move-to-Trash flow for one or more files. The actual deletion
+    /// uses `NSWorkspace.recycle` which puts the items in the user's Trash —
+    /// recoverable via Finder, never a hard unlink. After a successful trash
+    /// the affected IDs are removed from the catalog via `removeFromList`.
+    ///
+    /// The confirmation alert is destructive-styled and lists the filenames so
+    /// the user can't mis-click the wrong row. Single-file vs. multi-file copy
+    /// is handled separately for natural phrasing.
+    func deleteFilesFromDisk(_ ids: Set<FileEntry.ID>) {
+        guard !ids.isEmpty else { return }
+        let entries = catalog.files.filter { ids.contains($0.id) }
+        guard !entries.isEmpty else { return }
+        let urls = entries.map(\.url)
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        if entries.count == 1 {
+            alert.messageText = "Delete \u{201C}\(entries[0].name)\u{201D}?"
+            alert.informativeText = "The file will be moved to the Trash. You can recover it from Finder."
+        } else {
+            alert.messageText = "Delete \(entries.count) files?"
+            let names = entries.prefix(5).map { "\u{2022} \($0.name)" }.joined(separator: "\n")
+            let more  = entries.count > 5 ? "\n\u{2026} and \(entries.count - 5) more" : ""
+            alert.informativeText = "The following files will be moved to the Trash. You can recover them from Finder.\n\n\(names)\(more)"
+        }
+        alert.addButton(withTitle: "Delete")   // .firstButtonReturn
+        alert.addButton(withTitle: "Cancel")   // .secondButtonReturn
+        if let destructive = alert.buttons.first { destructive.hasDestructiveAction = true }
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        NSWorkspace.shared.recycle(urls) { [weak self] _, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error {
+                    // Partial / failed trash: surface in the job status bar so
+                    // the user sees why nothing disappeared from the list.
+                    self.jobStatus = .error("Delete failed: \(error.localizedDescription)")
+                    return
+                }
+                self.removeFromList(ids)
+            }
+        }
+    }
+
     // MARK: - Deletion from list (doesn't touch disk)
 
     func removeFromList(_ ids: Set<FileEntry.ID>) {

@@ -340,6 +340,15 @@ struct FileListView: View {
             Divider()
             Button("Remove from List") { app.removeFromList(ids) }
                 .disabled(ids.isEmpty)
+            // Destructive — moves the picked files to the macOS Trash after
+            // a confirmation alert. Recoverable from Finder. Distinct from
+            // "Remove from List" above which keeps the file on disk.
+            Button(role: .destructive) {
+                app.deleteFilesFromDisk(ids)
+            } label: {
+                Text(ids.count > 1 ? "Delete \(ids.count) Files\u{2026}" : "Delete File\u{2026}")
+            }
+            .disabled(ids.isEmpty)
         }
         .onChange(of: app.selectedFileIDs) { _, newSel in
             if let last = newSel.first, app.previewFileID != last {
