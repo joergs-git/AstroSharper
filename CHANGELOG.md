@@ -5,7 +5,25 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-01
+
 ### Added
+- **SER/AVI trim · crop · export pipeline** — set Start/End trim markers on the
+  scrub bar, crop, rotate (0/90/180/270), resize (1:1 … 1:16), bake in the live
+  Sharpen + Tone + Coloring, and export the clip to **GIF, MP4, APNG** or a single
+  TIFF frame. Export runs in a draggable panel with a Duration-driven UX and a
+  post-export preview window; trim/crop/export settings persist per source SER.
+- **Coloring section — Affinity-style 4-curve gradation editor** under Tone, with
+  per-channel hue tint + channel mixer. Applied on every output path (live preview,
+  Apply, Stack, Batch, Export) and saved/restored as part of a Preset.
+- **QuickLook integration** — Finder thumbnails and spacebar playback for SER files,
+  plus AVI thumbnails, via embedded QuickLook app-extensions.
+- **Solar Dual-Zone tone curve** (`ToneCurveSettings.solarDualZone`) — fixed-LUT
+  asinh off-limb + linear disc, auto-enabled in Sun — Full-Disk and Sun — Hα
+  Prominence presets, revealing prominences without touching the stacking pipeline.
+- **Delete File context menu** (with confirmation) in the file list.
+- **RGB histogram overlay** for SER/AVI scrub frames, read from the decoded Metal
+  texture, shown in the tone-curve editor for OSC stacks.
 - **Lucky Region stacking mode** (`LuckyStackMode.region`, CLI `--mode region`)
   — AS!4-style per-tile frame selection. The image is divided into 32×32
   tiles; for each tile, the engine picks adaptively 1-10 of the kept frames
