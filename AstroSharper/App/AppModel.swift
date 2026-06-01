@@ -313,6 +313,15 @@ final class AppModel: ObservableObject {
     /// Handle to the in-flight lucky-stack engine task, so the progress
     /// overlay's Stop button can cancel it. nil when no stack is running.
     var luckyStackTask: Task<Void, Never>?
+    /// Monotonic generation counter for LuckyStack runs. Bumped on
+    /// every `runNextLuckyStackItem` call AND on `cancelLuckyStack`.
+    /// Per-run progress closures capture the value seen at start; they
+    /// no-op if a later bump has invalidated them. Prevents a stale
+    /// callback from the previously-cancelled stack writing into the
+    /// new queue at an out-of-bounds index (crash root-cause:
+    /// Array._checkSubscript_mutating trap at
+    /// runNextLuckyStackItem closure when Stop → Run again).
+    private var luckyStackGeneration: Int = 0
 
     // In-memory playback / sequence state. Populated by "Run Stabilize" so the
     // user can scrub, play and export the aligned frames before committing
@@ -1807,6 +1816,13 @@ final class AppModel: ObservableObject {
     }
 
     private func runNextLuckyStackItem(outputFolder: URL, options: LuckyStackOptions) {
+        // Each call bumps generation. The progress closure below
+        // captures `myGeneration` and bails before any queue mutation
+        // if a later run (or a cancel) has bumped the counter — so a
+        // stale callback from a previously-stopped stack can never
+        // index into the rebuilt queue.
+        luckyStackGeneration &+= 1
+        let myGeneration = luckyStackGeneration
         guard let nextIdx = luckyStack.queue.firstIndex(where: { $0.status == .pending || $0.status == .processing }) else {
             jobStatus = .done(processed: luckyStack.queue.count, outputDir: outputFolder)
             return
@@ -2028,6 +2044,15 @@ final class AppModel: ObservableObject {
             pipeline: stabilizerPipeline
         ) { [weak self] p in
             guard let self else { return }
+            // Cancellation / re-run guard: bail if this closure is from
+            // a generation that's no longer current. Pairs with the
+            // bump in cancelLuckyStack + the per-run bump above.
+            guard self.luckyStackGeneration == myGeneration else { return }
+            // Belt-and-suspenders bounds check — even with the
+            // generation guard we never want to subscript past the
+            // queue's count (e.g. if some other code path resets it
+            // mid-run without going through cancelLuckyStack).
+            guard nextIdx < self.luckyStack.queue.count else { return }
             switch p {
             case .opening:
                 self.luckyStack.queue[nextIdx].statusText = "opening"
@@ -2110,6 +2135,12 @@ final class AppModel: ObservableObject {
     /// engine emits `.cancelled`, which removes any partial output file.
     func cancelLuckyStack() {
         guard luckyStackTask != nil || !luckyStack.queue.isEmpty else { return }
+        // Bump the run-generation FIRST. Any progress callbacks already
+        // dispatched on the MainActor by the engine (which can race
+        // past `Task.cancel()` for one or two ticks) will see the
+        // mismatch and no-op instead of writing into the about-to-be-
+        // cleared queue. Critical: must happen BEFORE removeAll().
+        luckyStackGeneration &+= 1
         luckyStackTask?.cancel()
         luckyStackTask = nil
         luckyStack.queue.removeAll()
@@ -2526,21 +2557,64 @@ final class AppModel: ObservableObject {
             return
         }
         let base = entry.url.deletingPathExtension().lastPathComponent
-        let fname = String(format: "%@_frame_%04d.tif", base, frameIndex)
+        // Suffix the filename with the actually-baked sections so two
+        // exports with different toggles don't collide and the user
+        // can read "what's in this file" off the name.
+        let bakedSuffix: String = {
+            var parts: [String] = []
+            if sharpen.enabled    { parts.append("sharp") }
+            if toneCurve.enabled  { parts.append("tone") }
+            if coloring.enabled && !coloring.isIdentity { parts.append("color") }
+            return parts.isEmpty ? "_raw" : "_" + parts.joined(separator: "+")
+        }()
+        let fname = String(format: "%@_frame_%04d%@.tif", base, frameIndex, bakedSuffix)
         let outURL = Self.uniqueOutputURL(outFolder.appendingPathComponent(fname))
 
-        // Decode the frame on a background queue — same path the preview
-        // uses (SerFrameLoader → unpack → MTLTexture). Then write TIFF
-        // via the shared ImageTexture writer. Bit depth: 16-bit (matches
-        // the source SER's 8/16-bit per-pixel data after unpack to RGBA).
+        // Snapshot the live processing settings BEFORE hopping to the
+        // background queue — otherwise a UI toggle during the export
+        // would be racing with the bake.
+        let s = sharpen
+        let t = toneCurve
+        let c = coloring
+        let pipelineRef = stabilizerPipeline
+
+        // Build the tone-curve LUT on the main thread (it uses the
+        // shared MetalDevice and the curve points from the model).
+        // Matches the build logic in runLuckyStack / Apply-Tone /
+        // PreviewView.ensureLUT so the saved frame looks IDENTICAL to
+        // what the user sees in the live preview.
+        let lut: MTLTexture?
+        if t.enabled && t.solarDualZone {
+            lut = ToneCurveLUT.buildSolarDualZone(device: MetalDevice.shared.device)
+        } else if t.enabled {
+            lut = ToneCurveLUT.build(points: t.controlPoints, device: MetalDevice.shared.device)
+        } else {
+            lut = nil
+        }
+
+        // Decode the frame on a background queue, run it through the
+        // full Sharpen + Tone + Coloring pipeline (Pipeline.process
+        // honours each section's .enabled flag — so a disabled section
+        // is a pass-through), THEN write the TIFF. Without the
+        // pipeline step, the raw demosaiced RGBA was effectively
+        // monochrome because every channel held the same luminance —
+        // user complaint of "saves only monochrome" even with Coloring
+        // turned on.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
-                let tex = try SerFrameLoader.loadFrame(
+                let raw = try SerFrameLoader.loadFrame(
                     url: entry.url, frameIndex: frameIndex,
                     device: MetalDevice.shared.device
                 )
-                try ImageTexture.write(texture: tex, to: outURL, bitDepth: .uint16)
+                let processed = pipelineRef.process(
+                    input: raw,
+                    sharpen: s,
+                    toneCurve: t,
+                    toneCurveLUT: lut,
+                    coloring: c
+                )
+                try ImageTexture.write(texture: processed, to: outURL, bitDepth: .uint16)
                 DispatchQueue.main.async {
                     self.registerOutput(url: outURL, autoSwitch: true)
                     // After registerOutput + switchToSection runs, the
