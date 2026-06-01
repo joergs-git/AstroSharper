@@ -38,14 +38,6 @@ enum SerFrameLoader {
                log: log, type: .info,
                url.lastPathComponent, h.imageWidth, h.imageHeight, h.frameCount,
                h.pixelDepthPerPlane, String(describing: h.colorID), h.bytesPerFrame)
-        // 16-bit RGB SERs are out of scope for the v0 RGB unpack kernel —
-        // throw a specific error so the user-facing surface tells them
-        // why instead of producing wrong-coloured output.
-        if h.colorID.isRGB && h.bytesPerPlane != 1 {
-            os_log("SerFrameLoader: 16-bit RGB SER not yet supported (colorID=%{public}@, depth=%d)",
-                   log: log, type: .error, String(describing: h.colorID), h.pixelDepthPerPlane)
-            throw Error.unsupportedColor
-        }
         guard h.colorID.isMono || h.colorID.isBayer || h.colorID.isRGB else {
             os_log("SerFrameLoader: unsupported colorID %{public}@", log: log, type: .error,
                    String(describing: h.colorID))
@@ -70,7 +62,11 @@ enum SerFrameLoader {
 
         let isBayer = h.colorID.isBayer
         let isRGB = h.colorID.isRGB
-        let mono16 = h.bytesPerPlane == 2 && !isRGB   // RGB v0 is 8-bit only
+        // 16-bit sample size applies uniformly across mono / Bayer / RGB
+        // now that we have an unpack_rgb16_to_rgba kernel for RGB48 (the
+        // format bake-in export writes).
+        let mono16 = h.bytesPerPlane == 2 && !isRGB
+        let rgb16  = h.bytesPerPlane == 2 && isRGB
 
         // Destination — same format as ImageTexture.load output.
         let dstDesc = MTLTextureDescriptor.texture2DDescriptor(
@@ -86,11 +82,12 @@ enum SerFrameLoader {
         }
 
         // Pick the right unpack kernel based on colour layout.
-        // RGB / BGR uses an MTLBuffer source (3 bytes per pixel — Metal has
-        // no .rgb8Unorm texture format); mono / bayer use a texture source.
+        // RGB / BGR uses an MTLBuffer source (3 bytes per pixel @ 8-bit
+        // or 6 bytes per pixel @ 16-bit — Metal has no .rgb8Unorm texture
+        // format); mono / bayer use a texture source.
         let kernelName: String
         if isRGB {
-            kernelName = "unpack_rgb8_to_rgba"
+            kernelName = rgb16 ? "unpack_rgb16_to_rgba" : "unpack_rgb8_to_rgba"
         } else if isBayer {
             kernelName = mono16 ? "unpack_bayer16_to_rgba" : "unpack_bayer8_to_rgba"
         } else {
@@ -123,9 +120,12 @@ enum SerFrameLoader {
 
         // Path A — RGB / BGR: MTLBuffer source + dst texture.
         if isRGB {
-            // 3 bytes per pixel — copy the raw frame bytes into a shared
-            // MTLBuffer the kernel reads via `device const uchar*`.
-            let frameBytes = h.imageWidth * h.imageHeight * 3
+            // 3 B/px @ 8-bit or 6 B/px @ 16-bit — copy the raw frame
+            // bytes into a shared MTLBuffer the kernel reads via
+            // `device const uchar*` (8-bit) or `device const ushort*`
+            // (16-bit).
+            let bytesPerPixel = rgb16 ? 6 : 3
+            let frameBytes = h.imageWidth * h.imageHeight * bytesPerPixel
             guard let buffer = device.makeBuffer(length: frameBytes, options: [.storageModeShared]) else {
                 os_log("SerFrameLoader: RGB MTLBuffer allocation failed (%d bytes)",
                        log: log, type: .error, frameBytes)
@@ -134,9 +134,11 @@ enum SerFrameLoader {
             reader.withFrameBytes(at: frameIndex) { ptr, _ in
                 memcpy(buffer.contents(), ptr, frameBytes)
             }
-            // RgbUnpackParams: scale, flip, swapRB, width.
+            // RgbUnpackParams: scale, flip, swapRB, width. Scale picks
+            // 1/255 (8-bit) vs 1/65535 (16-bit) to land in [0, 1] regardless
+            // of source bit depth.
             var p: (Float, UInt32, UInt32, UInt32) = (
-                1.0 / 255.0,
+                rgb16 ? Float(1.0 / 65535.0) : Float(1.0 / 255.0),
                 0,
                 h.colorID == .bgr ? 1 : 0,
                 UInt32(h.imageWidth)

@@ -1205,11 +1205,18 @@ kernel void unpack_bayer8_to_rgba(
 // `scale` semantics as the mono / Bayer kernels above. `swapRB` flips
 // channel order so the same kernel handles BGR with `swapRB = 1`.
 //
-// 16-bit RGB48 captures are out of scope for this kernel — they need a
-// separate u16 buffer kernel; defer until the field shows up.
+// Two variants are provided:
+//   unpack_rgb8_to_rgba   — 8-bit per channel, 3 B/px source (RGB24 / BGR24)
+//   unpack_rgb16_to_rgba  — 16-bit per channel, 6 B/px source (RGB48 / BGR48).
+//                           Apple Silicon is little-endian so a
+//                           `device const ushort*` cast reads LE-stored
+//                           uint16 samples without any byte-swap.
+// Both share `RgbUnpackParams`; the caller sets `scale` to 1/255 for 8-bit
+// or 1/65535 for 16-bit. The 16-bit variant is what previews a
+// bake-in-exported SER (SerWriter writes the bake-in result as 16-bit RGB).
 
 struct RgbUnpackParams {
-    float scale;        // 1/255.0 (8-bit only — see kernel comment)
+    float scale;        // 1/255.0 for 8-bit, 1/65535.0 for 16-bit
     uint  flip;         // 0 = direct, 1 = 180° rotate
     uint  swapRB;       // 0 = RGB, 1 = BGR (swap red/blue channels)
     uint  width;        // pixel width — needed because device buffers
@@ -1218,6 +1225,27 @@ struct RgbUnpackParams {
 
 kernel void unpack_rgb8_to_rgba(
     device const uchar*             src [[buffer(0)]],
+    texture2d<float, access::write> dst [[texture(0)]],
+    constant RgbUnpackParams&       p   [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint W = dst.get_width();
+    uint H = dst.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+    uint flippedX = (p.flip != 0u) ? (W - 1 - gid.x) : gid.x;
+    uint flippedY = (p.flip != 0u) ? (H - 1 - gid.y) : gid.y;
+    uint base = (flippedY * p.width + flippedX) * 3u;
+    float c0 = float(src[base + 0u]) * p.scale;
+    float c1 = float(src[base + 1u]) * p.scale;
+    float c2 = float(src[base + 2u]) * p.scale;
+    float r = (p.swapRB != 0u) ? c2 : c0;
+    float g = c1;
+    float b = (p.swapRB != 0u) ? c0 : c2;
+    dst.write(float4(r, g, b, 1.0), gid);
+}
+
+kernel void unpack_rgb16_to_rgba(
+    device const ushort*            src [[buffer(0)]],
     texture2d<float, access::write> dst [[texture(0)]],
     constant RgbUnpackParams&       p   [[buffer(1)]],
     uint2 gid [[thread_position_in_grid]]

@@ -48,6 +48,13 @@ enum SerWriter {
     ///   - frameRange: closed range of source frame indices to include
     ///   - crop: source-pixel rect; nil = full frame. Snapped to even
     ///           coords on Bayer sources to preserve the colour pattern.
+    ///   - fps: playback fps to encode into the output's per-frame
+    ///          timestamp trailer (SER format spec). Most SER players
+    ///          (SER Player, PIPP, AS!4, FireCapture) derive playback
+    ///          fps from the trailer rather than from any single header
+    ///          field, so this is the right knob to control "how fast
+    ///          should this thing play back". Pass `nil` to skip the
+    ///          trailer entirely (smaller file, viewer defaults apply).
     ///   - progress: optional callback (0.0…1.0) for UI feedback
     static func write(
         source: URL,
@@ -56,6 +63,8 @@ enum SerWriter {
         crop: CGRect?,
         bakeIn: BakeInExporter.Options? = nil,
         frameStride: Int = 1,
+        targetFrameCount: Int? = nil,
+        fps: Int? = nil,
         progress: ((Double) -> Void)? = nil
     ) throws {
         guard !frameRange.isEmpty else { throw WriteError.emptyRange }
@@ -87,13 +96,33 @@ enum SerWriter {
         let frameStart = max(0, min(frameRange.lowerBound, h.frameCount - 1))
         let frameEnd   = max(frameStart, min(frameRange.upperBound, h.frameCount - 1))
         // Stride-aware index list. stride=1 → [start, start+1, …, end];
-        // stride=5 → [start, start+5, start+10, …]. The output SER's
-        // header `frameCount` reflects this subsampled count, not the
-        // raw range length.
+        // stride=5 → [start, start+5, start+10, …].
         let stride = max(1, frameStride)
-        let pickedIndices: [Int] = Swift.stride(
+        let candidates: [Int] = Swift.stride(
             from: frameStart, through: frameEnd, by: stride
         ).map { $0 }
+        guard !candidates.isEmpty else { throw WriteError.emptyRange }
+        // If the caller wants a specific output frame count
+        // (duration × fps from the export panel), evenly distribute
+        // that many picks across the stride-filtered candidates.
+        // Otherwise use every candidate (legacy stride-only behaviour).
+        let pickedIndices: [Int]
+        if let target = targetFrameCount, target > 0, target < candidates.count {
+            var picked: [Int] = []
+            picked.reserveCapacity(target)
+            if target == 1 {
+                picked.append(candidates[0])
+            } else {
+                for i in 0..<target {
+                    let t = Double(i) / Double(target - 1)
+                    let pos = Int((t * Double(candidates.count - 1)).rounded())
+                    picked.append(candidates[pos])
+                }
+            }
+            pickedIndices = picked
+        } else {
+            pickedIndices = candidates
+        }
         let count = pickedIndices.count
         guard count > 0 else { throw WriteError.emptyRange }
 
@@ -174,6 +203,7 @@ enum SerWriter {
                     progress?(Double(i + 1) / Double(count))
                 }
             }
+            try appendTimestampTrailer(handle: outFH, header: hdr, count: count, fps: fps)
             return
         }
 
@@ -214,12 +244,56 @@ enum SerWriter {
             }
         }
 
-        // Trailing timestamps (optional in SER format). Source may or
-        // may not have them. For simplicity we don't carry them across
-        // — most consumers don't require them, and accurately slicing
-        // the trailer means re-reading the source. The new SER's
-        // header reports the same dateUTC start the source did, so
-        // downstream tools still get the capture date right.
+        // Trailing per-frame timestamps. SER spec defines an optional
+        // trailer of `frameCount × Int64 LE` .NET-tick timestamps
+        // immediately after the last frame's pixel data. Most viewers
+        // (SER Player, FireCapture, AS!4) compute playback fps from
+        // this trailer rather than from any header field, so writing it
+        // is how we control "how fast does this thing play back".
+        try appendTimestampTrailer(handle: outFH, header: hdr, count: count, fps: fps)
+    }
+
+    /// Append an N×Int64 LE timestamp trailer to the just-written file.
+    /// Frame 0 timestamp = source header's dateTimeUTC (offset 162);
+    /// subsequent frames are equally spaced at `1/fps` seconds apart.
+    /// Pass `fps == nil` to skip the trailer entirely.
+    private static func appendTimestampTrailer(handle: FileHandle,
+                                               header: Data,
+                                               count: Int,
+                                               fps: Int?) throws {
+        guard let fps = fps, fps > 0, count > 0 else { return }
+        // .NET ticks = 100-ns intervals. Source dateTimeUTC lives at
+        // offset 162 (Int64 LE); if missing/zero, fall back to "now" in
+        // ticks so the timestamps are at least monotonic + plausible.
+        let startTicks = readInt64LE(header, offset: 162)
+        let baseTicks: Int64
+        if startTicks > 0 {
+            baseTicks = startTicks
+        } else {
+            // .NET epoch is 0001-01-01 UTC; Unix epoch offset is
+            // 62_135_596_800 seconds. ticks = (unix + offset) * 10^7.
+            let unixSecs = Date().timeIntervalSince1970
+            baseTicks = Int64((unixSecs + 62_135_596_800) * 10_000_000)
+        }
+        let ticksPerFrame = Int64(10_000_000 / fps)   // 10^7 = 1 second
+        var trailer = Data(capacity: count * 8)
+        for i in 0..<count {
+            var ts = (baseTicks + Int64(i) * ticksPerFrame).littleEndian
+            withUnsafeBytes(of: &ts) { raw in
+                trailer.append(contentsOf: raw)
+            }
+        }
+        try handle.write(contentsOf: trailer)
+    }
+
+    @inline(__always)
+    private static func readInt64LE(_ data: Data, offset: Int) -> Int64 {
+        guard data.count >= offset + 8 else { return 0 }
+        var v: Int64 = 0
+        withUnsafeMutableBytes(of: &v) { dst in
+            data.copyBytes(to: dst, from: offset..<(offset + 8))
+        }
+        return Int64(littleEndian: v)
     }
 
     @inline(__always)

@@ -14,6 +14,7 @@
 //             keep-or-discard decision.
 import SwiftUI
 import AppKit
+import AVKit
 import Metal
 import UniformTypeIdentifiers
 
@@ -23,6 +24,11 @@ struct ExportPreviewWindow: View {
     /// SER-only: the first frame rendered to an NSImage. nil while
     /// loading or for GIF / unknown types.
     @State private var serFrameImage: NSImage? = nil
+    /// SER-only: surfaced error from SerFrameLoader. Without this, a
+    /// loader failure (e.g. an unsupported colour ID) just leaves the
+    /// "Decoding first frame…" ProgressView spinning forever — actively
+    /// misleading.
+    @State private var serLoadError: String? = nil
     @State private var fileSize: Int64 = 0
 
     var body: some View {
@@ -48,14 +54,35 @@ struct ExportPreviewWindow: View {
             ZStack {
                 Color.black
                 if let url = app.exportPreviewURL {
-                    if url.pathExtension.lowercased() == "gif" {
+                    if url.pathExtension.lowercased() == "gif"
+                        || url.pathExtension.lowercased() == "png" {
+                        // NSImageView with animates=true handles both
+                        // GIF and APNG natively — for a static PNG it
+                        // just shows the single image. So the same
+                        // wrapper covers both export formats.
                         AnimatedGIFView(url: url)
+                    } else if url.pathExtension.lowercased() == "mp4" || url.pathExtension.lowercased() == "mov" {
+                        Mp4PlayerView(url: url)
                     } else if url.pathExtension.lowercased() == "ser" {
                         if let img = serFrameImage {
                             Image(nsImage: img)
                                 .resizable()
                                 .interpolation(.none)
                                 .aspectRatio(contentMode: .fit)
+                        } else if let err = serLoadError {
+                            VStack(spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 28))
+                                    .foregroundColor(.orange)
+                                Text("Could not decode first frame")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.white)
+                                Text(err)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 24)
+                            }
                         } else {
                             ProgressView("Decoding first frame…")
                                 .foregroundColor(.white)
@@ -115,6 +142,7 @@ struct ExportPreviewWindow: View {
     private func cleanupAndClose() {
         app.exportPreviewURL = nil
         serFrameImage = nil
+        serLoadError = nil
         dismissWindow(id: "export-preview")
     }
 
@@ -122,6 +150,7 @@ struct ExportPreviewWindow: View {
 
     private func loadPreview() {
         serFrameImage = nil
+        serLoadError = nil
         guard let url = app.exportPreviewURL else { return }
         // File size for the metadata line.
         if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
@@ -130,14 +159,26 @@ struct ExportPreviewWindow: View {
         }
         // SER first frame on a background queue — same SerFrameLoader
         // the main preview uses, so format / colour ID / Bayer pattern
-        // handling is identical.
+        // handling is identical. Errors are surfaced into serLoadError
+        // so a bad output doesn't leave the user staring at an endless
+        // "Decoding first frame…" spinner.
         guard url.pathExtension.lowercased() == "ser" else { return }
         let device = MetalDevice.shared.device
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let tex = try? SerFrameLoader.loadFrame(url: url, frameIndex: 0, device: device),
-                  let img = nsImage(fromMTLTexture: tex)
-            else { return }
-            DispatchQueue.main.async { self.serFrameImage = img }
+            do {
+                let tex = try SerFrameLoader.loadFrame(url: url, frameIndex: 0, device: device)
+                guard let img = nsImage(fromMTLTexture: tex) else {
+                    DispatchQueue.main.async {
+                        self.serLoadError = "Frame decoded but image conversion failed."
+                    }
+                    return
+                }
+                DispatchQueue.main.async { self.serFrameImage = img }
+            } catch {
+                DispatchQueue.main.async {
+                    self.serLoadError = String(describing: error)
+                }
+            }
         }
     }
 
@@ -145,10 +186,13 @@ struct ExportPreviewWindow: View {
 
     private var actionHint: String {
         guard let url = app.exportPreviewURL else { return "" }
-        if url.pathExtension.lowercased() == "gif" {
-            return "Animated GIF · loops continuously"
+        switch url.pathExtension.lowercased() {
+        case "gif":         return "Animated GIF · loops continuously"
+        case "png":         return "APNG · 24-bit lossless, loops continuously"
+        case "mp4", "mov":  return "Video · controls below the frame"
+        case "ser":         return "SER · frame 0 shown"
+        default:            return ""
         }
-        return "SER · frame 0 shown"
     }
 
     private var metadataLine: String {
@@ -161,6 +205,35 @@ struct ExportPreviewWindow: View {
         if b < 1024 * 1024 { return String(format: "%.1f KB", Double(b) / 1024) }
         if b < 1024 * 1024 * 1024 { return String(format: "%.1f MB", Double(b) / (1024.0 * 1024.0)) }
         return String(format: "%.2f GB", Double(b) / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+// MARK: - MP4 / MOV preview (AVPlayerView wrapped)
+
+/// AVPlayerView gives us play / pause / scrub / volume out of the box —
+/// perfect for the export preview where the user needs to skim the
+/// result before Keep / Discard. Auto-plays once on appear so the user
+/// sees the result without an extra click.
+private struct Mp4PlayerView: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let v = AVPlayerView()
+        v.controlsStyle = .inline
+        v.showsFullScreenToggleButton = false
+        let player = AVPlayer(url: url)
+        v.player = player
+        player.play()
+        return v
+    }
+
+    func updateNSView(_ v: AVPlayerView, context: Context) {
+        if v.player?.currentItem == nil ||
+           (v.player?.currentItem?.asset as? AVURLAsset)?.url != url {
+            let player = AVPlayer(url: url)
+            v.player = player
+            player.play()
+        }
     }
 }
 

@@ -268,12 +268,24 @@ final class AppModel: ObservableObject {
     @Published var serExportBakeIn: Bool = false
     @Published var serExportResizeDivisor: Int = 1
     @Published var serExportRotationDegrees: Int = 0
-    /// Frame stride: 1 = every frame, 2 = every other, 5 = every 5th.
-    /// Applied to BOTH .ser and .gif exports. The cheap lever for
-    /// shrinking output file size when the user doesn't care about
-    /// every single source frame (e.g. a 1000-frame SER → 200-frame
-    /// SER at stride 5, same trim range, ⅕ the bytes).
+    /// Frame stride: deprecated as a user-facing knob. The export
+    /// panel now picks frames evenly from the trim range using
+    /// `targetFrameCount = duration × fps`. Kept on the model so the
+    /// writer APIs and any external preset payloads remain compatible;
+    /// the run*Export dispatch always passes stride=1.
     @Published var serExportFrameStride: Int = 1
+    /// Output playback duration in seconds. Drives `targetFrameCount`
+    /// together with `serExportFPS`. User picks duration + smoothness
+    /// (fps); the panel derives how many frames to write (evenly from
+    /// the trim range), so the user never has to think in
+    /// "frames / stride" terms. Default 5 s = good showcase clip
+    /// length without being too tiny.
+    @Published var serExportDurationSeconds: Double = 5.0
+    /// Override for the source SER's capture FPS. Used exclusively by
+    /// the "Match source duration" button (no other math depends on
+    /// it). nil = trust auto-detection from the SER timestamp trailer;
+    /// fallback to 30.0 if undetectable.
+    @Published var serExportSourceFPSOverride: Double? = nil
     /// Remembers the last-viewed frame index per SER URL so switching
     /// section away and back (Inputs → Outputs → Inputs) restores the
     /// scrubber instead of resetting to frame 0. Stored only in-memory
