@@ -37,7 +37,7 @@ struct HowToView: View {
                     StepCard(
                         number: 2,
                         title: "Flip AutoNuke ON, hit Run",
-                        detail: "Open the Lucky Stack section, toggle AutoNuke. The engine then picks AP grid + patchHalf + multi-AP yes/no + auto-PSF σ + keep-% per data — all manual sliders grey out so there are no conflicting settings. Bake-in and Auto-tone stay independent (output-style choices). The Saved-file pipeline summary line under the toggles tells you exactly which paths will modify the saved TIFF."
+                        detail: "Open the Lucky Stack section, toggle AutoNuke. The engine then picks AP grid + patchHalf + multi-AP yes/no + auto-PSF σ + keep-% per data — all manual sliders grey out so there are no conflicting settings. Bake-in and Auto-tone stay independent (output-style choices). The Saved-file pipeline summary line under the toggles tells you exactly which paths will modify the saved TIFF. Note: for SOLAR surface (granulation / sunspots) the dedicated Sun presets beat AutoNuke — they run with multi-AP OFF + sigma-clip, because per-cell alignment smears low-contrast solar surface and warps the limb."
                     )
                     StepCard(
                         number: 3,
@@ -111,6 +111,42 @@ struct HowToView: View {
                               text: "Double-click = reset to fit + center.")
                     BulletRow(icon: "command", color: .purple,
                               text: "⌘+ zoom in 25% · ⌘- zoom out 25% · ⌘0 fit · ⌘1 1:1 · ⌘2 1:2 · ⌘3 1:4 · ⌘4 1:8.")
+                    BulletRow(icon: "rectangle.split.2x1", color: .cyan,
+                              text: "B = toggle Compare side panel. Top thumbnail = the current displayed file (no manipulations); bottom = the source SER's first frame (populated when Lucky Stack runs). Default 2× zoom, linked pinch + drag, double-click any thumb to reset.")
+                    BulletRow(icon: "rectangle.stack.fill", color: .indigo,
+                              text: "SER scrub bar: drag the slider for live frame-by-frame movement (updates as you drag, not just on release), ◀ ▶ step one frame, P play/pause. The full pipeline + auto-range re-run once you stop, so fast scanning stays instant even on multi-GB captures.")
+                    BulletRow(icon: "info.circle", color: .gray,
+                              text: "i = info HUD (off by default — no longer covers the image on open). C = highlight clipped pixels red. A = display auto-range.")
+
+                    Divider().padding(.vertical, 4)
+
+                    Text("Resetting & comparing")
+                        .font(.system(size: 14, weight: .heavy))
+                    BulletRow(icon: "arrow.counterclockwise.circle", color: .orange,
+                              text: "Step 1 + Step 2 each have a 'Reset to defaults' button at the bottom of the section. Restores every control to factory and turns the section OFF — for when experimental tweaks drifted beyond recovery.")
+                    BulletRow(icon: "scribble.variable", color: .yellow,
+                              text: "After Stabilize, the HUD shows a Drift sparkline + peak shift in pixels — quick read on how much atmospheric motion the registration absorbed.")
+                    BulletRow(icon: "circle.dashed.inset.filled", color: .teal,
+                              text: "Planet ghosting / double contour after a long capture (planet drifted)? Enable 'Drift correction (planet wandered)' in Lucky Stack — it aligns by the disc centroid. Caveat: it needs a disc that stands out; a low-contrast / bright-sky capture is data-limited (fix with more exposure, darker sky, or shorter sub-captures).")
+                    BulletRow(icon: "arrow.up.circle.fill", color: .orange,
+                              text: "Upload still in progress? When a SharpCap capture (or any tool) is still writing to disk / NAS, the Inputs row dims and shows an orange upload arrow; the size column ticks up live every 5 s. Wait for the orange to disappear before stacking — that's the 'fully written' signal.")
+                    BulletRow(icon: "scope", color: .pink,
+                              text: "Median HFR (half-flux radius) joins the Jitter row in the HUD after a Calculate Video Quality scan. Lower = sharper / more concentrated PSF.")
+
+                    Divider().padding(.vertical, 4)
+
+                    Text("What's different per subject (Sun vs Moon vs Jupiter)")
+                        .font(.system(size: 14, weight: .heavy))
+                    BulletRow(icon: "wand.and.stars", color: .purple,
+                              text: "You don't have to memorise this — the top-bar Target picker auto-detects Sun/Moon/Jupiter/Saturn/Mars from the filename and applies the matching preset. AutoNuke ON then picks AP grid / patch / keep-% / AutoPSF per file. The notes below explain WHY each preset differs.")
+                    BulletRow(icon: "sun.max.fill", color: .yellow,
+                              text: "SUN. Granulation: Scientific + σ-clip, keep 20%, multi-AP OFF (low-contrast surface — multi-AP smears it, warps the limb). Full Disk: Lightspeed, keep 50%, AP 8×8 / patch 32. Hα Prominence: Scientific + σ-clip, keep 40%, multi-AP OFF (off-limb detail + variable background = σ-clip mandatory).")
+                    BulletRow(icon: "moon.fill", color: .gray,
+                              text: "MOON. High Detail (terminator / craters): Scientific, keep 25%, AP 10×10 / patch 24 (sharp 2D features = multi-AP wins). Wide Field (whole disc): Lightspeed, keep 50%, AP 8×8 / patch 32 (large stable subject = more frames OK, gentler grid).")
+                    BulletRow(icon: "globe.europe.africa.fill", color: .orange,
+                              text: "JUPITER. Standard: Scientific, keep 25%, AP 10×10 / patch 24 (small + seeing-limited = strict frame selection, bands give 2D contrast for multi-AP). Belt Detail: keep 20%, patch 16 (smaller patch for fine band structure).")
+                    BulletRow(icon: "list.bullet.rectangle", color: .teal,
+                              text: "RULES OF THUMB. Multi-AP YES if surface has dense high-contrast 2D features (craters, bands, rings) — NO for smooth low-contrast subjects (solar surface, Hα prominences). Keep % LOW for seeing-sensitive tiny subjects (planets 20–25%), HIGH for robust large subjects (full Moon / Sun 40–50%). Smaller PATCH = finer local detail; larger PATCH = broader structures. Mode mostly converges on clean data — Scientific only wins on hard data (drift, varying seeing, low SNR).")
 
                     Divider().padding(.vertical, 4)
 

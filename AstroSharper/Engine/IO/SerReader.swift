@@ -109,6 +109,30 @@ final class SerReader {
         guard data.count >= 178 else { throw SerReaderError.tooSmall }
         self.header = try Self.parseHeader(data)
         guard header.bytesPerFrame > 0 else { throw SerReaderError.invalidHeader }
+
+        // Diagnostic: if the OS mapped fewer bytes than the file really
+        // has, large-file frame access silently runs short — surfaces as
+        // a "dead zone" of frozen frames near the end of a multi-GB SER.
+        // Log it so the cause (header overcount vs mmap truncation) is
+        // distinguishable.
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let realSize = (attrs[.size] as? NSNumber)?.intValue,
+           realSize != data.count {
+            NSLog("SerReader: mapped %d bytes but file is %d on disk (%@) — frame access clamped to mapped size",
+                  data.count, realSize, url.lastPathComponent)
+        }
+    }
+
+    /// Frames actually present in the mapped data. Clamps a header
+    /// `frameCount` that overstates a truncated / aborted capture (or a
+    /// short mmap) so callers — scrub UI, quality scan, lucky-stack frame
+    /// loop — never index into bytes that aren't there (which would
+    /// freeze the scrubber or trip `withFrameBytes`'s precondition).
+    /// Equals `header.frameCount` for a complete file.
+    var readableFrameCount: Int {
+        let avail = data.count - frameDataOffset
+        guard avail > 0, header.bytesPerFrame > 0 else { return 0 }
+        return Swift.min(header.frameCount, avail / header.bytesPerFrame)
     }
 
     // MARK: - Frame access
@@ -120,6 +144,65 @@ final class SerReader {
     /// data is shorter than the header claims (e.g. a SER copy interrupted
     /// mid-transfer). Without this check we'd return a pointer into invalid
     /// memory. >4 GB SERs are fine — see file-level `>4 GB SER safety` note.
+    /// True when frame `index` is fully present in the mapped data.
+    /// Guards against a header `frameCount` that overstates a truncated
+    /// or still-being-written file (common with live captures + the
+    /// folder-watch auto-stack path). Cheap — no read, just offset math.
+    /// Speculative callers (playback prefetch / manual scrub) MUST check
+    /// this before `withFrameBytes` so a short file fails soft instead of
+    /// tripping the hard `precondition` and crashing the whole app —
+    /// `precondition` is fatal and not catchable by the loaders' `try?`.
+    func canReadFrame(at index: Int) -> Bool {
+        guard index >= 0, index < header.frameCount else { return false }
+        let bpf = header.bytesPerFrame
+        let offset = frameDataOffset + index * bpf
+        return offset >= 0 && offset + bpf <= data.count
+    }
+
+    /// Derived capture FPS from the SER's optional per-frame timestamp
+    /// trailer. Returns nil if the trailer is absent (most capture
+    /// tools do populate it — FireCapture, SharpCap, ASIStudio — but
+    /// some don't) or if it's degenerate (single frame, zero span).
+    ///
+    /// SER timestamp trailer layout: at offset `178 + N × bytesPerFrame`
+    /// there are N × Int64 .NET ticks (100 ns) values, little-endian.
+    /// fps = (N - 1) / ((last - first) / 10^7 seconds).
+    var capturedFPS: Double? {
+        let n = readableFrameCount
+        guard n >= 2 else { return nil }
+        let trailerStart = frameDataOffset + n * header.bytesPerFrame
+        let trailerSize = n * MemoryLayout<Int64>.size
+        guard data.count >= trailerStart + trailerSize else { return nil }
+        let firstTs = readInt64LE(at: trailerStart)
+        let lastTs = readInt64LE(at: trailerStart + (n - 1) * MemoryLayout<Int64>.size)
+        guard lastTs > firstTs else { return nil }
+        let ticksPerSecond: Double = 10_000_000  // .NET 100 ns ticks
+        let seconds = Double(lastTs - firstTs) / ticksPerSecond
+        guard seconds > 0 else { return nil }
+        let fps = Double(n - 1) / seconds
+        // Sanity-clamp to plausible astrophotography rates. A bogus
+        // trailer (zero-filled, wrong endianness, …) shouldn't drive
+        // a nonsense UI number.
+        guard fps.isFinite, fps >= 0.5, fps <= 1000 else { return nil }
+        return fps
+    }
+
+    /// Read a little-endian Int64 from the mapped data at `offset`.
+    private func readInt64LE(at offset: Int) -> Int64 {
+        return data.withUnsafeBytes { raw -> Int64 in
+            guard let base = raw.baseAddress else { return 0 }
+            let p = base.advanced(by: offset)
+            // Unaligned load — Apple Silicon allows it but go through
+            // a byte-wise reassembly to stay strictly conformant.
+            var v: Int64 = 0
+            for i in 0..<8 {
+                let byte = p.advanced(by: i).load(as: UInt8.self)
+                v |= Int64(byte) << (i * 8)
+            }
+            return v
+        }
+    }
+
     func withFrameBytes<R>(at index: Int, _ body: (UnsafePointer<UInt8>, Int) throws -> R) rethrows -> R {
         precondition(index >= 0 && index < header.frameCount, "frame index out of range")
         let bpf = header.bytesPerFrame

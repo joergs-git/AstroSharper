@@ -23,7 +23,7 @@ struct PresetMenu: View {
                     Section(header: Label(target.rawValue, systemImage: target.icon)) {
                         ForEach(group) { p in
                             Button {
-                                app.applyPreset(p)
+                                app.applyPreset(p, userInitiated: true)
                             } label: {
                                 HStack {
                                     if p.id == presets.activeID { Image(systemName: "checkmark") }
@@ -40,7 +40,7 @@ struct PresetMenu: View {
                 Section("My Presets") {
                     ForEach(presets.user) { p in
                         Button {
-                            app.applyPreset(p)
+                            app.applyPreset(p, userInitiated: true)
                         } label: {
                             HStack {
                                 if p.id == presets.activeID { Image(systemName: "checkmark") }

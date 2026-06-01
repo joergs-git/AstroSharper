@@ -35,6 +35,15 @@ protocol SourceReader: AnyObject {
     /// by one (handled inside AviReader).
     var frameCount: Int { get }
 
+    /// Frames ACTUALLY present in the source data — clamps a declared
+    /// `frameCount` that overstates a truncated / aborted capture (common
+    /// on multi-GB SERs whose header claims more frames than landed).
+    /// Frame-iterating consumers (lucky-stack grading + accumulation,
+    /// scrub) MUST loop over this, not `frameCount`, or they index past
+    /// the mapped bytes and trip `withFrameBytes`'s precondition. Defaults
+    /// to `frameCount` for sources that can't over-report (AVI / FITS).
+    var readableFrameCount: Int { get }
+
     /// Bits per pixel plane reported by the source (8 or 16 typically).
     /// AVI sources are reported as 8-bit since AVFoundation decodes to
     /// 8-bit RGB before we touch them.
@@ -62,6 +71,12 @@ protocol SourceReader: AnyObject {
     /// CGImage → texture. Both produce textures with `.shaderRead`
     /// usage; callers handle their own write-target allocation.
     func loadFrame(at index: Int, device: MTLDevice) throws -> MTLTexture
+}
+
+extension SourceReader {
+    /// Sources that can't over-report (AVI / FITS) use the declared
+    /// count. `SerReader` overrides this with a data-length clamp.
+    var readableFrameCount: Int { frameCount }
 }
 
 /// Errors that surface when the factory can't open a URL.

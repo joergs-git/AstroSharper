@@ -19,7 +19,25 @@ import SwiftUI
 struct ToneCurveEditor: View {
     @Binding var points: [CGPoint]
     let histogram: [UInt32]
+    /// Optional per-channel histograms — when `rgbHistogram.isColor` is
+    /// true, the editor renders three coloured overlays (R / G / B)
+    /// instead of the single luma curve. For mono captures (R=G=B)
+    /// the RGB overlay collapses and only luma is drawn.
+    var rgbHistogram: ChannelHistogram = ChannelHistogram(r: [], g: [], b: [])
     @Binding var logHistogram: Bool
+    /// Additional curves drawn at lower opacity beneath the active
+    /// `points` curve. Used by the Coloring section to show the three
+    /// inactive channels (R/G/B/Master) so the user can see all four
+    /// curves at once but only edit the picked one — Affinity Photo
+    /// style. Empty for the default single-curve use.
+    var overlayCurves: [(color: Color, points: [CGPoint])] = []
+    /// Color of the active editable curve. Defaults to accentColor;
+    /// the Coloring section passes the picked channel's colour.
+    var curveColor: Color = .accentColor
+    /// When false, the bottom button row (Reset / Invert / Stretch /
+    /// Log Hist) is hidden — Coloring renders its own action row
+    /// outside the editor so the buttons can also drive Master/R/G/B.
+    var showActionButtons: Bool = true
 
     @State private var dragTarget: DragTarget = .none
     /// Generic hit radius for interior nodes.
@@ -38,8 +56,20 @@ struct ToneCurveEditor: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.28))
 
-                    // Histogram underneath curve.
-                    if !histogram.isEmpty {
+                    // Histogram underneath curve. Always prefer the
+                    // RGB overlay when per-channel data is available
+                    // (any loaded TIFF / PNG / JPEG): on colour images
+                    // the three curves separate so per-channel
+                    // imbalance is obvious; on mono images they
+                    // overlap exactly and read as a near-white blend
+                    // — still informative, no extra UI toggle needed.
+                    // Falls back to single luma only when RGB couldn't
+                    // be computed (SER / AVI scrub frames).
+                    if !rgbHistogram.r.isEmpty {
+                        HistogramBarsRGB(histogram: rgbHistogram, log: logHistogram)
+                            .frame(width: size.width, height: size.height)
+                            .allowsHitTesting(false)
+                    } else if !histogram.isEmpty {
                         HistogramBars(histogram: histogram, log: logHistogram)
                             .frame(width: size.width, height: size.height)
                             .allowsHitTesting(false)
@@ -63,7 +93,26 @@ struct ToneCurveEditor: View {
                     }
                     .stroke(Color.white.opacity(0.15), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
 
-                    // The curve itself
+                    // Background overlay curves (other channels in
+                    // Affinity-style multi-curve mode). Drawn first so
+                    // the active curve sits visually on top. 50%
+                    // opacity to keep the active one clearly readable.
+                    ForEach(Array(overlayCurves.enumerated()), id: \.offset) { _, c in
+                        Path { p in
+                            let sorted = c.points.sorted { $0.x < $1.x }
+                            let samples = 128
+                            for i in 0...samples {
+                                let t = CGFloat(i) / CGFloat(samples)
+                                let y = CGFloat(sampleCurve(t: Double(t), points: sorted))
+                                let pt = CGPoint(x: t * size.width, y: (1 - y) * size.height)
+                                if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+                            }
+                        }
+                        .stroke(c.color.opacity(0.55), lineWidth: 1.2)
+                        .allowsHitTesting(false)
+                    }
+
+                    // The active curve itself
                     Path { p in
                         let sorted = points.sorted { $0.x < $1.x }
                         let samples = 128
@@ -74,7 +123,7 @@ struct ToneCurveEditor: View {
                             if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
                         }
                     }
-                    .stroke(Color.accentColor, lineWidth: 1.5)
+                    .stroke(curveColor, lineWidth: 1.5)
 
                     // Control point dots (cosmetic — gesture handling lives on the overlay).
                     ForEach(Array(points.enumerated()), id: \.offset) { idx, pt in
@@ -85,11 +134,11 @@ struct ToneCurveEditor: View {
                             // Halo to make endpoints visually larger and clearly grabable.
                             if isEndpoint {
                                 Circle()
-                                    .stroke(Color.accentColor.opacity(0.30), lineWidth: 2)
+                                    .stroke(curveColor.opacity(0.30), lineWidth: 2)
                                     .frame(width: dotSize + 8, height: dotSize + 8)
                             }
                             Circle()
-                                .fill(isDragging ? Color.white : Color.accentColor)
+                                .fill(isDragging ? Color.white : curveColor)
                                 .frame(width: dotSize, height: dotSize)
                         }
                         .position(x: pt.x * size.width, y: (1 - pt.y) * size.height)
@@ -118,23 +167,25 @@ struct ToneCurveEditor: View {
             }
             .frame(height: 180)
 
-            HStack(spacing: 6) {
-                Button("Reset") { resetIdentity() }
-                    .controlSize(.small)
-                Button("Invert") { invert() }
-                    .controlSize(.small)
-                Button("Stretch") { stretchToHistogram() }
-                    .controlSize(.small)
-                    .disabled(histogram.isEmpty)
-                Toggle(isOn: $logHistogram) { Text("Log Hist") }
-                    .toggleStyle(.button)
-                    .controlSize(.small)
-                Spacer()
-            }
+            if showActionButtons {
+                HStack(spacing: 6) {
+                    Button("Reset") { resetIdentity() }
+                        .controlSize(.small)
+                    Button("Invert") { invert() }
+                        .controlSize(.small)
+                    Button("Stretch") { stretchToHistogram() }
+                        .controlSize(.small)
+                        .disabled(histogram.isEmpty)
+                    Toggle(isOn: $logHistogram) { Text("Log Hist") }
+                        .toggleStyle(.button)
+                        .controlSize(.small)
+                    Spacer()
+                }
 
-            Text("click = add · drag = move · right-click / ⇧click on point = remove")
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
+                Text("click = add · drag = move · right-click / ⇧click on point = remove")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
         }
     }
 
@@ -312,6 +363,51 @@ private struct HistogramBars: View {
             }
             .stroke(Color.white.opacity(0.25), lineWidth: 1)
         }
+    }
+}
+
+/// Three colour overlays for OSC stacks. Each channel is normalised
+/// against the SAME max so the relative heights mean something —
+/// catches green-excess Bayer bias at a glance. `screen`-blended so
+/// overlapping bars (where R=G=B at the same height) read as white
+/// instead of a muddy late-coloured smear.
+private struct HistogramBarsRGB: View {
+    let histogram: ChannelHistogram
+    let log: Bool
+
+    private func transform(_ vals: [UInt32]) -> [Double] {
+        log ? vals.map { Foundation.log(1.0 + Double($0)) } : vals.map(Double.init)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = geo.size
+            let r = transform(histogram.r)
+            let g = transform(histogram.g)
+            let b = transform(histogram.b)
+            // Shared max so the three channels stay comparable.
+            let maxV = max(r.max() ?? 0, g.max() ?? 0, b.max() ?? 0, 1.0)
+            ZStack {
+                bars(r, maxV: maxV, size: size, color: Color(red: 1.0, green: 0.25, blue: 0.25))
+                bars(g, maxV: maxV, size: size, color: Color(red: 0.30, green: 0.90, blue: 0.35))
+                bars(b, maxV: maxV, size: size, color: Color(red: 0.35, green: 0.55, blue: 1.00))
+            }
+            .blendMode(.screen)
+        }
+    }
+
+    private func bars(_ vals: [Double], maxV: Double, size: CGSize, color: Color) -> some View {
+        Path { p in
+            guard !vals.isEmpty else { return }
+            let barW = size.width / CGFloat(vals.count)
+            for (i, v) in vals.enumerated() {
+                let h = CGFloat(v / maxV) * size.height
+                let x = CGFloat(i) * barW
+                p.move(to: CGPoint(x: x, y: size.height))
+                p.addLine(to: CGPoint(x: x, y: size.height - h))
+            }
+        }
+        .stroke(color.opacity(0.55), lineWidth: 1)
     }
 }
 

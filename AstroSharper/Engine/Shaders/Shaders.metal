@@ -27,6 +27,14 @@ struct DisplayUniforms {
     float  autoGamma;
     float  displayGain;
     uint   autoRangeOn;
+    // Highlight-clipped overlay (LSW 8.8 parity). When `clipOverlayOn`
+    // is 1, pixels whose POST-display-chain luma sits at or above
+    // `clipThreshold` (default 0.995) get tinted toward solid red so
+    // the user can see at a glance which features are blowing out
+    // after sharpen / deconv / tone-curve. Pure diagnostic — no
+    // pipeline impact, no file impact. Default off.
+    uint   clipOverlayOn;
+    float  clipThreshold;
 };
 
 struct DisplayVertexOut {
@@ -117,7 +125,120 @@ fragment float4 display_fragment(
     } else {
         col.rgb = clamp(col.rgb, 0.0, 1.0);
     }
+    // Clipping overlay (after the entire display chain so the user
+    // sees exactly the pixels they would also see clipped on the
+    // saved file at default tone). Any channel at/above the threshold
+    // → tint toward solid red. Threshold defaults to 0.995 — i.e. the
+    // top 0.5% of the encoded range — to match LSW 8.8 semantics.
+    if (u.clipOverlayOn != 0u) {
+        bool clipped = (col.r >= u.clipThreshold) ||
+                       (col.g >= u.clipThreshold) ||
+                       (col.b >= u.clipThreshold);
+        if (clipped) {
+            col.rgb = float3(1.0, 0.0, 0.0);
+        }
+    }
     return col;
+}
+
+// MARK: - Purple-fringe suppression (LSW 7.1 parity)
+//
+// Mixes pixels in the purple hue band (centred at 290°, ±30° width)
+// toward their per-pixel Rec. 709 luma. Pixels outside the band pass
+// through unchanged. Pure-Swift reference implementation lives in
+// PurpleFringe.swift — keep the math in sync.
+
+struct PurpleFringeParams {
+    float strength;     // 0 = no change, 1 = full desaturation
+};
+
+inline float purple_hue_degrees(float r, float g, float b) {
+    float cmax = max(r, max(g, b));
+    float cmin = min(r, min(g, b));
+    float delta = cmax - cmin;
+    if (delta < 1e-6) return 0.0;
+    float h;
+    if (cmax == r) {
+        h = 60.0 * fmod((g - b) / delta, 6.0);
+    } else if (cmax == g) {
+        h = 60.0 * ((b - r) / delta + 2.0);
+    } else {
+        h = 60.0 * ((r - g) / delta + 4.0);
+    }
+    return h < 0.0 ? h + 360.0 : h;
+}
+
+inline float purple_saturation(float r, float g, float b) {
+    float cmax = max(r, max(g, b));
+    if (cmax < 1e-6) return 0.0;
+    float cmin = min(r, min(g, b));
+    return (cmax - cmin) / cmax;
+}
+
+kernel void reduce_purple_fringe(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    constant PurpleFringeParams& params [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    float r = c.r, g = c.g, b = c.b;
+    float s = purple_saturation(r, g, b);
+    if (s < 0.05) { output.write(c, gid); return; }
+    float h = purple_hue_degrees(r, g, b);
+    float d = abs(h - 290.0);
+    if (d > 180.0) d = 360.0 - d;
+    const float bandwidth = 30.0;
+    if (d > bandwidth) { output.write(c, gid); return; }
+    float t = cos((d / bandwidth) * 3.14159265 / 2.0);
+    float f = params.strength * t * t;
+    float luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    float3 mixed = mix(float3(r, g, b), float3(luma), f);
+    output.write(float4(mixed, c.a), gid);
+}
+
+// MARK: - Pre-sharpen highlight suppression (LSW 3.1.3 parity)
+//
+// Soft-clips the luma of bright pixels via a hue-preserving roll-off so
+// the downstream sharpening / deconv stage cannot push them past 1.0
+// and create the polar / limb overexposure the user observed on
+// stacked Jupiter output (see tasks/todo.md "Upper-half over-exposure").
+//
+// Curve:
+//   f(L) = L                                       if L ≤ knee
+//   f(L) = knee + (1 - knee) · tanh((L - knee) / (1 - knee))    if L > knee
+//
+// f'(knee-) = 1 = f'(knee+), so the curve is C¹-continuous at the knee
+// and below the knee it's a strict identity (nothing dimmer than the
+// knee is ever touched). For knee=0.85: f(1.0) ≈ 0.964, f(0.95) ≈ 0.937.
+//
+// To preserve hue we scale RGB by f(L)/L rather than per-channel
+// clipping. Pixels with L < 1e-4 are passed through (avoids div-by-0
+// on black sky).
+
+struct HighlightSuppressParams {
+    float knee;
+};
+
+kernel void suppress_highlights(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    constant HighlightSuppressParams& params [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    const float L = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    const float knee = params.knee;
+    if (L <= knee || L < 1e-4) {
+        output.write(c, gid);
+        return;
+    }
+    const float head = 1.0 - knee;
+    const float Lnew = knee + head * tanh((L - knee) / head);
+    const float scale = Lnew / L;
+    output.write(float4(c.rgb * scale, c.a), gid);
 }
 
 // MARK: - Unsharp mask
@@ -128,6 +249,90 @@ struct UnsharpParams {
     float adaptiveMax;   // luminance above which amount = full
     uint  adaptive;      // 0 = off, 1 = on
 };
+
+// MARK: - Guided Filter (anti-halo blur for unsharp / wavelet)
+//
+// Replaces the Gaussian-blur step of unsharp masking with an edge-aware
+// guided filter (He et al. 2010). Same math as the existing unsharp
+// from there: result = input + amount × (input - blurred). But because
+// `blurred` doesn't smear across high-contrast edges (limb, sunspot
+// borders), the (input - blurred) difference doesn't overshoot at
+// those edges → no bright/dark ring artefact when the result is later
+// shown with an aggressive tone curve.
+//
+// Algorithm (luma-based for simplicity — input greyscale-ised first;
+// fine for the solar/lunar use case where ringing is the problem):
+//   I = input luma
+//   mean_I  = box_blur(I)
+//   mean_II = box_blur(I*I)
+//   var     = mean_II - mean_I²        (local variance)
+//   a       = var / (var + eps)        (smaller a = smoother area)
+//   b       = mean_I × (1 - a)
+//   mean_a  = box_blur(a)
+//   mean_b  = box_blur(b)
+//   q       = mean_a × I + mean_b       (edge-aware blurred output)
+//
+// Two MPS Gaussian-blur passes between three small per-pixel kernels
+// (pack / coefficients / compose). All on textures the standard
+// pool already vends — no new allocations beyond the temporaries.
+
+kernel void guided_pack(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> packed [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= input.get_width() || gid.y >= input.get_height()) return;
+    float4 px = input.read(gid);
+    float l = dot(px.rgb, float3(0.2126, 0.7152, 0.0722));   // Rec.709 luma
+    packed.write(float4(l, l * l, 0.0, 1.0), gid);
+}
+
+struct GuidedCoeffParams {
+    float eps;       // regularisation — bigger = smoother (more blur)
+};
+
+kernel void guided_coefficients(
+    texture2d<float, access::read>  means [[texture(0)]],   // (mean_I, mean_II, 0, 1)
+    texture2d<float, access::write> ab    [[texture(1)]],   // (a, b, 0, 1)
+    constant GuidedCoeffParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= means.get_width() || gid.y >= means.get_height()) return;
+    float4 m = means.read(gid);
+    float meanI  = m.r;
+    float meanII = m.g;
+    float var = max(0.0, meanII - meanI * meanI);
+    float a = var / (var + p.eps);
+    float b = meanI * (1.0 - a);
+    ab.write(float4(a, b, 0.0, 1.0), gid);
+}
+
+kernel void guided_compose(
+    texture2d<float, access::read>  meanAB   [[texture(0)]],  // (mean_a, mean_b, 0, 1)
+    texture2d<float, access::read>  original [[texture(1)]],
+    texture2d<float, access::write> output   [[texture(2)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 mab = meanAB.read(gid);
+    float4 o = original.read(gid);
+    float l = dot(o.rgb, float3(0.2126, 0.7152, 0.0722));
+    float q = mab.r * l + mab.g;
+    // Color-preserving compose (fix 2026-05-25 for OSC Bayer regression
+    // — old greyscale output made unsharp diff per-channel chromatic
+    // and visibly skewed hue/saturation on OSC stacks). Scale the
+    // original RGB by the ratio new_luma / old_luma — hue stays exact,
+    // only luminance gets the edge-aware blur. For mono captures the
+    // ratio collapses to 1 and the behaviour matches the original
+    // greyscale intent. For dark pixels (l near zero) the chroma is
+    // meaningless; output mid-grey luma to avoid div-by-zero blow-up.
+    if (l > 1e-4) {
+        float scale = q / l;
+        output.write(float4(o.rgb * scale, o.a), gid);
+    } else {
+        output.write(float4(q, q, q, o.a), gid);
+    }
+}
 
 kernel void unsharp_mask(
     texture2d<float, access::read>  original [[texture(0)]],
@@ -523,6 +728,69 @@ kernel void apply_saturation(
     float luma = dot(c.rgb, float3(0.2126, 0.7152, 0.0722));
     float3 mixed = mix(float3(luma), c.rgb, p.saturation);
     output.write(float4(mixed, c.a), gid);
+}
+
+// MARK: - Coloring (per-channel gradation curves)
+//
+// Affinity Photo-style 4-curve gradation. The CPU builds an rgba16Float
+// 1D LUT where each input intensity i maps to (R, G, B, 1) — see
+// ColoringLUT.build. This kernel does the per-channel lookup:
+//
+//   out.r = LUT(in.r).r
+//   out.g = LUT(in.g).g
+//   out.b = LUT(in.b).b
+//
+// Same I/O shape as apply_tone_curve, just RGBA-separated.
+
+kernel void apply_coloring(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    texture1d<float, access::sample> lut   [[texture(2)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float r = lut.sample(s, saturate(c.r)).r;
+    float g = lut.sample(s, saturate(c.g)).g;
+    float b = lut.sample(s, saturate(c.b)).b;
+    output.write(float4(r, g, b, c.a), gid);
+}
+
+// MARK: - Gamma encode / decode (perceptual sRGB tone-op wrappers)
+//
+// Wraps the tone-curve / B+C / H+S / Saturation block so the user's
+// slider deltas behave on the perceptual axis the user is looking at,
+// not on the linear axis the rest of the pipeline lives in. The
+// midtone of a slider should land at perceptual ≈ 0.5, which is
+// linear ≈ 0.214 — the prior linear-space behaviour put 50 % slider
+// at linear 0.5, perceptually past the upper-mid range.
+//
+// Approximation: pow(x, 1/2.2) and pow(x, 2.2). Close enough to true
+// sRGB for slider semantics; the small error near 0 (sRGB has a small
+// linear segment below 0.0031308) is irrelevant on user-tuned tone
+// adjustments. Alpha is preserved.
+
+kernel void gamma_encode(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    float3 enc = pow(max(c.rgb, float3(0.0)), float3(1.0 / 2.2));
+    output.write(float4(enc, c.a), gid);
+}
+
+kernel void gamma_decode(
+    texture2d<float, access::read>  input  [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float4 c = input.read(gid);
+    float3 dec = pow(max(c.rgb, float3(0.0)), float3(2.2));
+    output.write(float4(dec, c.a), gid);
 }
 
 // MARK: - Sub-pixel shift (stabilization)
@@ -937,11 +1205,18 @@ kernel void unpack_bayer8_to_rgba(
 // `scale` semantics as the mono / Bayer kernels above. `swapRB` flips
 // channel order so the same kernel handles BGR with `swapRB = 1`.
 //
-// 16-bit RGB48 captures are out of scope for this kernel — they need a
-// separate u16 buffer kernel; defer until the field shows up.
+// Two variants are provided:
+//   unpack_rgb8_to_rgba   — 8-bit per channel, 3 B/px source (RGB24 / BGR24)
+//   unpack_rgb16_to_rgba  — 16-bit per channel, 6 B/px source (RGB48 / BGR48).
+//                           Apple Silicon is little-endian so a
+//                           `device const ushort*` cast reads LE-stored
+//                           uint16 samples without any byte-swap.
+// Both share `RgbUnpackParams`; the caller sets `scale` to 1/255 for 8-bit
+// or 1/65535 for 16-bit. The 16-bit variant is what previews a
+// bake-in-exported SER (SerWriter writes the bake-in result as 16-bit RGB).
 
 struct RgbUnpackParams {
-    float scale;        // 1/255.0 (8-bit only — see kernel comment)
+    float scale;        // 1/255.0 for 8-bit, 1/65535.0 for 16-bit
     uint  flip;         // 0 = direct, 1 = 180° rotate
     uint  swapRB;       // 0 = RGB, 1 = BGR (swap red/blue channels)
     uint  width;        // pixel width — needed because device buffers
@@ -950,6 +1225,27 @@ struct RgbUnpackParams {
 
 kernel void unpack_rgb8_to_rgba(
     device const uchar*             src [[buffer(0)]],
+    texture2d<float, access::write> dst [[texture(0)]],
+    constant RgbUnpackParams&       p   [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint W = dst.get_width();
+    uint H = dst.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+    uint flippedX = (p.flip != 0u) ? (W - 1 - gid.x) : gid.x;
+    uint flippedY = (p.flip != 0u) ? (H - 1 - gid.y) : gid.y;
+    uint base = (flippedY * p.width + flippedX) * 3u;
+    float c0 = float(src[base + 0u]) * p.scale;
+    float c1 = float(src[base + 1u]) * p.scale;
+    float c2 = float(src[base + 2u]) * p.scale;
+    float r = (p.swapRB != 0u) ? c2 : c0;
+    float g = c1;
+    float b = (p.swapRB != 0u) ? c0 : c2;
+    dst.write(float4(r, g, b, 1.0), gid);
+}
+
+kernel void unpack_rgb16_to_rgba(
+    device const ushort*            src [[buffer(0)]],
     texture2d<float, access::write> dst [[texture(0)]],
     constant RgbUnpackParams&       p   [[buffer(1)]],
     uint2 gid [[thread_position_in_grid]]
@@ -1465,6 +1761,90 @@ kernel void lucky_normalize(
     accum.write(float4(clamp(a.rgb * p.invTotalWeight, 0.0, 1.0), 1.0), gid);
 }
 
+// MARK: - Lucky Region accumulator (AS!4-style per-tile frame selection)
+//
+// For each output pixel: figure out the 4 adjacent 64×64 tiles it lies
+// between (bilinear weights), look up which kept frames are in each
+// tile's adaptive selection, and if THIS frame is in any of them, add
+// its contribution weighted by (bilinear_weight / tile_K). Bilinear
+// blend across 4 tiles eliminates hard seams; per-tile averaging gives
+// each region the frames that were sharpest THERE specifically.
+//
+// Math check — weights sum to 1.0 per pixel: each tile contributes
+// (bilinear_weight / tile_K) per selected frame, summed over its K
+// selected frames = bilinear_weight. Sum of 4 bilinear_weights = 1.0.
+// So the accumulator produces a properly-averaged output WITHOUT a
+// separate normalize pass — the existing weighted accumulator's
+// invTotalWeight isn't needed for this path.
+
+struct LuckyRegionParams {
+    float2 shift;        // per-frame sub-pixel translation
+    uint   frameIndex;   // index this kernel call is processing
+    uint   tilesX;
+    uint   tilesY;
+    uint   tilePx;       // 64 typically
+    uint   maxK;         // adaptive top-K bound
+};
+
+kernel void lucky_accumulate_region(
+    texture2d<float, access::sample>     frame       [[texture(0)]],
+    texture2d<float, access::read_write> accum       [[texture(1)]],
+    device const uint*                   tileFrames  [[buffer(0)]],  // [tilesY * tilesX * maxK]
+    device const uint*                   tileCounts  [[buffer(1)]],  // [tilesY * tilesX]
+    constant LuckyRegionParams&          p           [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint W = accum.get_width();
+    uint H = accum.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    // Tile-space coords with half-tile offset so tile centres sit at
+    // (tx + 0.5) * tilePx. fx in [-0.5, tilesX - 0.5].
+    float fx = (float(gid.x) + 0.5) / float(p.tilePx) - 0.5;
+    float fy = (float(gid.y) + 0.5) / float(p.tilePx) - 0.5;
+    int tx0 = max(0, min((int)p.tilesX - 1, (int)floor(fx)));
+    int ty0 = max(0, min((int)p.tilesY - 1, (int)floor(fy)));
+    int tx1 = min((int)p.tilesX - 1, tx0 + 1);
+    int ty1 = min((int)p.tilesY - 1, ty0 + 1);
+    float wx = clamp(fx - (float)tx0, 0.0, 1.0);
+    float wy = clamp(fy - (float)ty0, 0.0, 1.0);
+
+    int corners[4][2] = {{ty0, tx0}, {ty0, tx1}, {ty1, tx0}, {ty1, tx1}};
+    float cw[4] = {
+        (1.0 - wx) * (1.0 - wy),
+        wx       * (1.0 - wy),
+        (1.0 - wx) * wy,
+        wx       * wy
+    };
+
+    float totalWeight = 0.0;
+    for (int i = 0; i < 4; i++) {
+        int ty = corners[i][0];
+        int tx = corners[i][1];
+        uint tileIdx = (uint)(ty * (int)p.tilesX + tx);
+        uint cnt = tileCounts[tileIdx];
+        if (cnt == 0) continue;
+        bool isSelected = false;
+        for (uint k = 0; k < cnt; k++) {
+            if (tileFrames[tileIdx * p.maxK + k] == p.frameIndex) {
+                isSelected = true;
+                break;
+            }
+        }
+        if (isSelected) {
+            totalWeight += cw[i] / float(cnt);
+        }
+    }
+
+    if (totalWeight > 0.0) {
+        constexpr sampler s(address::clamp_to_edge, filter::linear);
+        float2 uv = (float2(gid) + 0.5 - p.shift) / float2(W, H);
+        float4 v = frame.sample(s, uv);
+        float4 a = accum.read(gid);
+        accum.write(a + v * totalWeight, gid);
+    }
+}
+
 // MARK: - Multi-AP local alignment (Scientific mode)
 //
 // Approach: 8×8 grid of alignment points across the frame. For each AP, we
@@ -1625,6 +2005,46 @@ kernel void compute_ap_shifts(
         if (depth < minDepth) {
             shiftMap.write(float4(0, 0, 0, 0), uint2(apX, apY));
             return;
+        }
+
+        // Aperture-problem rejection. A cell sitting on a smooth, locally-
+        // straight edge (the curved solar limb, a planetary terminator)
+        // has a SAD VALLEY along the edge tangent — the minimum is sharp
+        // perpendicular to the edge but flat ALONG it, so the depth gate
+        // above passes while the along-edge shift component is arbitrary.
+        // Neighbouring cells then shift their slice of the edge by
+        // different amounts → the edge zig-zags into the blocky "kink"
+        // seen on partial solar discs. Likewise low-contrast granulation
+        // gives a shallow rise in both axes.
+        //
+        // Require the SAD to rise by at least `minRise` (relative to the
+        // mean) when stepping ±1 px in BOTH x AND y from the winner — i.e.
+        // the cell must contain a genuine 2D feature (sunspot, crater,
+        // GRS) to earn a local shift. Edge / flat cells fall back to the
+        // global phase-corr alignment (zero local shift), which is what
+        // makes the Full-Disk/lightspeed path look cleaner on these
+        // subjects. Winners pinned to the search-window boundary can't
+        // form the rise test → rejected (boundary picks are unreliable).
+        const float minRise = 0.04;
+        bool wellPosedX = (wxi > 0 && wxi < range - 1);
+        bool wellPosedY = (wyi > 0 && wyi < range - 1);
+        if (!wellPosedX || !wellPosedY) {
+            shiftMap.write(float4(0, 0, 0, 0), uint2(apX, apY));
+            return;
+        }
+        {
+            float c  = sadGrid[wyi * range + wxi];
+            float lx = sadGrid[wyi * range + (wxi - 1)];
+            float rx = sadGrid[wyi * range + (wxi + 1)];
+            float uy = sadGrid[(wyi - 1) * range + wxi];
+            float dy = sadGrid[(wyi + 1) * range + wxi];
+            float riseX = min(lx, rx) - c;
+            float riseY = min(uy, dy) - c;
+            float thresh = minRise * meanSAD;
+            if (riseX < thresh || riseY < thresh) {
+                shiftMap.write(float4(0, 0, 0, 0), uint2(apX, apY));
+                return;
+            }
         }
 
         // Sub-pixel parabolic refinement of the integer SAD minimum. The

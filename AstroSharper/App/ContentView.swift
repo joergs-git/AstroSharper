@@ -25,10 +25,28 @@ struct ContentView: View {
             SettingsPanel()
                 .frame(minWidth: 280, idealWidth: 320, maxWidth: 400)
 
+            // VSplitView gives a draggable divider between the preview and
+            // the file list — drag it to rebalance. Defaults favour the
+            // preview (large idealHeight) over the file list (compact
+            // idealHeight) so the image gets the room by default; the user
+            // drags the divider down to see more files when needed.
             VSplitView {
                 VStack(spacing: 0) {
-                    PreviewView()
-                        .frame(minHeight: 240)
+                    // When the Compare side panel is visible, drop into an
+                    // HSplitView so its width is user-resizable via the
+                    // divider (symmetric to the preview/file-list VSplitView
+                    // below). Without the panel, no nested splitter is
+                    // needed and PreviewView fills the row directly.
+                    if app.compareSidePanelVisible {
+                        HSplitView {
+                            PreviewView()
+                                .frame(minWidth: 320, minHeight: 200)
+                            CompareSidePanel()
+                        }
+                    } else {
+                        PreviewView()
+                            .frame(minHeight: 200)
+                    }
                     if app.previewSerFrameCount > 1 {
                         Divider()
                         SerScrubBar()
@@ -38,11 +56,12 @@ struct ContentView: View {
                         TransportBar()
                     }
                 }
+                .frame(minHeight: 200, idealHeight: 520)
                 VStack(spacing: 0) {
                     SectionToggleBar()
                     FileListView()
                 }
-                .frame(minHeight: 180, idealHeight: 280)
+                .frame(minHeight: 90, idealHeight: 170)
             }
             .frame(minWidth: 500)
         }
@@ -110,6 +129,12 @@ private struct ToolbarView: View {
             .controlSize(.small)
             .help("Open folder or files (⌘O)")
 
+            // Auto-stack folder watch — placed next to Open because it's
+            // meant to be armed on an EMPTY capture folder before the
+            // session starts, which is exactly when the Lucky Stack
+            // section (SER-gated) is disabled and unreachable.
+            FolderWatchToolbarButton()
+
             if app.catalog.rootURL == nil {
                 Text("No folder opened — drag a folder here or press ⌘O")
                     .font(.system(size: 11))
@@ -167,13 +192,32 @@ private struct ToolbarView: View {
             }
             .help("Display brightness — multiplies the on-screen pixel values only (saved files unaffected). Combine with Auto for a sensible starting point on dim captures.")
 
-            // Before / After compare (B) — single, prominent.
-            Toggle(isOn: $app.showAfter) {
-                Label(app.showAfter ? "After" : "Before", systemImage: app.showAfter ? "eye.fill" : "eye.slash")
+            // Compare side panel (B) — when on, two thumbnails appear
+            // beside the preview. Top = the file currently displayed
+            // (= "stacked / output / memory" before manipulations);
+            // bottom = the source SER's first frame (= "before stack").
+            // The main preview itself always shows the manipulated
+            // result. Replaced the old Before/After main-view flip
+            // (2026-05-03) so users can see all three states at once
+            // instead of toggling through them.
+            Toggle(isOn: $app.compareSidePanelVisible) {
+                Label("Compare", systemImage: app.compareSidePanelVisible ? "rectangle.split.2x1.fill" : "rectangle.split.2x1")
             }
             .toggleStyle(.button)
             .keyboardShortcut("b", modifiers: [])
-            .help("Toggle Before / After (B)")
+            .help("Show / hide the comparison side panel (B). Top thumbnail = the displayed file (no manipulations). Bottom thumbnail = the source SER's first frame, populated when Lucky Stack runs.")
+
+            // Highlight clipped pixels (C) — LSW 8.8 parity. Pure
+            // diagnostic overlay that turns any pixel at/above 0.995
+            // (per-channel, post-display-chain) solid red so the user
+            // can see at a glance which features are blowing out after
+            // sharpen / deconv / tone-curve. Saved files unaffected.
+            Toggle(isOn: $app.highlightClipped) {
+                Label("Clipped", systemImage: app.highlightClipped ? "flashlight.on.fill" : "flashlight.off.fill")
+            }
+            .toggleStyle(.button)
+            .keyboardShortcut("c", modifiers: [])
+            .help("Highlight clipped pixels (C): tint per-channel ≥ 99.5% values solid red over the live preview. Useful for spotting blown-out planet limbs or Wiener overshoot. Saved files are never affected.")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)

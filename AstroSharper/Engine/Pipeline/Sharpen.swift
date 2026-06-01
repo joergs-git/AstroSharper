@@ -18,6 +18,7 @@ enum Sharpen {
         sigma: Float,
         amount: Float,
         adaptive: Bool,
+        edgeAware: Bool = false,
         pipeline: Pipeline,
         commandBuffer: MTLCommandBuffer,
         borrowed: inout [MTLTexture]
@@ -28,8 +29,22 @@ enum Sharpen {
         let blurred = pipeline.borrow(width: input.width, height: input.height, format: input.pixelFormat)
         borrowed.append(blurred)
 
-        let gauss = MPSImageGaussianBlur(device: device, sigma: sigma)
-        gauss.encode(commandBuffer: commandBuffer, sourceTexture: input, destinationTexture: blurred)
+        if edgeAware {
+            // Guided filter — same output shape as the Gaussian, but
+            // doesn't smear across high-contrast edges. Result: no
+            // bright-ring halo at the solar limb / sunspot borders
+            // even with aggressive tone curves. ~30–40% slower.
+            GuidedFilter.encodeBlur(
+                input: input, output: blurred,
+                radius: sigma,
+                pipeline: pipeline,
+                commandBuffer: commandBuffer,
+                borrowed: &borrowed
+            )
+        } else {
+            let gauss = MPSImageGaussianBlur(device: device, sigma: sigma)
+            gauss.encode(commandBuffer: commandBuffer, sourceTexture: input, destinationTexture: blurred)
+        }
 
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pipeline.unsharpPipeline)

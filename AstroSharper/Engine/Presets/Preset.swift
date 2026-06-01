@@ -15,7 +15,25 @@ import Foundation
 ///   - radial fade filter (RFF)
 ///   - output-style choices (bake-in, auto-tone)
 struct LuckyPresetDetails: Codable, Equatable {
-    var autoNuke: Bool = false
+    /// Default true to match the master `LuckyStackUIState.autoNuke`
+    /// default (since 2026-05-24 commit 0dae988). Previously false here
+    /// meant picking a preset with luckyDetails silently flipped the
+    /// user's AutoNuke off — surprise bug the user flagged on
+    /// 2026-05-25. AutoAP v1 beats hand-tuned presets on the regression
+    /// suite (6/6 fixtures), so a preset-picked-then-Nuke'd state is
+    /// the empirically correct default.
+    var autoNuke: Bool = true
+    /// Default FALSE (reverted 2026-05-24 after the day-of regression):
+    /// AutoPSF Wiener post-deconv produces unnatural-looking output
+    /// (white halo rings around sunspots, over-sharpened granulation)
+    /// that the user explicitly rejected even though a naive metric
+    /// (dark-core / bright-bg "dot contrast") rated it 0.679 = "+14%
+    /// over Frame 0". The metric was capturing the ringing artifact as
+    /// "more contrast", not naturalness. User-validated finding: the
+    /// path to a natural-looking solar stack that beats Frame 0 is
+    /// FINE multi-AP (grid 16, patch ~8), not post-stack deconv. See
+    /// [[project-autopsf-solar-2026-05-24]] for the full empirical
+    /// trail of this dead end.
     var autoPSF: Bool = false
     var autoPSFSNR: Double = 50
     var autoKeepPercent: Bool = false
@@ -80,9 +98,13 @@ enum PresetTarget: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .sun:     return "sun.max.fill"
         case .moon:    return "moon.fill"
+        // Jupiter + Saturn also have custom shape renderings in
+        // `TargetIconView` (belted disc / ringed disc) used by the
+        // big chips in the toolbar. The SF Symbol strings here are
+        // the fallback for plain Image / Label call sites.
         case .jupiter: return "circle.hexagongrid.fill"
         case .saturn:  return "circle.dashed.inset.filled"
-        case .mars:    return "globe.europe.africa.fill"
+        case .mars:    return "circle.fill"  // small filled disc — Mars is a tiny red dot in real captures
         case .other:   return "scope"
         }
     }
@@ -112,6 +134,11 @@ struct Preset: Codable, Identifiable, Equatable {
     var sharpen: SharpenSettings
     var stabilize: StabilizeSettings
     var toneCurve: ToneCurveSettings
+    /// Per-channel gradation curves (Step 2b Coloring). Optional in
+    /// the Codable shape (default is identity ColoringSettings()) so
+    /// presets saved before 2026-05-28 decode unchanged — old presets
+    /// simply land with Coloring disabled at identity.
+    var coloring: ColoringSettings = ColoringSettings()
     var luckyMode: LuckyStackMode
     var luckyKeepPercent: Int
     /// Multi-AP grid edge length: 0 = off, otherwise N → N×N AP grid.
@@ -147,6 +174,7 @@ struct Preset: Codable, Identifiable, Equatable {
         sharpen: SharpenSettings,
         stabilize: StabilizeSettings = StabilizeSettings(),
         toneCurve: ToneCurveSettings = ToneCurveSettings(),
+        coloring: ColoringSettings = ColoringSettings(),
         luckyMode: LuckyStackMode = .lightspeed,
         luckyKeepPercent: Int = 25,
         luckyMultiAPGrid: Int = 0,
@@ -165,6 +193,7 @@ struct Preset: Codable, Identifiable, Equatable {
         self.sharpen = sharpen
         self.stabilize = stabilize
         self.toneCurve = toneCurve
+        self.coloring = coloring
         self.luckyMode = luckyMode
         self.luckyKeepPercent = luckyKeepPercent
         self.luckyMultiAPGrid = luckyMultiAPGrid
@@ -208,13 +237,32 @@ enum BuiltInPresets {
         s.lrEnabled = false
         s.waveletEnabled = true
         s.waveletScales = [2.4, 1.6, 0.8, 0.4]   // boost finest, taper coarse
+        // Stacking retune (2026-05-22): multi-AP OFF + sigma-clip + lower
+        // keep. A 10-run headless benchmark on a LUNT partial-disc white-
+        // light SER showed dense multi-AP (12×12) was the WORST of all
+        // tested combos — it smears low-contrast granulation and warps the
+        // smooth limb (aperture problem). Scientific reference-build +
+        // global alignment + sigma-clip + keep 20% scored within a hair of
+        // the lightspeed best, with better outlier rejection. See
+        // tasks/lessons.md 2026-05-22.
+        var d = LuckyPresetDetails()
+        d.sigmaClipEnabled = true
+        d.sigmaClipThreshold = 2.5
         return Preset(
+            // Switched to Lucky Region 2026-05-24 after user-validated
+            // bracket on TESTIMAGES/sun/14_02_07_partial.ser and 14_09_57_
+            // fulldisc.ser: bare scientific stacks lose ~50% edge energy
+            // vs Frame 0, sunspots smear, granulation gets averaged. Lucky
+            // Region (per-tile pure-lucky K=1, 32×32 tiles) preserves
+            // sunspot definition AND has cleaner granulation than Frame 0.
+            // sigma-clip stays in case there are partial cloud frames.
             name: "Sun — Granulation",
-            target: .sun, notes: "Fine-scale granulation. Sharp wavelet1, mild unsharp.",
+            target: .sun, notes: "Fine-scale granulation. Lucky Region (per-tile sharpest-frame selection) + sigma-clip. Beat bare stacks on the partial-disc + fulldisc bracket 2026-05-24.",
             isBuiltIn: true,
             sharpen: s,
-            luckyMode: .scientific, luckyKeepPercent: 30,
-            luckyMultiAPGrid: 12, luckyMultiAPPatchHalf: 24
+            luckyMode: .region, luckyKeepPercent: 25,
+            luckyMultiAPGrid: 0, luckyMultiAPPatchHalf: 24,
+            luckyDetails: d
         )
     }
     private static func sunFullDisk() -> Preset {
@@ -230,13 +278,22 @@ enum BuiltInPresets {
         t.enabled = true
         // Mild S-curve to lift mid-tones.
         t.controlPoints = [.init(x: 0, y: 0), .init(x: 0.35, y: 0.30), .init(x: 0.75, y: 0.85), .init(x: 1, y: 1)]
+        // Solar Dual-Zone: lifts off-limb area so prominences at the
+        // limb become visible in the same image as the disc surface
+        // (validated 2026-05-24 on TESTIMAGES/sun/14_09_57_fulldisc.ser).
+        // Overrides the S-curve above when on.
+        t.solarDualZone = true
         return Preset(
+            // Switched to Lucky Region 2026-05-24. Same bracket as
+            // Sun-Granulation: sunspots stay crisp, granulation cleaner
+            // than Frame 0. multi-AP no longer needed since Region's
+            // per-tile selection IS the local refinement.
             name: "Sun — Full Disk",
-            target: .sun, notes: "Full-disk balanced sharpen with mild S-curve.",
+            target: .sun, notes: "Full-disk lucky region. Preserves sunspot definition + cleaner granulation than Frame 0 (validated 2026-05-24).",
             isBuiltIn: true,
             sharpen: s, toneCurve: t,
-            luckyMode: .lightspeed, luckyKeepPercent: 50,
-            luckyMultiAPGrid: 8, luckyMultiAPPatchHalf: 32
+            luckyMode: .region, luckyKeepPercent: 25,
+            luckyMultiAPGrid: 0, luckyMultiAPPatchHalf: 32
         )
     }
     private static func sunProminence() -> Preset {
@@ -252,13 +309,39 @@ enum BuiltInPresets {
         t.enabled = true
         // Strong stretch — typical Hα off-limb workflow.
         t.controlPoints = [.init(x: 0, y: 0), .init(x: 0.05, y: 0), .init(x: 0.25, y: 0.85), .init(x: 1, y: 1)]
+        // Solar Dual-Zone: when the prominence capture also catches a
+        // sliver of the saturated disc (typical for limb prominence
+        // shots), this exposes BOTH at once instead of clipping the
+        // disc to pure white. Overrides the control-points curve above
+        // when on. Pure off-limb captures (no disc in frame) still
+        // benefit from the asinh-stretch of the dark half.
+        t.solarDualZone = true
+        // Multi-AP OFF here too — off-limb Hα is even lower-contrast than
+        // white-light granulation, so per-cell SAD correlation is noise-
+        // dominated. Keeps the higher keep-% (40) for SNR on the faint
+        // prominences (unlike Granulation, this isn't a sharpness-limited
+        // surface target). Sigma-clip rejects the worst seeing frames.
+        var d = LuckyPresetDetails()
+        d.sigmaClipEnabled = true
+        d.sigmaClipThreshold = 2.5
         return Preset(
+            // Stays .scientific 2026-05-24. Empirical bracket on
+            // TESTIMAGES/sun/14_03_21_prominence.ser showed: ANY stacking
+            // (scientific, region, region+disc-mask, region+disc-mask+
+            // off-limb-align) softens the prominence wisp vs raw Frame 0.
+            // The wisp deforms physically per-frame due to seeing, so
+            // averaging integrates over those variations — fundamental
+            // limit. Stack here gives cleaner background; raw Frame 0
+            // (or single-best-frame export) gives sharpest wisp detail.
+            // Power users: try `--mode region --disc-mask` via CLI for a
+            // noise-cleaned stack with usable wisp visibility.
             name: "Sun — Hα Prominence",
-            target: .sun, notes: "Off-limb Hα prominences: strong stretch, soft sharpen.",
+            target: .sun, notes: "Off-limb Hα prominences: strong stretch, soft sharpen, sigma-clip, no multi-AP. NOTE: stacking softens prominence wisps vs raw Frame 0 by ~10-20% (the wisps deform frame-to-frame due to seeing — a fundamental limit). Stack for clean background; export single-best-frame for max wisp detail.",
             isBuiltIn: true,
             sharpen: s, toneCurve: t,
             luckyMode: .scientific, luckyKeepPercent: 40,
-            luckyMultiAPGrid: 8, luckyMultiAPPatchHalf: 32
+            luckyMultiAPGrid: 0, luckyMultiAPPatchHalf: 32,
+            luckyDetails: d
         )
     }
 

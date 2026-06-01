@@ -15,12 +15,32 @@ struct BrandHeader: View {
             HStack(spacing: 8) {
                 BrandMark()
                     .frame(width: 22, height: 22)
-                Text("AstroSharper")
-                    .font(.system(size: 14, weight: .heavy, design: .rounded))
-                    .foregroundStyle(AppPalette.brandGradient)
-                Text(AppVersion.shortString)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 6) {
+                        Text("AstroSharper")
+                            .font(.system(size: 14, weight: .heavy, design: .rounded))
+                            .foregroundStyle(AppPalette.brandGradient)
+                        Text(AppVersion.shortString)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    // Inline coffee-link directly under the title + version
+                    // so it sits in the user's eye-line every session — not
+                    // hidden behind a menu / About sheet.
+                    Button {
+                        NSWorkspace.shared.open(AppLinks.buyMeACoffee)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "cup.and.saucer.fill")
+                                .font(.system(size: 9))
+                            Text("If you like it — buy me a coffee")
+                                .font(.system(size: 9, weight: .medium))
+                        }
+                        .foregroundColor(.orange)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Opens buymeacoffee.com/joergsflow in your browser.")
+                }
             }
             .frame(width: 260, height: 44, alignment: .leading)
 
@@ -185,6 +205,20 @@ struct TargetPickerRow: View {
     /// preset's target (so we don't clobber the user's tuning every
     /// time SwiftUI re-renders).
     private func applyPresetForCurrentFile() {
+        // Defence 1: don't override an explicit user pick — once the user
+        // clicked a target chip / picked a preset from the menu, file
+        // changes must not silently switch the preset.
+        guard !app.lastPresetWasUserInitiated else { return }
+        // Defence 2: only auto-detect on Inputs. In Outputs / Memory the
+        // currently-previewed file is a RESULT, not an input to be
+        // processed; its filename keyword (often inherited from the
+        // source SER's parent folder, sometimes a misleading "moon" /
+        // "AUTOTRANS" / etc.) must not reroute the active preset.
+        // Original bug — 2026-05-24: a Sun capture stacked successfully,
+        // the app switched to Outputs, and the auto-detect on the
+        // post-stack file flipped the preset to Moon, applying Moon's
+        // multi-AP-10×10 on subsequent stacks (smears solar surface).
+        guard app.displayedSection == .inputs else { return }
         guard let detected = detectedTargetForCurrentFile() else { return }
         let activeTarget = app.presets.activeID
             .flatMap { app.presets.preset(withID: $0) }?.target
@@ -234,8 +268,7 @@ private struct TargetChip: View {
     /// shadow + faint violet glow so it pops against the brand bar.
     private var highlightedChip: some View {
         VStack(spacing: 1) {
-            Image(systemName: target.icon)
-                .font(.system(size: 17, weight: .semibold))
+            TargetIconView(target: target, size: 17, color: .white)
             Text(target.rawValue)
                 .font(.system(size: 9, weight: .semibold, design: .rounded))
                 .lineLimit(1)
@@ -261,8 +294,7 @@ private struct TargetChip: View {
     /// no glow. Reads as available-but-not-active.
     private var inactiveChip: some View {
         VStack(spacing: 1) {
-            Image(systemName: target.icon)
-                .font(.system(size: 16))
+            TargetIconView(target: target, size: 16, color: Self.pickerViolet)
             Text(target.rawValue)
                 .font(.system(size: 9, weight: .medium))
                 .lineLimit(1)
@@ -291,7 +323,10 @@ private struct TargetChip: View {
     /// AppModel.autoApplyDefaultPreset.
     private func applyTargetPreset() {
         if let preset = app.presets.builtIn.first(where: { $0.target == target }) {
-            app.applyPreset(preset)
+            // Explicit user pick — honour the preset's saved section
+            // enable flags (turns Sharpen / Tone / etc. on as the preset
+            // intends), unlike the auto-apply-on-file-change path.
+            app.applyPreset(preset, userInitiated: true)
             app.luckyStack.winjuposTarget = preset.target.rawValue
         }
     }

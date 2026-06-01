@@ -40,8 +40,19 @@ enum OscDefaults {
     }
 
     /// Applies OSC-friendly defaults to the passed-in tone-curve
-    /// settings — currently just turns `autoWB` on. Idempotent: a no-op
-    /// when the source is mono or `autoWB` is already enabled.
+    /// settings: turns `autoWB` on (gray-world mean align) AND
+    /// `channelNormalize` on (LSW 7.2.1 per-channel histogram stretch
+    /// to align p1/p99 windows). The two compose — auto-WB neutralises
+    /// the green cast first, the normalize pass handles any remaining
+    /// histogram spread that gray-world leaves behind. Idempotent: a
+    /// no-op when the source is mono or both flags are already enabled.
+    ///
+    /// `channelNormalize` itself has an internal auto-engage gate (p99
+    /// spread > 30%) so flipping the toggle on isn't a commitment to
+    /// always processing — it's "engage when there's a real skew to
+    /// fix". Auto-WB has no such gate; it always runs when the toggle
+    /// is on (the gray-world correction collapses to identity on
+    /// already-balanced sources anyway).
     ///
     /// Returns true iff a change was made (the caller can use the
     /// signal to log the auto-engagement, or skip a redundant settings
@@ -49,8 +60,25 @@ enum OscDefaults {
     @discardableResult
     static func applyDefaults(to tone: inout ToneCurveSettings, for url: URL) -> Bool {
         guard isOSC(url: url) else { return false }
-        guard !tone.autoWB else { return false }
-        tone.autoWB = true
-        return true
+        var changed = false
+        if !tone.autoWB {
+            tone.autoWB = true
+            changed = true
+        }
+        if !tone.channelNormalize {
+            tone.channelNormalize = true
+            changed = true
+        }
+        // Purple-fringe reduction also gets the default-on treatment
+        // on OSC sources. The GPU kernel itself short-circuits on
+        // pixels outside the purple band, so mono / already-clean
+        // OSC sources pay only the per-pixel saturation + hue test
+        // (no expensive blend). LSW 7.1 calls this out as a typical
+        // OSC-only post-processing step.
+        if !tone.reducePurpleFringe {
+            tone.reducePurpleFringe = true
+            changed = true
+        }
+        return changed
     }
 }

@@ -279,7 +279,7 @@ private final class LuckyChannelStacker {
     /// per-channel, because that's the actual atmospheric-chromatic-
     /// dispersion correction Path B exists to make.
     func run(progress: @escaping (LuckyStackProgress) -> Void) async throws -> MTLTexture {
-        let total = reader.header.frameCount
+        let total = reader.readableFrameCount   // clamp to frames actually present
 
         // 1. Single grading + luma-cache pass on the green channel.
         let gradeResult = try await gradeAndCacheLuma(channel: 1, progress: progress)
@@ -409,7 +409,7 @@ private final class LuckyChannelStacker {
         channel: UInt32,
         progress: @escaping (LuckyStackProgress) -> Void
     ) async throws -> GradeResult {
-        let total = reader.header.frameCount
+        let total = reader.readableFrameCount   // clamp to frames actually present
         let n = options.alignmentResolution
 
         let grader = LuckyChannelQualityGrader(

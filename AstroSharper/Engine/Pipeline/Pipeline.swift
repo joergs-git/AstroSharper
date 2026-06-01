@@ -19,10 +19,16 @@ final class Pipeline {
     // app launch (where a SwiftUI splash already covers it) and gives a
     // smooth-from-tick-zero live preview.
     private let unsharpPSO: MTLComputePipelineState
+    // Guided-filter trio for edge-aware unsharp blur (anti-halo). Built
+    // upfront with the rest so the first user toggle is instant.
+    private let guidedPackPSOInternal:    MTLComputePipelineState
+    private let guidedCoeffPSOInternal:   MTLComputePipelineState
+    private let guidedComposePSOInternal: MTLComputePipelineState
     private let divPSO:     MTLComputePipelineState
     private let mulPSO:     MTLComputePipelineState
     private let tonePSO:    MTLComputePipelineState
     private let satPSO:     MTLComputePipelineState
+    private let coloringPSO: MTLComputePipelineState
     private let nrPSO:      MTLComputePipelineState
     private let wbPSO:      MTLComputePipelineState
     private let acdcPSO:    MTLComputePipelineState
@@ -33,6 +39,22 @@ final class Pipeline {
     private let stackPSO:   MTLComputePipelineState
     private let subPSO:     MTLComputePipelineState
     private let waddPSO:    MTLComputePipelineState
+    private let gammaEncodePSO: MTLComputePipelineState
+    private let gammaDecodePSO: MTLComputePipelineState
+    /// Pre-sharpen highlight suppression (LSW 3.1.3 parity). Run before
+    /// Wiener / deconv so the sharpener can't push already-bright pixels
+    /// over 1.0 and create the polar / limb overexposure observed on
+    /// stacked Jupiter output (tasks/todo.md "Upper-half over-exposure").
+    private let suppressHighlightsPSO: MTLComputePipelineState
+    /// Purple-fringe suppression (LSW 7.1 parity). Hue-targeted
+    /// desaturation around 290° so OSC bayer chromatic-aberration
+    /// fringes get blended toward luma without touching other hues.
+    private let purpleFringePSO: MTLComputePipelineState
+    /// Exposed read-only so HighlightSuppression.apply (which lives
+    /// outside Pipeline so it can also be called from LuckyStack.run's
+    /// post-pass) can reuse the PSO without re-compiling it. Same
+    /// pattern as `unsharpPipeline` below.
+    var suppressHighlightsPipeline: MTLComputePipelineState { suppressHighlightsPSO }
 
     // Texture pool (per pipeline instance). Protected by `poolLock` since
     // process() may run on a background queue while other code paths also
@@ -66,10 +88,14 @@ final class Pipeline {
             return try! dev.makeComputePipelineState(function: fn)
         }
         self.unsharpPSO = make("unsharp_mask")
+        self.guidedPackPSOInternal    = make("guided_pack")
+        self.guidedCoeffPSOInternal   = make("guided_coefficients")
+        self.guidedComposePSOInternal = make("guided_compose")
         self.divPSO     = make("lr_divide")
         self.mulPSO     = make("lr_multiply")
         self.tonePSO    = make("apply_tone_curve")
         self.satPSO     = make("apply_saturation")
+        self.coloringPSO = make("apply_coloring")
         self.nrPSO      = make("noise_reduce_bilateral")
         self.wbPSO      = make("apply_white_balance")
         self.acdcPSO    = make("shift_rb_channels")
@@ -80,6 +106,10 @@ final class Pipeline {
         self.stackPSO   = make("stack_accumulate")
         self.subPSO     = make("subtract_textures")
         self.waddPSO    = make("weighted_add")
+        self.gammaEncodePSO = make("gamma_encode")
+        self.gammaDecodePSO = make("gamma_decode")
+        self.suppressHighlightsPSO = make("suppress_highlights")
+        self.purpleFringePSO = make("reduce_purple_fringe")
     }
 
     private func makeComputePSO(function name: String) -> MTLComputePipelineState {
@@ -140,6 +170,7 @@ final class Pipeline {
         sharpen: SharpenSettings,
         toneCurve: ToneCurveSettings,
         toneCurveLUT: MTLTexture? = nil,
+        coloring: ColoringSettings = ColoringSettings(),
         preview: Bool = false,
         onStageChange: ((PreviewStage?) -> Void)? = nil
     ) -> MTLTexture {
@@ -154,9 +185,13 @@ final class Pipeline {
         // the freshly-painted raw frame with a re-drawn-equal copy.
         let bcIsIdentity = abs(toneCurve.brightness) < 1e-4 && abs(toneCurve.contrast - 1.0) < 1e-4
         let satIsIdentity = abs(toneCurve.saturation - 1.0) < 1e-4
+        let coloringIsIdentity = !coloring.enabled || coloring.isIdentity
         let nothingActive = !toneCurve.autoWB
             && !toneCurve.chromaticAlignment
+            && !toneCurve.channelNormalize
+            && !toneCurve.reducePurpleFringe
             && !sharpen.enabled
+            && coloringIsIdentity
             && (!toneCurve.enabled || (toneCurveLUT == nil && bcIsIdentity && satIsIdentity))
         // Allocate a persistent output — not from pool, caller owns.
         let outDesc = MTLTextureDescriptor.texture2DDescriptor(
@@ -183,7 +218,7 @@ final class Pipeline {
         // when at least one of those toggles is on — emitting a callback
         // with .colourLevels just to flip back to nil immediately would
         // produce visible UI flicker.
-        let runColourLevels = toneCurve.autoWB || toneCurve.chromaticAlignment
+        let runColourLevels = toneCurve.autoWB || toneCurve.chromaticAlignment || toneCurve.channelNormalize || toneCurve.reducePurpleFringe
         if runColourLevels { onStageChange?(.colourLevels) }
 
         // Step 0: Auto white balance (gray-world). MUST run BEFORE any
@@ -211,6 +246,58 @@ final class Pipeline {
                 }
                 current = result
             }
+        }
+
+        // Step 0.25: Channel-normalize (LSW 7.2.1). Per-channel
+        // histogram stretch so R/G/B [p1, p99] windows land on the
+        // green channel's range. Runs AFTER gray-world auto-WB
+        // (which only aligns means) and BEFORE chromatic alignment
+        // (which is geometry-only). Auto-engagement gate inside
+        // computeChannelNormalize bails to identity when the
+        // per-channel p99 spread is already ≤ 30%.
+        if toneCurve.channelNormalize {
+            let cn = computeChannelNormalize(input: current)
+            if cn != .identity {
+                let result = borrow(width: w, height: h, format: input.pixelFormat)
+                borrowed.append(result)
+                if let enc = cmdBuf.makeComputeCommandEncoder() {
+                    enc.setComputePipelineState(wbPSO)
+                    enc.setTexture(current, index: 0)
+                    enc.setTexture(result, index: 1)
+                    var p = WhiteBalanceParamsCPU(
+                        offsets: SIMD3<Float>(cn.redOffset, cn.greenOffset, cn.blueOffset),
+                        scales:  SIMD3<Float>(cn.redScale,  cn.greenScale,  cn.blueScale)
+                    )
+                    enc.setBytes(&p, length: MemoryLayout<WhiteBalanceParamsCPU>.stride, index: 0)
+                    let (tgC, tgS) = dispatchThreadgroups(for: result, pso: wbPSO)
+                    enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                    enc.endEncoding()
+                }
+                current = result
+            }
+        }
+
+        // Step 0.4: Purple-fringe suppression (LSW 7.1). Runs AFTER
+        // channel-normalize so the hue measurement sees a balanced
+        // RGB triple. Pixels outside the purple band pass through
+        // unchanged at the GPU level — the kernel itself short-
+        // circuits on the saturation gate and hue distance, so the
+        // pass is cheap on already-clean sources.
+        if toneCurve.reducePurpleFringe {
+            let result = borrow(width: w, height: h, format: input.pixelFormat)
+            borrowed.append(result)
+            if let enc = cmdBuf.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(purpleFringePSO)
+                enc.setTexture(current, index: 0)
+                enc.setTexture(result, index: 1)
+                struct PurpleParams { var strength: Float }
+                var pp = PurpleParams(strength: Float(toneCurve.purpleFringeStrength))
+                enc.setBytes(&pp, length: MemoryLayout<PurpleParams>.stride, index: 0)
+                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: purpleFringePSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            current = result
         }
 
         // Step 0.5: Atmospheric chromatic dispersion correction (Path A).
@@ -272,6 +359,7 @@ final class Pipeline {
                 amounts: sharpen.waveletScales.map { Float($0) },
                 baseSigma: 1.0,
                 noiseThreshold: Float(sharpen.waveletNoiseThreshold),
+                edgeAware: sharpen.edgeAwareBlur,
                 pipeline: self, commandBuffer: cmdBuf,
                 borrowed: &borrowed
             )
@@ -287,6 +375,7 @@ final class Pipeline {
                 sigma: Float(sharpen.radius),
                 amount: Float(sharpen.amount),
                 adaptive: sharpen.adaptive,
+                edgeAware: sharpen.edgeAwareBlur,
                 pipeline: self, commandBuffer: cmdBuf,
                 borrowed: &borrowed
             )
@@ -403,6 +492,39 @@ final class Pipeline {
             current = result
         }
 
+        // Gamma-encode the tone-block input so subsequent ops (LUT,
+        // B+C, H+S, Saturation) operate in perceptual sRGB space —
+        // a slider midpoint then lands at the perceived midtone the
+        // user sees, not at linear 0.5 (≈ perceptual 0.73). The
+        // matching decode at the END of the tone block returns the
+        // texture to linear before downstream stages (display chain
+        // / file write) re-apply their own encoding. Skipped when no
+        // tone op will run — saves a redundant pair of dispatches on
+        // every preview frame in the no-tone case.
+        // Tone subsystem is gated on `toneCurve.enabled` — when the user
+        // explicitly disabled the Tone Curve section, NOTHING tone-side
+        // fires (including solarDualZone). Dual-zone selects WHICH LUT
+        // is built upstream (in PreviewView.ensureLUT, BatchJob, and
+        // AppModel bake-in); here we just need the standard enabled +
+        // LUT-present check.
+        let toneOpsActive = (toneCurve.enabled && toneCurveLUT != nil)
+            || (toneCurve.enabled && !bcIsIdentity)
+            || (toneCurve.enabled && (abs(toneCurve.highlights) > 1e-4 || abs(toneCurve.shadows) > 1e-4))
+            || (toneCurve.enabled && abs(toneCurve.saturation - 1.0) > 1e-4)
+        if toneOpsActive {
+            let result = borrow(width: w, height: h, format: input.pixelFormat)
+            borrowed.append(result)
+            if let enc = finalCmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(gammaEncodePSO)
+                enc.setTexture(current, index: 0)
+                enc.setTexture(result, index: 1)
+                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: gammaEncodePSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            current = result
+        }
+
         if toneCurve.enabled, let lut = toneCurveLUT {
             let result = borrow(width: w, height: h, format: input.pixelFormat)
             borrowed.append(result)
@@ -466,8 +588,7 @@ final class Pipeline {
 
         // Saturation runs even when the tone-curve sub-section is off — it's
         // an independent control on the same panel. Skipped at identity (1.0)
-        // so the no-op case costs nothing. Always last in the chain so it
-        // operates on the final RGB the user will see.
+        // so the no-op case costs nothing.
         if toneCurve.enabled, abs(toneCurve.saturation - 1.0) > 1e-4 {
             let result = borrow(width: w, height: h, format: input.pixelFormat)
             borrowed.append(result)
@@ -478,6 +599,47 @@ final class Pipeline {
                 var p = SaturationParamsCPU(saturation: Float(toneCurve.saturation))
                 enc.setBytes(&p, length: MemoryLayout<SaturationParamsCPU>.stride, index: 0)
                 let (tgC, tgS) = dispatchThreadgroups(for: result, pso: satPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            current = result
+        }
+
+        // Coloring (Affinity-style gradation curves). Runs AFTER
+        // saturation so the user's per-channel curve edits aren't
+        // pre-empted by a saturation = 0 grayscale. The LUT is built
+        // CPU-side from the four control-point arrays (Master + R/G/B)
+        // and uploaded as a 1D rgba16Float texture; the kernel then
+        // does a single sample(in.{r,g,b}).{r,g,b} lookup per pixel —
+        // same cost shape as the existing tone-curve LUT lookup.
+        if coloring.enabled && !coloringIsIdentity {
+            let result = borrow(width: w, height: h, format: input.pixelFormat)
+            borrowed.append(result)
+            let lutTex = ColoringLUT.build(coloring, device: device)
+            if let enc = finalCmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(coloringPSO)
+                enc.setTexture(current, index: 0)
+                enc.setTexture(result, index: 1)
+                enc.setTexture(lutTex, index: 2)
+                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: coloringPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
+            current = result
+        }
+
+        // Closing decode: undo the gamma encode we did before the LUT
+        // so downstream stages (display chain, file writer) see linear
+        // values again. Mirror of the entry-side gating above so we
+        // don't decode something we never encoded.
+        if toneOpsActive {
+            let result = borrow(width: w, height: h, format: input.pixelFormat)
+            borrowed.append(result)
+            if let enc = finalCmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(gammaDecodePSO)
+                enc.setTexture(current, index: 0)
+                enc.setTexture(result, index: 1)
+                let (tgC, tgS) = dispatchThreadgroups(for: result, pso: gammaDecodePSO)
                 enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
                 enc.endEncoding()
             }
@@ -734,27 +896,53 @@ final class Pipeline {
     /// downsampled buffer); cheap enough to do on every Pipeline.process
     /// call, which the live preview triggers on every frame change.
     private func computeAutoWB(input: MTLTexture) -> WhiteBalanceCorrection {
-        let w = input.width, h = input.height
-        guard w > 0, h > 0 else { return .identity }
+        guard let planes = readDownsampledRGBPlanes(input: input) else { return .identity }
+        return WhiteBalance.computeGrayWorld(
+            red: planes.red, green: planes.green, blue: planes.blue,
+            width: planes.width, height: planes.height,
+            reference: .green,
+            backgroundPercentile: 0.05
+        )
+    }
 
-        // Downsample target along the longest edge. 256 is enough for the
-        // gray-world stats — we just want per-channel mean of mid-range
-        // pixels.
+    /// Channel-normalise (LSW 7.2.1): align per-channel [p1, p99]
+    /// windows on the reference channel's range. Returns identity when
+    /// the auto-engage gate (channel p99 spread ≤ 30%) misses or the
+    /// downsample readback fails. Reuses the `apply_white_balance`
+    /// kernel via the shared offset+scale shape.
+    private func computeChannelNormalize(input: MTLTexture) -> WhiteBalanceCorrection {
+        guard let planes = readDownsampledRGBPlanes(input: input) else { return .identity }
+        guard ChannelNormalize.shouldEngage(
+            red: planes.red, green: planes.green, blue: planes.blue
+        ) else { return .identity }
+        return ChannelNormalize.compute(
+            red: planes.red, green: planes.green, blue: planes.blue,
+            width: planes.width, height: planes.height,
+            reference: .green
+        )
+    }
+
+    /// Shared readback: downsample to a 256-on-longest-edge shared-
+    /// storage texture, slice the interleaved RGBA bytes into three
+    /// row-major float planes. Used by both auto-WB and channel-
+    /// normalize so the GPU readback runs once when both auto-engage
+    /// in the same frame.
+    private func readDownsampledRGBPlanes(
+        input: MTLTexture
+    ) -> (red: [Float], green: [Float], blue: [Float], width: Int, height: Int)? {
+        let w = input.width, h = input.height
+        guard w > 0, h > 0 else { return nil }
         let targetMax = 256
         let scale = max(1, max(w, h) / targetMax)
         let dwsW = max(1, w / scale)
         let dwsH = max(1, h / scale)
-
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba32Float, width: dwsW, height: dwsH, mipmapped: false
         )
         desc.storageMode = .shared
         desc.usage = [.shaderRead, .shaderWrite]
         guard let staging = device.makeTexture(descriptor: desc),
-              let cmd = commandQueue.makeCommandBuffer() else {
-            return .identity
-        }
-
+              let cmd = commandQueue.makeCommandBuffer() else { return nil }
         let scaler = MPSImageBilinearScale(device: device)
         var transform = MPSScaleTransform(
             scaleX: Double(dwsW) / Double(w),
@@ -767,7 +955,6 @@ final class Pipeline {
         }
         cmd.commit()
         cmd.waitUntilCompleted()
-
         let pixelCount = dwsW * dwsH
         var rgba = [Float](repeating: 0, count: pixelCount * 4)
         rgba.withUnsafeMutableBufferPointer { buf in
@@ -778,7 +965,6 @@ final class Pipeline {
                 mipmapLevel: 0
             )
         }
-
         var red   = [Float](repeating: 0, count: pixelCount)
         var green = [Float](repeating: 0, count: pixelCount)
         var blue  = [Float](repeating: 0, count: pixelCount)
@@ -787,13 +973,7 @@ final class Pipeline {
             green[i] = rgba[i * 4 + 1]
             blue[i]  = rgba[i * 4 + 2]
         }
-
-        return WhiteBalance.computeGrayWorld(
-            red: red, green: green, blue: blue,
-            width: dwsW, height: dwsH,
-            reference: .green,
-            backgroundPercentile: 0.05
-        )
+        return (red, green, blue, dwsW, dwsH)
     }
 
     @discardableResult
@@ -816,6 +996,9 @@ final class Pipeline {
     var stackPipeline: MTLComputePipelineState { stackPSO }
     var subtractPipeline: MTLComputePipelineState { subPSO }
     var waddPipeline: MTLComputePipelineState { waddPSO }
+    var guidedPackPSO:    MTLComputePipelineState { guidedPackPSOInternal }
+    var guidedCoeffPSO:   MTLComputePipelineState { guidedCoeffPSOInternal }
+    var guidedComposePSO: MTLComputePipelineState { guidedComposePSOInternal }
 }
 
 /// Mirror of the Metal `SaturationParams` struct; sent via `setBytes`.

@@ -76,9 +76,98 @@ final class AppModel: ObservableObject {
     @Published var sharpen = SharpenSettings()
     @Published var stabilize = StabilizeSettings()
     @Published var toneCurve = ToneCurveSettings()
+    /// Hue tint + channel-mixer pass that runs AFTER the tone curve.
+    /// Lets the user paint a solar/lunar colour onto a mono capture,
+    /// or push individual R/G/B channels on an OSC capture without
+    /// touching the main tone curve.
+    @Published var coloring = ColoringSettings()
 
-    // Before/After compare — toggle, not slider.
-    @Published var showAfter: Bool = true
+    // Compare side panel — when on, two thumbnails appear next to the
+    // preview: top = the currently displayed file (= the stacked /
+    // memory output, no manipulations baked in unless the user did
+    // bake-in), bottom = the source SER's first frame (= "before
+    // stack"). The main preview itself always shows the manipulated
+    // result; the side panel is purely for at-a-glance comparison.
+    // Replaced the old Before/After main-view flip toggle (2026-05-03).
+    @Published var compareSidePanelVisible: Bool = false
+
+    /// Highlight-clipped overlay (LSW 8.8 parity). When on, the preview
+    /// shader tints every pixel that reaches the display's max output
+    /// (per-channel ≥ 0.995 after the full display chain) solid red so
+    /// the user can see at a glance which features are blowing out
+    /// after sharpen / deconv / tone-curve. Purely diagnostic — never
+    /// touches the pipeline or the saved file. Toggled from the toolbar
+    /// (keyboard shortcut "C"). Default OFF so first-time users aren't
+    /// startled by a red planet limb.
+    @Published var highlightClipped: Bool = false
+
+    /// URL of the source SER that produced the most recent
+    /// lucky-stack output. Set by `runNextLuckyStackItem` and read by
+    /// the compare side panel for the "before stack" thumbnail.
+    /// Persists for the duration of the session — survives navigating
+    /// to Outputs / Memory and back. nil until the first stack run.
+    @Published var lastStackedSourceURL: URL? = nil
+
+    /// Thumbnail of frame 0 of `lastStackedSourceURL`. Pre-loaded by
+    /// `ThumbnailLoader.serFrameZero` when the source URL is set, so
+    /// the compare side panel can render synchronously without a
+    /// disk read on every toggle.
+    @Published var lastStackedSourceThumbnail: NSImage? = nil
+
+    /// Block A.5 v1 — chronologically-ordered per-frame XY shifts (in
+    /// pixels) from the most recent stabilizer run. The PreviewStatsHUD
+    /// renders a sparkline tracing the magnitude over time so the user
+    /// can see at a glance how much atmospheric drift the registration
+    /// step had to absorb. nil until the first Stabilize completes.
+    @Published var lastStabilizerShifts: [SIMD2<Float>]? = nil
+
+    // MARK: - Folder watcher (auto-stack realtime mode, LSW 5.2 parity)
+    //
+    // When active, a kqueue watcher + 2 s poll timer pick up freshly-
+    // captured SER files that LAND in the watched folder AFTER watching
+    // started (existing files are snapshotted as "seen" so a full archive
+    // isn't re-stacked). Each new file is held until its size is stable
+    // (capture finished) then auto-stacked one-at-a-time through the
+    // existing lucky-stack queue. Session-only — never auto-resumes on
+    // launch; the folder is remembered via bookmark for the picker default.
+    @Published var folderWatchActive: Bool = false
+    @Published var watchedFolderURL: URL? = nil
+    /// Human-readable live status for the watch UI (e.g. "Watching Jup/ —
+    /// 3 stacked, waiting for new captures…").
+    @Published var folderWatchStatus: String = ""
+    /// Count of files auto-stacked since the current watch session started.
+    @Published var folderWatchStackedCount: Int = 0
+
+    var folderWatcher: FolderWatcher?
+    /// Poll timer: promotes size-stable files to the ready queue + drives
+    /// the one-at-a-time auto-stack pump. Runs the whole time watching is
+    /// active (cheap — a stat() per pending file every 2 s).
+    var folderWatchPollTimer: Timer?
+    /// SER URLs already seen (existing-at-start snapshot + everything
+    /// enqueued) so each file is only ever auto-stacked once.
+    var watchSeenURLs: Set<URL> = []
+
+    /// 5-second poller that re-stats every catalog file, so an in-progress
+    /// upload (e.g. SharpCap → NAS share) shows its growing size live and
+    /// flips the row to "uploading" until the size stops changing. Cheap —
+    /// one stat() per Inputs file. See `pollInputSizes()`.
+    var inputPollTimer: Timer?
+    /// Last observed size per file URL, used by `pollInputSizes()` to
+    /// detect growth between consecutive ticks. A tick with no change
+    /// flips `isUploading` back to false. New catalog entries seed this
+    /// from their initial `sizeBytes` so we only flag on detected growth.
+    var lastSeenInputSizes: [URL: Int64] = [:]
+    /// Size-stability tracker for files currently being written.
+    var watchStability = WatchStabilityTracker(requiredStableSamples: 2)
+    /// Files confirmed stable + waiting to be auto-stacked (FIFO).
+    var watchReadyURLs: [URL] = []
+    /// Session-level community-share decision for the active watch. Set
+    /// once when the watch is armed (so the per-stack interactive prompt
+    /// never interrupts the unattended auto-stack flow). true = silently
+    /// upload each stacked thumbnail; false = never share during the
+    /// session. Ignored when no watch is active (manual stacks keep the
+    /// interactive prompt).
+    var watchSessionAutoShare: Bool = false
 
     // Job status for batch runs
     @Published var jobStatus: JobStatus = .idle
@@ -126,13 +215,113 @@ final class AppModel: ObservableObject {
     // Recomputed when the preview file changes. Used by the tone-curve editor
     // for its overlay and by the Stretch button for auto-endpoint detection.
     @Published var previewHistogram: [UInt32] = []
+    /// Per-channel R/G/B histogram for OSC/colour images. Populated
+    /// alongside `previewHistogram` by the same load path; rendered as
+    /// three coloured overlays by the Tone Curve editor when
+    /// `.isColor` is true. Empty for mono / unloaded.
+    @Published var previewHistogramRGB: ChannelHistogram = ChannelHistogram(r: [], g: [], b: [])
     @Published var histogramLogScale: Bool = false
 
     // SER scrub state — frame index and frame count for the currently-shown
     // SER. Set by the preview coordinator after reading the SER header;
     // re-set to (0, 0) when the active file isn't SER.
     @Published var previewSerFrameIndex: Int = 0
+    /// True while the user is actively dragging the SER scrub knob.
+    /// Set by ScrubTrack's DragGesture (onChanged → true, onEnded →
+    /// false). PreviewView's scrub-index-changed observer switches to
+    /// "show nearest already-cached frame, skip new decodes" while
+    /// this is true — keeps the UI responsive on remote / huge files.
+    /// On release, falls back to the normal full-res decode path so
+    /// the landed frame is exact.
+    @Published var isSerScrubbing: Bool = false
+
+    /// Trim range for the SER export feature. nil = no trim (full
+    /// range). Both clamped to [0, previewSerFrameCount-1] when set.
+    /// Reset to nil on every new SER file load so a fresh capture
+    /// doesn't inherit the previous file's range.
+    @Published var serTrimStart: Int? = nil
+    @Published var serTrimEnd: Int? = nil
+
+    /// Export crop region in SOURCE PIXEL coordinates. nil = no crop
+    /// (full frame). Engine cropper guarantees no aspect distortion —
+    /// the rect is applied verbatim (output dims = rect.size). Both
+    /// portrait and landscape aspect ratios supported. Reset to nil
+    /// on every new SER file load. Live overlay on preview shows the
+    /// rect when set.
+    @Published var serCropRect: CGRect? = nil
+    /// User-chosen aspect-ratio preset for the crop. The crop rect
+    /// auto-snaps to this ratio when the user adjusts size/position.
+    /// `.free` lets the user pick arbitrary dimensions.
+    @Published var serCropAspect: SerCropAspect = .free
+    /// True while the export panel is open — the preview gates its
+    /// overlay rendering on this.
+    @Published var serExportPanelOpen: Bool = false
+
+    /// Export-panel settings hoisted to the model so they SURVIVE
+    /// closing + re-opening the SerExportPanel window. Otherwise
+    /// SwiftUI @State resets on each Window re-open and the user has
+    /// to re-pick resize / rotation / format / fps for every export.
+    /// User workflow: tune once, export N variants in a row.
+    @Published var serExportFormat: SerExportFormat = .ser
+    @Published var serExportFPS: Int = 10
+    @Published var serExportTargetFrames: Int = 60
+    @Published var serExportBakeIn: Bool = false
+    @Published var serExportResizeDivisor: Int = 1
+    @Published var serExportRotationDegrees: Int = 0
+    /// Frame stride: deprecated as a user-facing knob. The export
+    /// panel now picks frames evenly from the trim range using
+    /// `targetFrameCount = duration × fps`. Kept on the model so the
+    /// writer APIs and any external preset payloads remain compatible;
+    /// the run*Export dispatch always passes stride=1.
+    @Published var serExportFrameStride: Int = 1
+    /// Output playback duration in seconds. Drives `targetFrameCount`
+    /// together with `serExportFPS`. User picks duration + smoothness
+    /// (fps); the panel derives how many frames to write (evenly from
+    /// the trim range), so the user never has to think in
+    /// "frames / stride" terms. Default 5 s = good showcase clip
+    /// length without being too tiny.
+    @Published var serExportDurationSeconds: Double = 5.0
+    /// Override for the source SER's capture FPS. Used exclusively by
+    /// the "Match source duration" button (no other math depends on
+    /// it). nil = trust auto-detection from the SER timestamp trailer;
+    /// fallback to 30.0 if undetectable.
+    @Published var serExportSourceFPSOverride: Double? = nil
+    /// Remembers the last-viewed frame index per SER URL so switching
+    /// section away and back (Inputs → Outputs → Inputs) restores the
+    /// scrubber instead of resetting to frame 0. Stored only in-memory
+    /// — session-scoped. Populated by `switchToSection` (and by file
+    /// selection within the same section, indirectly). Cleared on
+    /// folder open.
+    var rememberedSerFrameIndices: [URL: Int] = [:]
+    /// Per-URL trim range memory. When the user sets trim markers on
+    /// a SER, exports, and later returns to the same source, the
+    /// trim is restored from this dict so they don't have to re-pick
+    /// the IN/OUT positions for follow-up exports with different
+    /// resize / rotation / fps settings.
+    var rememberedSerTrimRanges: [URL: (Int?, Int?)] = [:]
+    /// URL of the just-exported file to show in the Export Preview
+    /// window. Set by SerExportPanel after a successful write; the
+    /// Window scene observes this and opens via openWindow().
+    /// nil = no preview pending.
+    @Published var exportPreviewURL: URL? = nil
     @Published var previewSerFrameCount: Int = 0
+    /// Captured FPS derived from the SER's per-frame timestamp
+    /// trailer. nil when the trailer is missing or degenerate; the
+    /// scrub bar then falls back to a 30 fps display estimate.
+    @Published var previewSerCapturedFPS: Double? = nil
+
+    /// Handle to the in-flight lucky-stack engine task, so the progress
+    /// overlay's Stop button can cancel it. nil when no stack is running.
+    var luckyStackTask: Task<Void, Never>?
+    /// Monotonic generation counter for LuckyStack runs. Bumped on
+    /// every `runNextLuckyStackItem` call AND on `cancelLuckyStack`.
+    /// Per-run progress closures capture the value seen at start; they
+    /// no-op if a later bump has invalidated them. Prevents a stale
+    /// callback from the previously-cancelled stack writing into the
+    /// new queue at an out-of-bounds index (crash root-cause:
+    /// Array._checkSubscript_mutating trap at
+    /// runNextLuckyStackItem closure when Stop → Run again).
+    private var luckyStackGeneration: Int = 0
 
     // In-memory playback / sequence state. Populated by "Run Stabilize" so the
     // user can scrub, play and export the aligned frames before committing
@@ -154,7 +343,26 @@ final class AppModel: ObservableObject {
     // SER in-file playback. When the user has a multi-frame SER selected,
     // the play button advances `previewSerFrameIndex` (instead of cycling
     // between files) so they can preview the captured stream.
+    /// Set true by `applyPreset(userInitiated: true)` when the user
+    /// explicitly clicks a target chip or picks a preset from the menu.
+    /// Reset by `autoApplyDefaultPreset` on new-folder open. The
+    /// file-change auto-detect (BrandHeader → TargetPickerRow) checks
+    /// this flag and refuses to override an explicit user pick — fixes
+    /// the post-stack "Sun jumps to Moon" bug where the output filename
+    /// keyword-matched a different target.
+    @Published var lastPresetWasUserInitiated: Bool = false
+
     @Published var serPlaybackActive: Bool = false
+    /// Playback speed multiplier on top of `blinkRate` (1× = base rate;
+    /// 2/4/8/16× speed up frame advance). Picker sits next to the frame
+    /// counter in the scrub bar. Live: changing while playing restarts
+    /// the timer with the new interval, no need to stop/start.
+    @Published var serPlaybackSpeedMultiplier: Double = 1.0 {
+        didSet {
+            guard serPlaybackActive, serPlaybackSpeedMultiplier != oldValue else { return }
+            startSerPlayback()  // re-arms the timer at the new interval
+        }
+    }
     private var serPlaybackTimer: Timer?
 
     /// Display-only auto-range stretch. OFF by default (2026-05-01):
@@ -178,7 +386,9 @@ final class AppModel: ObservableObject {
     // `previewStats` is filled by PreviewCoordinator as data becomes
     // available (header → current frame → distribution).
     @Published var previewStats: PreviewStats = PreviewStats()
-    @Published var hudVisible: Bool = true
+    // Default OFF — the info overlay obscures the image on first open;
+    // the user toggles it on (the "i" button) when they want the stats.
+    @Published var hudVisible: Bool = false
 
     /// Visible viewport in normalised image coordinates (0…1, top-left
     /// origin). Mini-map overlay was disabled — kept on the model so the
@@ -258,6 +468,7 @@ final class AppModel: ObservableObject {
     }
 
     private static let outputBookmarkKey = "AstroSharper.customOutputBookmark.v1"
+    private static let watchFolderBookmarkKey = "AstroSharper.watchFolderBookmark.v1"
 
     /// Pin a user-chosen output folder. Stays sticky across folder switches
     /// (`autoOutputFolder` won't override it) and persists across launches
@@ -359,6 +570,12 @@ final class AppModel: ObservableObject {
     ///
     /// Never prompts; the sandbox default is the silent fallback when both
     /// of the user-facing locations refuse writes (e.g. read-only NAS).
+    /// Public wrapper for views that need to resolve where outputs land
+    /// (e.g. the SER Export panel). Just forwards to the existing logic.
+    func resolveWritableOutputFolderPublic(implicit suggestion: URL?) -> URL? {
+        return resolveWritableOutputFolder(implicit: suggestion)
+    }
+
     private func resolveWritableOutputFolder(implicit suggestion: URL?) -> URL? {
         // Picked > current auto > implicit suggestion > sandbox fallback.
         if let picked = pickedOutputFolder, canWriteAt(folder: picked) {
@@ -371,15 +588,33 @@ final class AppModel: ObservableObject {
             return suggested
         }
         if let fallback = sandboxDefaultOutputFolder(), canWriteAt(folder: fallback) {
-            autoOutputFolder = fallback
+            // Do NOT pin the sandbox container into `autoOutputFolder`.
+            // Pinning made the fallback sticky: once it fired (e.g. a
+            // single-file open with no folder scope), every later run
+            // preferred the sandbox container even after opening a
+            // writable folder. Return it transiently instead so the next
+            // open / watch re-tries the real next-to-input location.
+            NSLog("Output folder: no writable location next to input — using sandbox container fallback")
             return fallback
         }
         return nil
     }
 
     // Which file IDs are the actual batch target right now.
+    //
+    // Precedence: marked > selected > implicit-preview-fallback. The
+    // fallback covers the "I only have one file and it's already
+    // showing in the preview" case — selecting it explicitly is then
+    // a redundant click. We only apply the fallback when nothing else
+    // is selected AND the previewed file is part of the current catalog
+    // (so the fallback never picks a stale ID after a section switch).
     var batchTargetIDs: Set<FileEntry.ID> {
-        markedFileIDs.isEmpty ? selectedFileIDs : markedFileIDs
+        if !markedFileIDs.isEmpty { return markedFileIDs }
+        if !selectedFileIDs.isEmpty { return selectedFileIDs }
+        if let id = previewFileID, catalog.files.contains(where: { $0.id == id }) {
+            return Set([id])
+        }
+        return []
     }
 
     var canApply: Bool {
@@ -463,6 +698,57 @@ final class AppModel: ObservableObject {
         // Restore the previously-chosen output folder (if any) so the user's
         // one-time pick sticks across launches.
         restoreOutputFolderFromBookmark()
+
+        // Live size-refresh for the Inputs list — see `pollInputSizes()`.
+        startInputSizePolling()
+    }
+
+    /// Periodically re-stat catalog files so the size column reflects an
+    /// in-progress upload (SharpCap writing to a NAS, for example) and so
+    /// the row can be visually marked "still uploading — don't stack yet"
+    /// until the size stabilises. 5 s is the sweet spot — fast enough that
+    /// the size visibly ticks up for the user, slow enough that the NAS
+    /// stat() traffic stays negligible (one round-trip per file every 5 s).
+    private func startInputSizePolling() {
+        inputPollTimer?.invalidate()
+        inputPollTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            self?.pollInputSizes()
+        }
+    }
+
+    /// One tick of the input-list size poller. For each catalog file:
+    /// re-stat its current size; if it grew since the last tick, mark the
+    /// row as uploading (and update the visible size); if it stayed the
+    /// same, clear the uploading flag (the upload finished). Rebuilds the
+    /// catalog array only when something actually changed, so an idle
+    /// catalog of stable files costs nothing beyond the stat() calls.
+    private func pollInputSizes() {
+        guard !catalog.files.isEmpty else { return }
+        var changed = false
+        var updated = catalog.files
+        var seenURLs = Set<URL>()
+        for i in updated.indices {
+            let url = updated[i].url
+            seenURLs.insert(url)
+            let now = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? updated[i].sizeBytes
+            let prev = lastSeenInputSizes[url] ?? updated[i].sizeBytes
+            let stillUploading = now != prev
+            if updated[i].sizeBytes != now {
+                updated[i].sizeBytes = now
+                changed = true
+            }
+            if updated[i].isUploading != stillUploading {
+                updated[i].isUploading = stillUploading
+                changed = true
+            }
+            lastSeenInputSizes[url] = now
+        }
+        // Prune the size dictionary so it doesn't grow unbounded across
+        // catalog switches.
+        if lastSeenInputSizes.count != seenURLs.count {
+            lastSeenInputSizes = lastSeenInputSizes.filter { seenURLs.contains($0.key) }
+        }
+        if changed { catalog.files = updated }
     }
 
     // MARK: - Folder
@@ -551,6 +837,9 @@ final class AppModel: ObservableObject {
     /// best built-in preset (the first one). Leaves the active preset alone if
     /// no keyword matches so the user's current settings aren't clobbered.
     private func autoApplyDefaultPreset(candidates: [String]) {
+        // Opening a new folder = fresh start, clear the user's previous
+        // explicit-pick pin so this folder's auto-detect can run normally.
+        lastPresetWasUserInitiated = false
         guard autoDetectPresetOnOpen else { return }
         guard let target = PresetAutoDetect.detect(in: candidates) else { return }
         guard let preset = presets.builtIn.first(where: { $0.target == target }) else { return }
@@ -616,6 +905,19 @@ final class AppModel: ObservableObject {
     func switchToSection(_ section: CatalogSection) {
         guard section != displayedSection else { return }
 
+        // Remember the current SER frame index before we leave so that
+        // coming back to this file (within this app session) restores
+        // the scrubber to where the user stopped. Pinned use case:
+        // scrubbing in Inputs to compare with an exported single frame
+        // in Outputs, then back to Inputs — without this every
+        // round-trip would reset to frame 0.
+        if let id = previewFileID,
+           let entry = catalog.files.first(where: { $0.id == id }),
+           entry.isSER,
+           previewSerFrameCount > 0 {
+            rememberedSerFrameIndices[entry.url] = previewSerFrameIndex
+        }
+
         // Stash the currently-active section's mirrored state.
         stashedStates[displayedSection] = CatalogSectionState(
             catalog: catalog,
@@ -654,6 +956,15 @@ final class AppModel: ObservableObject {
             catalog.load(from: root)
             previewFileID = catalog.files.first?.id
             loadThumbnailsAsync()
+        }
+
+        // Entering Inputs while folder-watch is active: merge any captures
+        // that arrived since the catalog was last built so the user sees
+        // them without re-opening the folder. Runs after displayedSection
+        // is set so the guard inside passes.
+        if section == .inputs {
+            refreshInputsFromWatch()
+            if previewFileID == nil { previewFileID = catalog.files.first?.id }
         }
     }
 
@@ -788,6 +1099,53 @@ final class AppModel: ObservableObject {
     /// from the list or its section gets stashed.
     func clearReferenceMarker() {
         referenceFileID = nil
+    }
+
+    // MARK: - Deletion from disk (moves files to Trash, then removes from list)
+
+    /// Confirm + move-to-Trash flow for one or more files. The actual deletion
+    /// uses `NSWorkspace.recycle` which puts the items in the user's Trash —
+    /// recoverable via Finder, never a hard unlink. After a successful trash
+    /// the affected IDs are removed from the catalog via `removeFromList`.
+    ///
+    /// The confirmation alert is destructive-styled and lists the filenames so
+    /// the user can't mis-click the wrong row. Single-file vs. multi-file copy
+    /// is handled separately for natural phrasing.
+    func deleteFilesFromDisk(_ ids: Set<FileEntry.ID>) {
+        guard !ids.isEmpty else { return }
+        let entries = catalog.files.filter { ids.contains($0.id) }
+        guard !entries.isEmpty else { return }
+        let urls = entries.map(\.url)
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        if entries.count == 1 {
+            alert.messageText = "Delete \u{201C}\(entries[0].name)\u{201D}?"
+            alert.informativeText = "The file will be moved to the Trash. You can recover it from Finder."
+        } else {
+            alert.messageText = "Delete \(entries.count) files?"
+            let names = entries.prefix(5).map { "\u{2022} \($0.name)" }.joined(separator: "\n")
+            let more  = entries.count > 5 ? "\n\u{2026} and \(entries.count - 5) more" : ""
+            alert.informativeText = "The following files will be moved to the Trash. You can recover them from Finder.\n\n\(names)\(more)"
+        }
+        alert.addButton(withTitle: "Delete")   // .firstButtonReturn
+        alert.addButton(withTitle: "Cancel")   // .secondButtonReturn
+        if let destructive = alert.buttons.first { destructive.hasDestructiveAction = true }
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        NSWorkspace.shared.recycle(urls) { [weak self] _, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error {
+                    // Partial / failed trash: surface in the job status bar so
+                    // the user sees why nothing disappeared from the list.
+                    self.jobStatus = .error("Delete failed: \(error.localizedDescription)")
+                    return
+                }
+                self.removeFromList(ids)
+            }
+        }
     }
 
     // MARK: - Deletion from list (doesn't touch disk)
@@ -964,6 +1322,10 @@ final class AppModel: ObservableObject {
                     return PlaybackFrame(id: res.id, sourceURL: res.url,
                                          texture: res.texture, appliedOps: trail)
                 }
+                // A.5 v1 — surface per-frame XY shifts to the HUD for the
+                // sparkline. Reference frame is (0,0); other frames carry
+                // the chronological alignment trail.
+                self.lastStabilizerShifts = result.shifts
                 self.playback.currentIndex = 0
                 self.playback.isPlaying = false
                 // Land the user on MEMORY tab so they immediately see the
@@ -1102,7 +1464,8 @@ final class AppModel: ObservableObject {
             fps: playback.fps,
             sharpen: sharpen,
             toneCurve: toneCurve,
-            toneCurveLUT: lut
+            toneCurveLUT: lut,
+            coloring: coloring
         )
         jobStatus = .running(processed: 0, total: playback.frames.count)
         Exporter.export(
@@ -1219,7 +1582,247 @@ final class AppModel: ObservableObject {
         luckyStack.queue.removeAll()
     }
 
+    // MARK: - Folder watcher (auto-stack realtime mode)
+
+    /// Default folder to offer in the watch picker: the currently-open
+    /// catalog root, then the last-watched bookmark, then nil.
+    var watchPickerDefaultURL: URL? {
+        catalog.rootURL ?? watchedFolderURL
+    }
+
+    /// Begin watching `url` for new SER captures. Snapshots the existing
+    /// `.ser` files as "seen" (backlog ignored per user choice), persists
+    /// the folder bookmark, and starts the kqueue watcher + poll timer.
+    ///
+    /// `autoShare` is the session-level community-share decision made when
+    /// arming the watch — true uploads each stacked thumbnail silently,
+    /// false never shares. Either way the per-stack interactive prompt is
+    /// suppressed for the duration so the unattended flow isn't blocked.
+    func startFolderWatch(url: URL, autoShare: Bool = false) {
+        stopFolderWatch()   // clean slate if re-pointed
+
+        watchSessionAutoShare = autoShare
+        grantSecurityScope(url)
+        persistWatchFolderBookmark(url)
+        watchedFolderURL = url
+
+        // Land auto-stacked outputs in `<watchedFolder>/_luckystack` — the
+        // user expects them next to the captures, and we hold a read-write
+        // folder scope on the watch folder (it came from a folder picker),
+        // so the write succeeds where a single-file open's parent wouldn't.
+        // No circular-stack risk: outputs are .tif and the watcher scans
+        // only .ser non-recursively, so the subfolder is never re-ingested.
+        // An explicit user-picked output folder still wins (not overridden).
+        if pickedOutputFolder == nil {
+            let watchOut = url.appendingPathComponent("_luckystack", isDirectory: true)
+            if canWriteAt(folder: watchOut) {
+                autoOutputFolder = watchOut
+            }
+        }
+
+        // Backlog snapshot — every .ser already present is treated as
+        // already-handled so we only auto-stack files that ARRIVE later.
+        watchSeenURLs = Set(currentSerURLs(in: url))
+        watchStability.reset()
+        watchReadyURLs.removeAll()
+        folderWatchStackedCount = 0
+
+        let watcher = FolderWatcher(callbackQueue: .main) { [weak self] in
+            self?.handleWatchedFolderChange()
+        }
+        guard watcher.start(url: url) else {
+            jobStatus = .error("Couldn't watch \(url.lastPathComponent) — folder unreadable or access denied.")
+            releaseSecurityScope(url)
+            watchedFolderURL = nil
+            return
+        }
+        folderWatcher = watcher
+        folderWatchActive = true
+        updateFolderWatchStatus(extra: "waiting for new captures…")
+
+        // Poll every 2 s: promote size-stable files to ready + pump the
+        // auto-stack. The kqueue tells us WHEN the dir changes; the poll
+        // does the size-stability gating + serial draining.
+        folderWatchPollTimer?.invalidate()
+        folderWatchPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.folderWatchPollTick() }
+        }
+    }
+
+    /// Stop watching. Releases the kqueue + poll timer; the security scope
+    /// + bookmark are kept so the picker can re-offer the same folder.
+    func stopFolderWatch() {
+        folderWatcher?.stop()
+        folderWatcher = nil
+        folderWatchPollTimer?.invalidate()
+        folderWatchPollTimer = nil
+        watchStability.reset()
+        watchReadyURLs.removeAll()
+        folderWatchActive = false
+        if !folderWatchStatus.isEmpty {
+            folderWatchStatus = "Watch stopped."
+        }
+    }
+
+    /// kqueue fired — re-scan the folder and start tracking any .ser we
+    /// haven't seen yet for size stability.
+    private func handleWatchedFolderChange() {
+        guard folderWatchActive, let url = watchedFolderURL else { return }
+        for serURL in currentSerURLs(in: url) where !watchSeenURLs.contains(serURL) {
+            // First sighting — begin stability tracking. Don't add to
+            // seen yet; we only mark seen once it's enqueued so a file
+            // that vanishes mid-write doesn't get stuck "seen but unrun".
+            _ = watchStability.observe(url: serURL, size: fileSize(serURL))
+        }
+    }
+
+    /// 2 s tick: re-observe sizes of tracked files, move newly-complete
+    /// ones to the ready queue, then drain one into the stacker if idle.
+    private func folderWatchPollTick() {
+        guard folderWatchActive, let url = watchedFolderURL else { return }
+
+        // Re-scan so files that appeared between kqueue coalesced events
+        // still get tracked. Cheap on a capture folder (tens of files).
+        for serURL in currentSerURLs(in: url) where !watchSeenURLs.contains(serURL) {
+            let complete = watchStability.observe(url: serURL, size: fileSize(serURL))
+            if complete {
+                watchReadyURLs.append(serURL)
+                watchSeenURLs.insert(serURL)
+                watchStability.forget(serURL)
+            }
+        }
+        pumpWatchQueue()
+        // Keep the Inputs list live when the user is looking at it while
+        // captures stream in (the switch-into-Inputs path is handled in
+        // switchToSection; this covers "already viewing Inputs").
+        refreshInputsFromWatch()
+        updateFolderWatchStatus(
+            extra: watchReadyURLs.isEmpty && watchStability.pendingCount == 0
+                ? "waiting for new captures…"
+                : "\(watchStability.pendingCount) capturing, \(watchReadyURLs.count) queued"
+        )
+    }
+
+    /// Start the next ready file if the lucky-stack pipeline is idle. One
+    /// at a time so each file's auto-detected target preset is the one
+    /// active when it actually runs (no mid-run preset drift).
+    private func pumpWatchQueue() {
+        guard folderWatchActive else { return }
+        // Gate on "not currently running" rather than "idle" — a finished
+        // watched stack leaves jobStatus at `.done`, which is not `.idle`;
+        // we still want to pick up the next ready file. An `.error` from
+        // one bad capture shouldn't halt the whole watch session either.
+        if case .running = jobStatus { return }
+        guard !watchReadyURLs.isEmpty else { return }
+        let next = watchReadyURLs.removeFirst()
+
+        // Resolve target: filename auto-detect first, then the active
+        // preset (user's chosen chip). If neither yields a target, skip
+        // this file with a logged warning rather than stacking with
+        // generic defaults that never match the data.
+        if let detected = PresetAutoDetect.detect(in: [
+            next.lastPathComponent,
+            next.deletingLastPathComponent().lastPathComponent
+        ]), let preset = presets.builtIn.first(where: { $0.target == detected }) {
+            applyPreset(preset)
+            luckyStack.winjuposTarget = preset.target.rawValue
+        } else if presets.activeID == nil {
+            NSLog("FolderWatch: skipping %@ — no target detected from filename and no active preset", next.lastPathComponent)
+            updateFolderWatchStatus(extra: "skipped \(next.lastPathComponent) — no target")
+            // Try the next ready file on the following tick.
+            return
+        }
+
+        let suggested = watchedFolderURL?.appendingPathComponent("_luckystack", isDirectory: true)
+        guard let outputFolder = resolveWritableOutputFolder(implicit: suggested) else {
+            jobStatus = .error("No writable output folder — auto-stack paused.")
+            return
+        }
+
+        luckyStack.queue = [LuckyStackItem(url: next, meridianFlipped: false, keepPercent: luckyStack.keepPercent)]
+        let opts = LuckyStackOptions(mode: luckyStack.mode, keepPercent: luckyStack.keepPercent)
+        folderWatchStackedCount += 1
+        updateFolderWatchStatus(extra: "stacking \(next.lastPathComponent)…")
+        runNextLuckyStackItem(outputFolder: outputFolder, options: opts)
+    }
+
+    private func updateFolderWatchStatus(extra: String) {
+        guard let url = watchedFolderURL else { folderWatchStatus = ""; return }
+        let name = url.lastPathComponent
+        folderWatchStatus = "Watching \(name)/ — \(folderWatchStackedCount) stacked · \(extra)"
+    }
+
+    /// All `.ser` URLs currently in `folder` (non-recursive, hidden
+    /// skipped). Used for both the backlog snapshot and the poll re-scan.
+    private func currentSerURLs(in folder: URL) -> [URL] {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+        ) else { return [] }
+        return contents.filter { $0.pathExtension.lowercased() == "ser" }
+    }
+
+    private func fileSize(_ url: URL) -> Int {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+    }
+
+    /// Merge any .ser files from the watched folder that aren't yet in the
+    /// Inputs catalog into the live list — so freshly-captured files show
+    /// up without the user having to re-open the folder. Append-only (never
+    /// removes), so existing selection / marks / preview survive untouched
+    /// (FileEntry ids are per-entry UUIDs, so a full reload would lose them
+    /// — merging by URL preserves identity). No-op unless watching is active
+    /// AND the Inputs section is the one currently shown; `switchToSection`
+    /// calls it on entry to Inputs, and the poll tick calls it for the
+    /// already-open case.
+    private func refreshInputsFromWatch() {
+        guard folderWatchActive,
+              displayedSection == .inputs,
+              let folder = watchedFolderURL else { return }
+        let existing = Set(catalog.files.map { $0.url })
+        let newURLs = currentSerURLs(in: folder).filter { !existing.contains($0) }
+        guard !newURLs.isEmpty else { return }
+
+        var appended: [(id: UUID, url: URL)] = []
+        for url in newURLs {
+            let entry = FileCatalog.makeEntry(url: url)
+            catalog.files.append(entry)
+            appended.append((entry.id, entry.url))
+        }
+        // Keep the same name-sorted order `FileCatalog.load` produces.
+        catalog.files.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+
+        for (id, url) in appended {
+            Task.detached(priority: .utility) { [weak self] in
+                let img = ThumbnailLoader.load(url: url, maxDimension: 48)
+                await MainActor.run {
+                    guard let self, let idx = self.catalog.index(of: id) else { return }
+                    self.catalog.files[idx].thumbnail = img
+                }
+            }
+        }
+        NSLog("FolderWatch: merged %d new file(s) into Inputs list", newURLs.count)
+    }
+
+    private func persistWatchFolderBookmark(_ url: URL) {
+        if let bookmark = try? url.bookmarkData(
+            options: [.withSecurityScope],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        ) {
+            UserDefaults.standard.set(bookmark, forKey: Self.watchFolderBookmarkKey)
+        }
+    }
+
     private func runNextLuckyStackItem(outputFolder: URL, options: LuckyStackOptions) {
+        // Each call bumps generation. The progress closure below
+        // captures `myGeneration` and bails before any queue mutation
+        // if a later run (or a cancel) has bumped the counter — so a
+        // stale callback from a previously-stopped stack can never
+        // index into the rebuilt queue.
+        luckyStackGeneration &+= 1
+        let myGeneration = luckyStackGeneration
         guard let nextIdx = luckyStack.queue.firstIndex(where: { $0.status == .pending || $0.status == .processing }) else {
             jobStatus = .done(processed: luckyStack.queue.count, outputDir: outputFolder)
             return
@@ -1237,9 +1840,33 @@ final class AppModel: ObservableObject {
             ? outputFolder
             : outputFolder.appendingPathComponent(item.variantLabel, isDirectory: true)
         try? FileManager.default.createDirectory(at: variantDir, withIntermediateDirectories: true)
-        let outURL = variantDir.appendingPathComponent(outName)
+        // Never overwrite an existing output — number up (`name_1.tif`,
+        // `name_2.tif`, …) so repeated stacks of the same source with
+        // different settings sit side-by-side for comparison instead of
+        // clobbering each other.
+        let outURL = Self.uniqueOutputURL(variantDir.appendingPathComponent(outName))
         luckyStack.queue[nextIdx].status = .processing
         luckyStack.queue[nextIdx].progress = 0.0
+
+        // Compare side panel — track the source SER so the panel's
+        // bottom thumbnail ("before stack") can render synchronously
+        // when the user later toggles compare mode. Skip the thumbnail
+        // load when the source matches the previously-tracked URL so
+        // back-to-back stacks of the same file don't re-decode frame 0.
+        if lastStackedSourceURL != item.url {
+            lastStackedSourceURL = item.url
+            let sourceURL = item.url
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let thumb = ThumbnailLoader.load(url: sourceURL, maxDimension: 200)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    // Only commit if the URL hasn't been replaced by a
+                    // newer stack run while this thumbnail was decoding.
+                    guard self.lastStackedSourceURL == sourceURL else { return }
+                    self.lastStackedSourceThumbnail = thumb
+                }
+            }
+        }
 
         var perItemOpts = options
         perItemOpts.meridianFlipped = item.meridianFlipped
@@ -1268,8 +1895,21 @@ final class AppModel: ObservableObject {
         // is the "single source of truth for auto" the user asked
         // for: one toggle, no surprise interactions with stale
         // checkbox states.
-        perItemOpts.useAutoPSF = luckyStack.autoNuke ? true : luckyStack.autoPSF
+        // AutoPSF is sharpening — gate it on `sharpen.enabled`. When the
+        // user explicitly disabled the Sharpen section, NO sharpening
+        // fires, including the AutoNuke-driven AutoPSF Wiener post-pass.
+        // This matches the user-expectation that Sharpen OFF means OFF.
+        // To get AutoPSF without manual sharpen settings: enable Sharpen
+        // section, leave manual sliders at defaults; AutoNuke ON then
+        // drives the post-stack deconv.
+        let autoPSFWanted = luckyStack.autoNuke ? true : luckyStack.autoPSF
+        perItemOpts.useAutoPSF = sharpen.enabled && autoPSFWanted
         perItemOpts.autoPSFSNR = luckyStack.autoNuke ? 100 : luckyStack.autoPSFSNR
+        // C.2 cascade (auto-ROI fallback). AutoNuke leaves it OFF on
+        // purpose: AutoNuke is the "do everything safely" preset, and
+        // auto-ROI is opt-in until the bracket validates per-subject.
+        perItemOpts.useAutoPSFAutoROI = sharpen.enabled && (luckyStack.autoNuke ? false : luckyStack.autoPSFAutoROI)
+        perItemOpts.validateDrift = luckyStack.validateDrift
         // RFF user setting → per-run options. Auto = pass nil so the
         // engine's σ-aware formula computes the fractions per disc
         // geometry. Manual = pass the user's slider values. Off = pass
@@ -1290,6 +1930,14 @@ final class AppModel: ObservableObject {
         perItemOpts.denoisePostPercent = luckyStack.denoisePostPercent
         perItemOpts.useTiledDeconv = luckyStack.tiledDeconv
         perItemOpts.tiledDeconvAPGrid = luckyStack.tiledDeconvAPGrid
+        // C.4 — scope-formula tile-size override. Engine treats
+        // missing / non-positive scope params as "no override" via a
+        // logged silent fallback, so we always pass the toggle through
+        // and let the engine make the call.
+        perItemOpts.autoTileSizeFromScope = luckyStack.autoTileSize
+        perItemOpts.scopeFocalLengthMM = luckyStack.scopeFocalLengthMM > 0 ? luckyStack.scopeFocalLengthMM : nil
+        perItemOpts.scopePixelPitchUm = luckyStack.scopePixelPitchUm > 0 ? luckyStack.scopePixelPitchUm : nil
+        perItemOpts.scopeBarlowMagnification = luckyStack.scopeBarlow > 0 ? luckyStack.scopeBarlow : 1.0
         perItemOpts.useAutoKeepPercent = luckyStack.autoNuke ? true : luckyStack.autoKeepPercent
         // Stack-end remap: GUI toggle drives the engine flag. Default OFF
         // in luckyStack.autoRecoverDynamicRange — bare accumulator
@@ -1316,13 +1964,25 @@ final class AppModel: ObservableObject {
         perItemOpts.drizzleAASigma = Float(luckyStack.drizzleAASigma)
 
         if luckyStack.bakeInProcessing {
-            let lut: MTLTexture? = toneCurve.enabled
-                ? ToneCurveLUT.build(points: toneCurve.controlPoints, device: MetalDevice.shared.device)
-                : nil
+            // LUT selection: dual-zone takes priority when on, but the
+            // whole tone subsystem is gated on tone.enabled — if the user
+            // has explicitly disabled the Tone Curve section, no LUT is
+            // built and no tone modification (including dual-zone) fires
+            // in the bake-in path. Symmetric to PreviewView.ensureLUT
+            // and BatchJob's LUT builder.
+            let lut: MTLTexture?
+            if toneCurve.enabled && toneCurve.solarDualZone {
+                lut = ToneCurveLUT.buildSolarDualZone(device: MetalDevice.shared.device)
+            } else if toneCurve.enabled {
+                lut = ToneCurveLUT.build(points: toneCurve.controlPoints, device: MetalDevice.shared.device)
+            } else {
+                lut = nil
+            }
             perItemOpts.bakeIn = LuckyStackBakeIn(
                 sharpen: sharpen,
                 toneCurve: toneCurve,
-                toneCurveLUT: lut
+                toneCurveLUT: lut,
+                coloring: coloring
             )
         }
 
@@ -1377,13 +2037,22 @@ final class AppModel: ObservableObject {
             ])?.rawValue
         let autoNukeAtStart = luckyStack.autoNuke
 
-        LuckyStack.run(
+        luckyStackTask = LuckyStack.run(
             sourceURL: item.url,
             outputURL: outURL,
             options: perItemOpts,
             pipeline: stabilizerPipeline
         ) { [weak self] p in
             guard let self else { return }
+            // Cancellation / re-run guard: bail if this closure is from
+            // a generation that's no longer current. Pairs with the
+            // bump in cancelLuckyStack + the per-run bump above.
+            guard self.luckyStackGeneration == myGeneration else { return }
+            // Belt-and-suspenders bounds check — even with the
+            // generation guard we never want to subscript past the
+            // queue's count (e.g. if some other code path resets it
+            // mid-run without going through cancelLuckyStack).
+            guard nextIdx < self.luckyStack.queue.count else { return }
             switch p {
             case .opening:
                 self.luckyStack.queue[nextIdx].statusText = "opening"
@@ -1449,33 +2118,80 @@ final class AppModel: ObservableObject {
                 self.luckyStack.queue[nextIdx].status = .error
                 self.luckyStack.queue[nextIdx].statusText = msg
                 self.runNextLuckyStackItem(outputFolder: outputFolder, options: options)
+            case .cancelled:
+                // User pressed Stop. Drop the whole queue + reset status;
+                // do NOT advance to the next item.
+                self.luckyStack.queue.removeAll()
+                self.luckyStackTask = nil
+                self.jobStatus = .idle
             }
         }
     }
 
+    /// Abort an in-flight lucky stack. Cancels the detached engine task
+    /// (its grading + accumulate loops poll `Task.checkCancellation()` so
+    /// it unwinds within a frame), clears the pending queue, and resets
+    /// the job status so the progress overlay closes immediately. The
+    /// engine emits `.cancelled`, which removes any partial output file.
+    func cancelLuckyStack() {
+        guard luckyStackTask != nil || !luckyStack.queue.isEmpty else { return }
+        // Bump the run-generation FIRST. Any progress callbacks already
+        // dispatched on the MainActor by the engine (which can race
+        // past `Task.cancel()` for one or two ticks) will see the
+        // mismatch and no-op instead of writing into the about-to-be-
+        // cleared queue. Critical: must happen BEFORE removeAll().
+        luckyStackGeneration &+= 1
+        luckyStackTask?.cancel()
+        luckyStackTask = nil
+        luckyStack.queue.removeAll()
+        // Also stop a folder-watch session from immediately auto-stacking
+        // the next ready file — the user asked to halt, so drain the
+        // ready list (watching itself stays armed; new captures still
+        // queue, but the in-flight burst is cleared).
+        watchReadyURLs.removeAll()
+        jobStatus = .idle
+    }
+
     // MARK: - Presets
 
-    func applyPreset(_ preset: Preset) {
-        // Preserve user's session-sticky Sharpen/Stabilize/ToneCurve
-        // ENABLE flags. Built-in presets (Sun, Jupiter, etc.) often
-        // come with these enabled, but the user wants them to default
-        // OFF at app launch and to STAY at whatever they've set during
-        // the session — file changes (which trigger autoApplyDefaultPreset)
-        // shouldn't flip them back on. Default Bool is false at app
-        // launch, so the first applyPreset call leaves them off; if the
-        // user toggles enabled=true mid-session, that state survives
-        // subsequent file loads.
+    /// Apply a preset's parameters to the live pipeline.
+    ///
+    /// `userInitiated` controls the section ENABLE toggles (Sharpen /
+    /// Stabilize / Tone Curve, plus the noise / wavelet sub-flags that
+    /// ride inside `SharpenSettings`):
+    ///   - false (default — auto-apply on file open / scroll / folder
+    ///     watch): PRESERVE the user's session toggle states so silently
+    ///     swapping presets as files change never flips a section back on.
+    ///   - true (explicit pick — target chip or preset menu): HONOUR the
+    ///     preset's saved enable flags, so choosing "Sun" actually turns
+    ///     on the sections that preset needs. The user can still toggle
+    ///     them off afterwards; the next explicit pick re-applies.
+    func applyPreset(_ preset: Preset, userInitiated: Bool = false) {
         let userSharpenEnabled  = sharpen.enabled
         let userStabilizeEnabled = stabilize.enabled
         let userToneEnabled      = toneCurve.enabled
+        let userColoringEnabled  = coloring.enabled
 
         sharpen = preset.sharpen
         stabilize = preset.stabilize
         toneCurve = preset.toneCurve
+        coloring = preset.coloring
 
-        sharpen.enabled   = userSharpenEnabled
-        stabilize.enabled = userStabilizeEnabled
-        toneCurve.enabled = userToneEnabled
+        // Auto-apply: roll the enable flags back to the session state.
+        // Explicit pick: leave the preset's own enabled flags in place.
+        if !userInitiated {
+            sharpen.enabled   = userSharpenEnabled
+            stabilize.enabled = userStabilizeEnabled
+            toneCurve.enabled = userToneEnabled
+            coloring.enabled  = userColoringEnabled
+        }
+
+        // Pin the user's explicit pick so subsequent file-change auto-detect
+        // doesn't clobber it (the original bug: pick Sun → stack → output
+        // file's name contains "moon" keyword → auto-detect switched
+        // preset back to Moon). The pin is cleared only when the user
+        // opens a new folder (`autoApplyDefaultPreset`).
+        if userInitiated { lastPresetWasUserInitiated = true }
         luckyStack.mode = preset.luckyMode
         luckyStack.keepPercent = preset.luckyKeepPercent
         // Per-preset Multi-AP tuning. Grid==0 means the preset prefers the
@@ -1554,6 +2270,7 @@ final class AppModel: ObservableObject {
             sharpen: sharpen,
             stabilize: stabilize,
             toneCurve: toneCurve,
+            coloring: coloring,
             luckyMode: luckyStack.mode,
             luckyKeepPercent: luckyStack.keepPercent,
             luckyMultiAPGrid: luckyStack.multiAP.grid,
@@ -1573,6 +2290,7 @@ final class AppModel: ObservableObject {
         updated.sharpen = sharpen
         updated.stabilize = stabilize
         updated.toneCurve = toneCurve
+        updated.coloring = coloring
         updated.luckyMode = luckyStack.mode
         updated.luckyKeepPercent = luckyStack.keepPercent
         updated.luckyMultiAPGrid = luckyStack.multiAP.grid
@@ -1597,6 +2315,21 @@ final class AppModel: ObservableObject {
         frameCount: Int,
         elapsedSec: Double
     ) {
+        // During an unattended folder-watch session the per-stack prompt
+        // would block the automated flow. The share decision was made
+        // ONCE when the watch was armed: upload silently or skip — never
+        // ask per file.
+        if folderWatchActive {
+            if watchSessionAutoShare {
+                CommunityShare.upload(
+                    stackedURL: stackedURL,
+                    target: target,
+                    frameCount: frameCount,
+                    elapsedSec: elapsedSec
+                )
+            }
+            return
+        }
         guard CommunityShare.shouldPromptAfterStack else { return }
         guard pendingCommunityShare == nil else { return }   // don't queue multiple
         pendingCommunityShare = PendingCommunityShare(
@@ -1675,6 +2408,10 @@ final class AppModel: ObservableObject {
         let lut: MTLTexture? = includeTone && toneCurve.enabled
             ? ToneCurveLUT.build(points: toneCurve.controlPoints, device: MetalDevice.shared.device)
             : nil
+        // Apply Tone bakes the Coloring section as well — the user
+        // doesn't distinguish "tone" from "colour grading" once the
+        // curves panel is engaged. Bypassed when Tone wasn't ticked.
+        let c = includeTone ? coloring : ColoringSettings()
 
         let device = MetalDevice.shared.device
         let pipeline = self.stabilizerPipeline
@@ -1682,7 +2419,8 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             for (i, frame) in await self.playback.frames.enumerated() where target.contains(frame.id) {
                 let processed = pipeline.process(input: frame.texture, sharpen: s,
-                                                  toneCurve: t, toneCurveLUT: lut)
+                                                  toneCurve: t, toneCurveLUT: lut,
+                                                  coloring: c)
                 await MainActor.run {
                     self.playback.frames[i].texture = processed
                     self.playback.frames[i].appliedOps.append(opName)
@@ -1757,6 +2495,14 @@ final class AppModel: ObservableObject {
         guard canPlaySerFrames else { return }
         serPlaybackActive = true
         serPlaybackTimer?.invalidate()
+        // Timer fires at a CONSTANT cadence (blinkRate). Speed
+        // multiplier scales the FRAME STRIDE per tick instead of the
+        // timer rate. Reason: cramming the timer to 288 Hz at 16×
+        // hit the 125 fps decode ceiling AND made successive ticks
+        // land on the same low-res cache neighbour, so the user
+        // perceived no speed-up at all. Stepping by N frames per
+        // tick gives real Nx visual advancement that's not bounded
+        // by the decode rate.
         let interval = 1.0 / max(0.5, blinkRate)
         serPlaybackTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.advanceSerFrame() }
@@ -1769,12 +2515,124 @@ final class AppModel: ObservableObject {
     }
     private func advanceSerFrame() {
         guard previewSerFrameCount > 0 else { stopSerPlayback(); return }
-        previewSerFrameIndex = (previewSerFrameIndex + 1) % previewSerFrameCount
+        // Per-tick stride = speed multiplier (1 / 2 / 4 / 8 / 16).
+        // At constant timer rate this is what makes 16× actually feel
+        // 16× — each tick advances 16 frames in the source, so the
+        // user sees the content fly by even when the decode buffer
+        // can't keep up with the per-frame paint rate.
+        let step = max(1, Int(serPlaybackSpeedMultiplier.rounded()))
+        previewSerFrameIndex = (previewSerFrameIndex + step) % previewSerFrameCount
     }
     func stepSerFrame(by delta: Int) {
         guard previewSerFrameCount > 0 else { return }
         let n = previewSerFrameCount
         previewSerFrameIndex = ((previewSerFrameIndex + delta) % n + n) % n
+    }
+
+    /// Save the currently-scrubbed SER frame as a 16-bit TIFF into the
+    /// outputs folder. The pinned use case: solar Hα prominence
+    /// captures where stacking softens the wisp morphology (wisps
+    /// deform per-frame from seeing) — the user scrubs to find the
+    /// sharpest single frame and exports it as the master image, then
+    /// optionally composites it manually with a clean stack.
+    /// Filename: `<ser-basename>_frame_<NNNN>.tif`, no-overwrite numbered.
+    /// Triggered by the disk-arrow button in the SER scrub bar.
+    func exportCurrentSerFrame() {
+        guard let id = previewFileID,
+              let entry = catalog.files.first(where: { $0.id == id }),
+              entry.isSER else {
+            jobStatus = .error("Export Frame: no SER preview active.")
+            return
+        }
+        let frameIndex = previewSerFrameIndex
+        let frameCount = previewSerFrameCount
+        guard frameIndex >= 0, frameCount > 0 else {
+            jobStatus = .error("Export Frame: no frame loaded.")
+            return
+        }
+        let suggested = entry.url.deletingLastPathComponent()
+            .appendingPathComponent("_luckystack", isDirectory: true)
+        guard let outFolder = resolveWritableOutputFolder(implicit: suggested) else {
+            jobStatus = .error("Export Frame: no writable output folder.")
+            return
+        }
+        let base = entry.url.deletingPathExtension().lastPathComponent
+        // Suffix the filename with the actually-baked sections so two
+        // exports with different toggles don't collide and the user
+        // can read "what's in this file" off the name.
+        let bakedSuffix: String = {
+            var parts: [String] = []
+            if sharpen.enabled    { parts.append("sharp") }
+            if toneCurve.enabled  { parts.append("tone") }
+            if coloring.enabled && !coloring.isIdentity { parts.append("color") }
+            return parts.isEmpty ? "_raw" : "_" + parts.joined(separator: "+")
+        }()
+        let fname = String(format: "%@_frame_%04d%@.tif", base, frameIndex, bakedSuffix)
+        let outURL = Self.uniqueOutputURL(outFolder.appendingPathComponent(fname))
+
+        // Snapshot the live processing settings BEFORE hopping to the
+        // background queue — otherwise a UI toggle during the export
+        // would be racing with the bake.
+        let s = sharpen
+        let t = toneCurve
+        let c = coloring
+        let pipelineRef = stabilizerPipeline
+
+        // Build the tone-curve LUT on the main thread (it uses the
+        // shared MetalDevice and the curve points from the model).
+        // Matches the build logic in runLuckyStack / Apply-Tone /
+        // PreviewView.ensureLUT so the saved frame looks IDENTICAL to
+        // what the user sees in the live preview.
+        let lut: MTLTexture?
+        if t.enabled && t.solarDualZone {
+            lut = ToneCurveLUT.buildSolarDualZone(device: MetalDevice.shared.device)
+        } else if t.enabled {
+            lut = ToneCurveLUT.build(points: t.controlPoints, device: MetalDevice.shared.device)
+        } else {
+            lut = nil
+        }
+
+        // Decode the frame on a background queue, run it through the
+        // full Sharpen + Tone + Coloring pipeline (Pipeline.process
+        // honours each section's .enabled flag — so a disabled section
+        // is a pass-through), THEN write the TIFF. Without the
+        // pipeline step, the raw demosaiced RGBA was effectively
+        // monochrome because every channel held the same luminance —
+        // user complaint of "saves only monochrome" even with Coloring
+        // turned on.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let raw = try SerFrameLoader.loadFrame(
+                    url: entry.url, frameIndex: frameIndex,
+                    device: MetalDevice.shared.device
+                )
+                let processed = pipelineRef.process(
+                    input: raw,
+                    sharpen: s,
+                    toneCurve: t,
+                    toneCurveLUT: lut,
+                    coloring: c
+                )
+                try ImageTexture.write(texture: processed, to: outURL, bitDepth: .uint16)
+                DispatchQueue.main.async {
+                    self.registerOutput(url: outURL, autoSwitch: true)
+                    // After registerOutput + switchToSection runs, the
+                    // new entry sits in catalog but previewFileID was
+                    // set to whatever the stash had OR the first file
+                    // — not the new one. Explicit highlight selects +
+                    // previews the just-exported frame so the user
+                    // sees their pick, not the alphabetical first.
+                    self.highlightLatestOutput(url: outURL)
+                    self.jobStatus = .done(processed: 1, outputDir: outFolder)
+                    NSLog("Exported frame %d → %@", frameIndex + 1, outURL.lastPathComponent)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.jobStatus = .error("Export Frame failed: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     /// Returns the IDs the blink player rotates through. Prefers row-
@@ -1913,7 +2771,7 @@ final class AppModel: ObservableObject {
         job.run(
             inputs: selectedInputs,
             outputDir: outDir,
-            config: .init(sharpen: sharpen, stabilize: stabilize, toneCurve: toneCurve)
+            config: .init(sharpen: sharpen, stabilize: stabilize, toneCurve: toneCurve, coloring: coloring)
         ) { [weak self] event in
             guard let self else { return }
             switch event {
@@ -1952,17 +2810,41 @@ final class AppModel: ObservableObject {
 
     /// Scan an output folder and add every supported file we find to the
     /// OUTPUTS section (replacing any prior contents from the same root).
+    ///
+    /// Picks the NEWEST file (by modification date) as preview / selection
+    /// rather than the alphabetically-first one. When this runs after a
+    /// fresh Apply Sharpen / Apply Tone Curve batch the user expects the
+    /// file the run just wrote — `FileCatalog` itself sorts alphabetically
+    /// so `.files.first` would otherwise surface a stale 2026-02 file
+    /// from an earlier session instead of today's just-written TIFF.
     private func scanOutputFolder(_ folder: URL, autoSwitch: Bool) {
         outputsRootURL = folder
         var newCat = FileCatalog()
         newCat.load(from: folder)
 
+        let newestID = newCat.files
+            .max(by: { (a, b) in
+                let ma = (try? a.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let mb = (try? b.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return ma < mb
+            })?.id
+        let previewID = newestID ?? newCat.files.first?.id
+        let selection = previewID.map { Set([$0]) } ?? []
+
         if displayedSection == .outputs {
             catalog = newCat
-            previewFileID = newCat.files.first?.id
+            previewFileID = previewID
+            // Mirror the selection onto the just-written file so the
+            // row is highlighted in the file list AND a follow-up Apply
+            // / Lucky Stack action picks the same file without a click.
+            selectedFileIDs = selection
+            markedFileIDs.removeAll()
         } else {
             var stash = stashedStates[.outputs] ?? CatalogSectionState()
             stash.catalog = newCat
+            stash.preview = previewID
+            stash.selected = selection
+            stash.marked = []
             stashedStates[.outputs] = stash
         }
         for entry in newCat.files {
@@ -2069,7 +2951,12 @@ struct LuckyStackUIState {
     /// the single source of truth for "let it decide" vs "I'll
     /// configure" — replaces the old Smart-auto button which only
     /// nudged a few flags one-shot and left manual controls active.
-    var autoNuke: Bool = false
+    /// Default ON 2026-05-24 — empirically the engine's auto picks beat
+    /// the hand-tuned presets across the regression suite (AutoAP v1 beat
+    /// 6/6 fixtures; AutoPSF auto-bails on lunar / textured / cropped
+    /// subjects so wrong-σ output is impossible). Manual configuration
+    /// is still one click away by turning the pill off.
+    var autoNuke: Bool = true
     /// When ON, the stacked texture is run through the standard sharpen +
     /// tone pipeline before being written to disk. Default OFF: a freshly
     /// stacked image should land "raw" so the user can decide which post-
@@ -2109,6 +2996,22 @@ struct LuckyStackUIState {
     /// on noisy data).
     var autoPSFSNR: Double = 50
 
+    /// Block C.2 cascade: when the planetary limb-LSF estimator bails
+    /// (lunar / textured / cropped subjects), fall through to the
+    /// auto-ROI estimator that finds the strongest robust step edge
+    /// anywhere in the frame and measures its perpendicular LSF.
+    /// Default OFF per `feedback_autopsf_lunar_bail.md` — wrong σ is
+    /// worse than nothing. When the auto-ROI cascade succeeds, RFF
+    /// is skipped (no disc geometry); tiled deconv (when on) still
+    /// applies because it's geometry-free. Only meaningful when
+    /// `autoPSF == true`.
+    var autoPSFAutoROI: Bool = false
+
+    /// Drift correction (opt-in). Snaps global-shift outliers onto a
+    /// robust drift line so a slowly-drifting planet doesn't ghost the
+    /// stack. Default OFF — perturbs well-tracked captures.
+    var validateDrift: Bool = false
+
     /// Radial Fade Filter (RFF) settings — Auto / Manual / Off. Default
     /// Auto uses the σ-aware formula. Manual exposes inner / outer
     /// sliders. Off skips the fade entirely (Wiener output used
@@ -2134,6 +3037,20 @@ struct LuckyStackUIState {
     /// when `autoPSF == true`.
     var tiledDeconv: Bool = false
     var tiledDeconvAPGrid: Int = 8
+
+    /// Block C.4 — scope-formula tile-size auto-calc. When ON and
+    /// the three scope parameters below are populated, the runner
+    /// derives the tile grid count from the BiggSky scope formula
+    /// (focalLength / pixelPitch × barlow) and overrides
+    /// `tiledDeconvAPGrid`. Default OFF; users typically enter scope
+    /// parameters once per setup and leave the toggle on.
+    var autoTileSize: Bool = false
+    /// Telescope focal length in mm (e.g. 2032 for an 8" SCT).
+    var scopeFocalLengthMM: Double = 0
+    /// Camera pixel pitch in micrometres (e.g. 3.75 for ASI224MC).
+    var scopePixelPitchUm: Double = 0
+    /// Barlow / extender magnification (1.0 = none, 2.0 = 2× Barlow).
+    var scopeBarlow: Double = 1.0
 
     /// Auto-keep-% (Block A.4). When ON, the runner uses the per-frame
     /// quality distribution (free output of the runner's own grading
@@ -2189,6 +3106,33 @@ struct LuckyStackUIState {
     /// / coarse-shift inputs (the BiggSky-warned grid-moiré artefact).
     /// Only effective when `drizzleScale > 1`.
     var drizzleAASigma: Double = 0.7
+}
+
+extension AppModel {
+    /// Return `url` if no file exists there, otherwise the first free
+    /// `<stem>_N.<ext>` (N = 1, 2, …). Lets repeated stacks of the same
+    /// source land side-by-side for setting comparison instead of
+    /// overwriting. Bounded loop guards against a pathological full
+    /// directory (falls back to a UUID-tagged name after 9999 tries).
+    static func uniqueOutputURL(_ url: URL) -> URL {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return url }
+        let dir = url.deletingLastPathComponent()
+        let ext = url.pathExtension
+        let stem = url.deletingPathExtension().lastPathComponent
+        var n = 1
+        while n < 10_000 {
+            let candidate = dir.appendingPathComponent(
+                ext.isEmpty ? "\(stem)_\(n)" : "\(stem)_\(n).\(ext)"
+            )
+            if !fm.fileExists(atPath: candidate.path) { return candidate }
+            n += 1
+        }
+        // Pathological fallback — directory crammed with numbered files.
+        return dir.appendingPathComponent(
+            ext.isEmpty ? "\(stem)_\(UUID().uuidString)" : "\(stem)_\(UUID().uuidString).\(ext)"
+        )
+    }
 }
 
 enum LuckyStackNaming {

@@ -42,6 +42,57 @@
                 <string>public.jpeg</string>
             </array>
         </dict>
+        <!--
+          SER capture video. Declared so the QuickLook thumbnail / preview
+          extensions in Contents/PlugIns/ can register against the UTI.
+          LSHandlerRank "Alternate" lets the user pick AstroSharper from
+          the "Open With…" submenu for .ser files but does NOT take the
+          default opener away from FireCapture / SharpCap / etc.
+        -->
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>SER Astronomy Video</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.joergsflow.astrosharper.ser</string>
+            </array>
+        </dict>
+    </array>
+    <!--
+      Exported UTI for the SER format. SER is a community-defined raw
+      planetary video container with no public Apple UTI, so AstroSharper
+      becomes its declarer. Other apps that import this UTI later (or
+      declare their own) will coexist without conflict — UTI exports are
+      cooperative, not exclusive.
+    -->
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.joergsflow.astrosharper.ser</string>
+            <key>UTTypeDescription</key>
+            <string>SER Astronomy Video</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+                <string>public.movie</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>ser</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                    <string>video/x-ser</string>
+                </array>
+            </dict>
+        </dict>
     </array>
 </dict>
 </plist>

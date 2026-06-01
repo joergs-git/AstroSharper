@@ -55,6 +55,42 @@ The headline feature for v0.4. **AutoNuke** is a single master toggle in the Luc
 - Multi-AP + AutoAP helps vs no-multi-AP on **5/6** fixtures (the 6th hits the gate and falls through to single-shift).
 - Wall-clock overhead **1.16×** baseline.
 
+### Auto-PSF cascade · Auto tile size · Compare side panel — *new (post-v0.4)*
+
+A second wave of "automate the parameter most users get wrong" landed on top of v0.4:
+
+- **AutoPSF auto-ROI cascade (C.2)** — when the planetary limb estimator bails (lunar / textured / cropped), a slanted-edge LSF estimator finds the strongest robust step edge anywhere in the frame and measures σ from its perpendicular line-spread function. Conservative gates (peak contrast, direction stability, single-peak alignment, σ ∈ [0.5, 5.0], confidence ≥ 3) bail to bare-stack rather than over-deconvolve. Off by default (`--auto-psf-roi` / GUI sub-toggle); the bail-out memory is unambiguous about wrong σ being worse than nothing. Empirical lunar bracket: gentle Wiener, no ringing — confidence-gate is doing its job.
+- **Auto tile size from scope formula (C.4)** — three new fields (focal length mm, pixel pitch µm, Barlow) drive the BiggSky-documented `tileSize = focal / pixel × barlow` formula. Wins over AutoAP's subject-driven heuristic when scope params are supplied. CLI: `--auto-tile-size --focal-length-mm 2000 --pixel-pitch-um 5 --barlow 1`.
+- **Median HFR readout (A.5)** — the SER quality scan now also computes per-frame half-flux radius and surfaces the median in the HUD beneath the existing jitter row. Lower HFR = sharper PSF concentration. Same scan budget — no extra UI clicks.
+- **XY-shift sparkline (A.5 v1)** — after Stabilize, the HUD shows a tiny sparkline of per-frame alignment magnitudes plus the peak shift. Direct "how bad was the worst frame" readout without scrubbing.
+- **Compare side panel** — toolbar `B` toggles a 200 px column with two thumbnails: top = current displayed file (no manipulations applied), bottom = source SER frame 0 (populated automatically when Lucky Stack runs). Default 2× zoom, linked pinch + drag across both thumbs, double-click resets. Replaces the old in-place Before/After flip — main view always shows manipulated state, side panel does the comparison.
+- **Tone curve / B+C / H+S / Saturation in perceptual sRGB space** — the editing block is now wrapped in a gamma-encode → ops → gamma-decode pair so slider midpoints land at perceptual midtone (≈ linear 0.214) instead of linear 0.5. Existing presets carry forward; user-tuned values may want a one-time re-bracket because the slider semantics changed.
+- **AP-cell quilting on solar Hα fixed** — the rank sigmoid that selects per-AP keep weights now uses 20 % of frame count as transition width (was 10 %). Neighbouring APs share more frames → less per-pixel brightness drift across cell boundaries → wavelet-sharpening can't amplify the cellular pattern any more.
+- **Reset Step 1 / Step 2 to defaults** — small button at the bottom of each section. Restores every control to factory `SharpenSettings()` / `ToneCurveSettings()` and turns the section OFF. For when experimental tweaks have drifted output beyond recovery.
+- **SER playback LRU cache + 4-frame prefetcher** — 16-slot RAM cache keyed by `(url, frameIndex)` plus background-queue look-ahead. NAS-based playback now hits cache instead of disk on most ticks; the prefetcher keeps the next 4 frames warm.
+- **AVI smoke test** — pipeline works for AVFoundation-supported formats; SharpCap raw mono AVI (`codec=rawvideo` + `pal8` + zeroed FourCC) is the documented blocker. Error message now points users to the ffmpeg one-liner workaround (`ffmpeg -i in.avi -c:v prores -profile:v 4 out.mov`). Native rawvideo decoder on the roadmap.
+
+### Folder watch + auto-stack — *new (2026-05-22)*
+
+Point AstroSharper at your SharpCap / FireCapture capture folder, press **Watch folder…** in the Lucky Stack section, and walk away. Each new SER is stacked the moment its capture finishes writing — leave it running overnight and wake up to a folder of stacked TIFFs.
+
+- **Size-stability gating** — a SER is only stacked once its file size has held steady for several seconds, so a half-written capture is never read past its truncation point. This is the failure mode that makes naive "watch + stack" tools produce garbage.
+- **Backlog left alone** — files already in the folder when you start watching are snapshotted as "seen". Only captures that *arrive after* you arm the watch get stacked, so pointing at a full archive doesn't re-process it.
+- **Per-file target** — each new SER's target is auto-detected from its filename (sun / moon / jupiter / saturn / mars keywords), falling back to whichever target chip is currently active. One-at-a-time serial stacking keeps the detected preset coherent with the file being processed.
+- **Session-only** — explicit Start / Stop; the watch never auto-resumes on launch, so there's no surprise CPU spin-up when you open the app. The folder is remembered as the picker default.
+
+### LSW 6.21.1 parity wave — *new (2026-05-21)*
+
+A targeted comparison against the LuckyStackWorker User Manual surfaced five gaps worth closing under the Quality + Speed + minimal-user-action filter. All five shipped automatic by default where it's safe; mono / non-OSC sources stay numerically unchanged.
+
+- **Highlight-clipped overlay** (LSW 8.8 parity) — toolbar toggle, keyboard shortcut `C`. Tints per-channel ≥ 99.5 % pixels solid red over the live preview so polar overexposure / Wiener overshoot is visible at a glance. Pure diagnostic — saved files unaffected.
+- **Pre-sharpen highlight suppression** (LSW 3.1.3 parity) — hue-preserving tanh roll-off above luma 0.85 fires automatically in the AutoPSF post-pass when the bare stack's p99 ≥ 0.98. Lets Wiener restore high-frequency detail without driving already-bright pixels past clipping. Default ON. Fixes the long-standing upper-half over-exposure on stacked Jupiter output that the symmetric percentile remap couldn't recover from.
+- **Channel-Normalize** (LSW 7.2.1 parity) — per-channel histogram stretch aligning the R / G / B [p1, p99] windows on the green channel's range. Catches the greenish-highlight skew that gray-world WB leaves behind on OSC bayer captures (WB aligns means; this aligns ranges). Auto-engaged for OSC sources alongside autoWB.
+- **Purple-fringe auto-suppression** (LSW 7.1 parity) — hue-targeted desaturation around the 290° purple band with cos² falloff over ±30°. Cleans up the violet fringe around bright planetary limbs / lunar terminators that OSC bayer chromatic aberration leaves behind. Other hues pass through unchanged. Auto-engaged on OSC alongside autoWB + channelNormalize.
+- **Synthetic-PSF cascade fallback** (LSW 3.2.1 parity at the cascade tail) — when both the planetary limb-LSF and auto-ROI step-edge estimators bail (lunar / textured / cropped subjects), the cascade can fall through to a seeing-index-driven Gaussian σ instead of skipping deconv entirely. Default OFF per the lunar-bail lesson (a wrong σ is worse than nothing); opt in via CLI `--synthetic-psf --seeing-index N` (Meteoblue 1 = poor → 5 = excellent → σ ∈ [3.9, 1.5] px).
+
+Same session also picked up four UX bugs surfaced during testing: output tab post-Apply now lands on the newest file (not the alphabetically-first leftover), `batchTargetIDs` falls back to the previewed file when nothing is marked / selected (no extra-click needed when only one file is loaded), "Pick a target first" moved from the easy-to-miss status bar to a big red banner over the preview, and mouse pan no longer inverts the Y axis (drag up actually moves the image up).
+
 ### Smart Auto-PSF + Radial Fade Filter (RFF)
 
 - **One toggle, three planets, zero parameters.** AutoPSF measures Gaussian PSF σ from the planetary limb's line-spread function — no manual sigma, no tile grid.
@@ -69,6 +105,8 @@ The headline feature for v0.4. **AutoNuke** is a single master toggle in the Luc
 - **Mark-as-Reference** with the **R** key. Gold-star the frame you want as anchor.
 - **Per-channel stacking** (Path B) for OSC Bayer captures — splits R / G / B into independent streams BEFORE alignment, sub-pixel-aligns each channel against its own reference, recombines on the way out. Catches per-frame atmospheric chromatic dispersion that the standard demosaic-then-stack path can't see.
 - **Drizzle** 1.5× / 2× / 3× reconstruction with AA pre-filter for the BiggSky-warned grid moiré artifact.
+- **Drift correction** (opt-in) for a planet that slowly wandered across a long capture — aligns by the disc centroid so the kept frames don't ghost. Best on a well-exposed disc; a low-contrast / bright-sky capture is data-limited (fix it capture-side).
+- **Aperture-rejection multi-AP** — local alignment cells only earn a shift when the SAD minimum is a genuine 2D feature, so the smooth solar limb (an aperture-problem valley) and flat low-contrast surface fall back to the global alignment instead of warping into a blocky ghost.
 
 ### Target picker — *new*
 
@@ -181,7 +219,7 @@ SwiftUI on top, `MTKView` preview, `MPSGraph` and hand-written Metal compute ker
 
 ## Documentation
 
-- [**Wiki on GitHub**](https://github.com/joergsflow/astrosharper/wiki) — page-per-feature reference
+- [**Wiki on GitHub**](https://github.com/joergs-git/AstroSharper/wiki) — page-per-feature reference
 - [**Workflow guide**](docs/WORKFLOW.md) — smart end-to-end use cases (Sun, Moon, planets)
 - [**Architecture**](docs/ARCHITECTURE.md) — code structure & GPU pipeline
 - [**Lucky Stack**](docs/wiki/Lucky-Stack.md) — modes, AutoAP, multi-AP gate

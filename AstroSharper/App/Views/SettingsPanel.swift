@@ -24,6 +24,8 @@ struct SettingsPanel: View {
                 Divider()
                 ToneCurveSection()
                 Divider()
+                ColoringSection()
+                Divider()
                 StabilizeSection()
                 Divider()
                 OutputFolderSection()
@@ -203,6 +205,8 @@ struct SharpeningSection: View {
                 LabeledSlider(label: "Radius (σ)", value: $app.sharpen.radius, range: 0.2...15, format: "%.2f px")
                 LabeledSlider(label: "Amount", value: $app.sharpen.amount, range: 0...8, format: "%.2f")
                 Toggle("Adaptive (dim areas less)", isOn: $app.sharpen.adaptive)
+                Toggle("Suppress edge halo (anti-ring)", isOn: $app.sharpen.edgeAwareBlur)
+                    .help("Replaces the Gaussian-blur base of the unsharp with a guided filter — edge-aware blur that doesn't smear across high-contrast edges (solar limb, sunspots). Eliminates the bright ring/halo artefact that standard unsharp produces at the disc edge when an aggressive tone curve makes the off-limb very dark. ~30–40% extra compute, irrelevant for a single sharpen run. Affects both Unsharp and Wavelet boost methods.")
             } else if boostBinding.wrappedValue == .wavelet {
                 ForEach(0..<app.sharpen.waveletScales.count, id: \.self) { idx in
                     LabeledSlider(
@@ -303,6 +307,23 @@ struct SharpeningSection: View {
                 .opacity(app.sharpen.nrEnabled ? 1 : 0.5)
 
             Divider().padding(.vertical, 4)
+
+            // Section-wide reset. Restores every Step 1 control —
+            // pickers, sliders, toggles, wavelet bands, NR — to the
+            // factory `SharpenSettings()` initialiser. Useful when
+            // the user has accumulated experimental tweaks that
+            // changed the output unexpectedly. Section ends up OFF
+            // (the SharpenSettings default), preserving the existing
+            // UX rule that the section is opt-in.
+            HStack {
+                Button("Reset Step 1 to defaults") {
+                    app.sharpen = SharpenSettings()
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11))
+                .help("Restore every Step 1 control (deconvolution, boost, wavelet bands, noise reduction, capture gamma) to its factory default. The section ends up OFF afterward — re-enable it via the title-bar switch when ready.")
+                Spacer()
+            }
 
             LuckyRunButton(
                 disabled: false,
@@ -513,14 +534,29 @@ struct ToneCurveSection: View {
             // to drag curve points against.
             Toggle("Auto White Balance (gray-world)", isOn: $app.toneCurve.autoWB)
                 .help("Computes a per-channel offset+scale so the three channels share a neutral mean. Critical for OSC stacks — Bayer green is naturally amplified by 2× photosite count, so post-stack OSC images otherwise look greenish once saturation > 1. Mono / pre-balanced sources are unaffected.")
+            Toggle("Sun: Dual-Zone (disc + limb prominences)", isOn: $app.toneCurve.solarDualZone)
+                .help("Solar Hα tone preset: asinh-stretches the off-limb half [0..0.5] so faint prominences pop, while preserving disc surface detail (granulation, sunspots) linearly in [0.5..1.0]. Bypasses the control-points curve below — fires regardless of the main Tone Curve toggle. Apply this to a fulldisc or prominence stack to see BOTH the disc AND the off-limb structure in one image. Validated 2026-05-24.")
             Toggle("Atmospheric Chromatic Dispersion Correction", isOn: $app.toneCurve.chromaticAlignment)
                 .help("Phase-correlates R and B against G on the post-stack output and applies sub-pixel shifts so the three channels re-align (G stays anchored). Atmospheric refraction shifts blue more than red, so OSC planets at low altitude show coloured limb fringes; ACDC removes them. No-op on mono / pre-aligned sources because the offsets come out near zero.")
             Divider().padding(.vertical, 4)
+            // Dual-Zone replaces the control-points curve with its own
+            // fixed asinh+linear LUT, so leaving the editor active would
+            // be misleading. Grey it out + show a small note explaining
+            // why. The B/C/H/S/Sat sliders below still apply on top of
+            // dual-zone (they're post-LUT ops), so they stay enabled.
             ToneCurveEditor(
                 points: $app.toneCurve.controlPoints,
                 histogram: app.previewHistogram,
+                rgbHistogram: app.previewHistogramRGB,
                 logHistogram: $app.histogramLogScale
             )
+            .disabled(app.toneCurve.solarDualZone)
+            .opacity(app.toneCurve.solarDualZone ? 0.45 : 1.0)
+            if app.toneCurve.solarDualZone {
+                Text("Control-points curve bypassed by Sun: Dual-Zone.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
             Divider().padding(.vertical, 4)
             // Brightness — additive offset, ±0.3 typical. Identity = 0.
             HStack {
@@ -608,15 +644,32 @@ struct ToneCurveSection: View {
             }
             .help("0 = grayscale, 1 = unchanged, 2 = double saturation. Applied after the tone curve.")
             Divider().padding(.vertical, 4)
+
+            // Section-wide reset (mirror of the STEP 1 button). Restores
+            // every Step 2 control — auto-WB, chromatic alignment,
+            // brightness / contrast, highlights / shadows, saturation,
+            // tone-curve points — to the factory `ToneCurveSettings()`
+            // initialiser. Section ends up OFF afterward so the next
+            // engagement is intentional.
+            HStack {
+                Button("Reset Step 2 to defaults") {
+                    app.toneCurve = ToneCurveSettings()
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11))
+                .help("Restore every Step 2 control (auto-WB, chromatic alignment, brightness, contrast, highlights, shadows, saturation, tone curve) to its factory default. The section ends up OFF afterward — re-enable it via the title-bar switch when ready.")
+                Spacer()
+            }
+
             LuckyRunButton(
                 disabled: false,
-                title: "Apply Tone Curve",
+                title: "Apply Tone & Coloring",
                 subtitle: toneApplySubtitle,
                 icon: "waveform.path"
             ) {
                 app.runToneOnActiveSection()
             }
-            .help("Apply the current tone curve to the active section: Memory edits in-place (ops accumulate), Inputs/Outputs writes a toned TIFF to the output folder.")
+            .help("Apply the current Tone Curve AND the Coloring (Step 2b) gradation curves to the active section: Memory edits in-place (ops accumulate), Inputs/Outputs writes a toned TIFF to the output folder. Both bakes are gated on the Tone Curve section being enabled — Tone OFF skips both.")
             }   // SectionContainer
         }       // outer VStack
     }
@@ -627,6 +680,123 @@ struct ToneCurveSection: View {
         case .inputs:  return "📥  process selection → OUTPUTS"
         case .outputs: return "🔁  re-process outputs → OUTPUTS"
         }
+    }
+}
+
+// MARK: - Coloring (Affinity Photo-style gradation curves)
+
+/// "STEP 2b: COLORING" — four gradation curves (Master / R / G / B)
+/// composed per-channel: `out.r = R-curve(Master(in.r))`, same for
+/// G/B. Visually matches Affinity Photo's "Gradationskurven" dialog
+/// so the engine pattern is familiar to anyone coming from that
+/// world.
+///
+/// All four curves are drawn in their colors simultaneously; the
+/// channel picker selects which one's control points the user is
+/// dragging. The other three render at 55% opacity in the
+/// background so the relationship between them stays visible.
+private enum ColoringChannel: String, CaseIterable, Identifiable {
+    case master = "Master", r = "R", g = "G", b = "B"
+    var id: String { rawValue }
+    var color: Color {
+        switch self {
+        case .master: return .white
+        case .r:      return .red
+        case .g:      return .green
+        case .b:      return .blue
+        }
+    }
+}
+
+struct ColoringSection: View {
+    @EnvironmentObject private var app: AppModel
+    @State private var channel: ColoringChannel = .master
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionContainer(
+                title: "STEP 2b: COLORING (Curves)",
+                icon: "waveform.path",
+                isOn: $app.coloring.enabled,
+                highlight: false
+            ) {
+                // Channel picker + per-channel reset.
+                HStack(spacing: 6) {
+                    Picker("", selection: $channel) {
+                        ForEach(ColoringChannel.allCases) { ch in
+                            Text(ch.rawValue).tag(ch)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 220)
+                    Spacer()
+                    Button("Reset \(channel.rawValue)") {
+                        bindingForChannel(channel).wrappedValue = ColoringSettings.identityPoints
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    Button("Reset All") {
+                        app.coloring.masterPoints = ColoringSettings.identityPoints
+                        app.coloring.rPoints      = ColoringSettings.identityPoints
+                        app.coloring.gPoints      = ColoringSettings.identityPoints
+                        app.coloring.bPoints      = ColoringSettings.identityPoints
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .disabled(app.coloring.isIdentity)
+                }
+                .help("Channel: Master applies to all three (luma curve); R/G/B individually shift one channel only. The Coloring engine evaluates Master first, then the per-channel curve on the Master output.")
+
+                // The editor — single source of truth for the active
+                // channel's points; the other three render at 55%
+                // opacity in their own colours via `overlayCurves`.
+                ToneCurveEditor(
+                    points: bindingForChannel(channel),
+                    histogram: app.previewHistogram,
+                    rgbHistogram: app.previewHistogramRGB,
+                    logHistogram: $app.histogramLogScale,
+                    overlayCurves: overlayCurvesExcluding(channel),
+                    curveColor: channel.color,
+                    showActionButtons: false
+                )
+
+                // Compact info line — "click to add, drag to move,
+                // right-click to remove" plus current channel name.
+                Text("Editing: \(channel.rawValue)  ·  click = add · drag = move · right-click on point = remove")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
+    /// Binding for the currently-picked channel's control points. The
+    /// editor reads + writes through this so a drag on the canvas
+    /// updates exactly one curve at a time.
+    private func bindingForChannel(_ ch: ColoringChannel) -> Binding<[CGPoint]> {
+        switch ch {
+        case .master: return $app.coloring.masterPoints
+        case .r:      return $app.coloring.rPoints
+        case .g:      return $app.coloring.gPoints
+        case .b:      return $app.coloring.bPoints
+        }
+    }
+
+    /// Build the overlay list — the three non-active channels in
+    /// their tagged colours so the user always sees the relationship
+    /// between Master / R / G / B even when only one is editable.
+    private func overlayCurvesExcluding(_ active: ColoringChannel) -> [(color: Color, points: [CGPoint])] {
+        var overlays: [(Color, [CGPoint])] = []
+        for ch in ColoringChannel.allCases where ch != active {
+            switch ch {
+            case .master: overlays.append((ch.color, app.coloring.masterPoints))
+            case .r:      overlays.append((ch.color, app.coloring.rPoints))
+            case .g:      overlays.append((ch.color, app.coloring.gPoints))
+            case .b:      overlays.append((ch.color, app.coloring.bPoints))
+            }
+        }
+        return overlays
     }
 }
 
@@ -794,7 +964,7 @@ private struct SectionContainer<Content: View>: View {
 
 // MARK: - Labeled slider
 
-private struct LabeledSlider: View {
+struct LabeledSlider: View {
     let label: String
     @Binding var value: Double
     let range: ClosedRange<Double>

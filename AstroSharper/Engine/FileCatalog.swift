@@ -8,7 +8,17 @@ struct FileEntry: Identifiable, Hashable {
     let id: UUID
     let url: URL
     let name: String
-    let sizeBytes: Int64
+    /// Mutable so the input-list size poller can reflect an in-progress
+    /// upload as it grows (e.g. SharpCap writing to a NAS share). The
+    /// poller updates this AND `isUploading` together — see
+    /// `AppModel.pollInputSizes()`.
+    var sizeBytes: Int64
+    /// True while the file's size is still growing between consecutive
+    /// 5 s polls — indicates an upload / capture is still writing.
+    /// Renders the file-list row dimmed with an upload icon so the user
+    /// knows not to start stacking yet. Flips back to false on the first
+    /// poll where the size hasn't changed.
+    var isUploading: Bool = false
     /// Filesystem creation date (or modification date as fallback). Shown in
     /// the list so the user can match outputs to capture sessions.
     let creationDate: Date?
@@ -201,6 +211,69 @@ struct FileCatalog {
 
 // Thumbnail generation — off the main actor, result fed back via callback.
 enum ThumbnailLoader {
+    /// Linear percentile auto-stretch on an 8-bit RGBA CGImage so the
+    /// stacked TIFF thumbnails fill the full [0,255] range instead of
+    /// the dim mid-grey their raw [16k..58k]-of-65k data would render
+    /// as. Without this, the Compare panel showed stacked outputs as
+    /// washed-out grey discs against grey backgrounds — visibly worse
+    /// than the SER frame-0 thumbnails (which fill the byte range via
+    /// raw `>>8` mapping). With it, both thumbnails are normalised and
+    /// comparable. Cheap: ~120k pixel histogram + one rescale pass.
+    private static func autoStretchPercentile(_ cg: CGImage) -> CGImage? {
+        let w = cg.width, h = cg.height
+        guard w > 0, h > 0 else { return cg }
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let ctx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: cs, bitmapInfo: info
+        ) else { return cg }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let buf = ctx.data else { return cg }
+        let pixels = buf.bindMemory(to: UInt8.self, capacity: w * h * 4)
+        // Luminance histogram → percentile clamps (1% / 99.5%).
+        var counts = [Int](repeating: 0, count: 256)
+        for i in stride(from: 0, to: w * h * 4, by: 4) {
+            let lum = (Int(pixels[i]) + Int(pixels[i+1]) + Int(pixels[i+2])) / 3
+            counts[lum] += 1
+        }
+        let total = w * h
+        let lowTarget  = total / 100         // 1 percentile
+        let highTarget = total - total / 200 // 99.5 percentile
+        var cum = 0, pLow = 0, pHigh = 255, lowSet = false
+        for v in 0..<256 {
+            cum += counts[v]
+            if !lowSet, cum >= lowTarget { pLow = v; lowSet = true }
+            if cum >= highTarget { pHigh = v; break }
+        }
+        guard pHigh > pLow + 1 else { return cg }  // flat image — no stretch
+        let scale = 255.0 / Float(pHigh - pLow)
+        for i in stride(from: 0, to: w * h * 4, by: 4) {
+            for c in 0..<3 {
+                let v = Float(pixels[i + c])
+                let s = (v - Float(pLow)) * scale
+                pixels[i + c] = UInt8(max(0, min(255, s)))
+            }
+        }
+        return ctx.makeImage() ?? cg
+    }
+
+    /// NSImage's logical `size` is what SwiftUI's `.aspectRatio(.fit)`
+    /// reads as the image's intrinsic aspect. Forcing it to a square
+    /// (`width: maxDimension, height: maxDimension`) stretches non-square
+    /// content vertically when fit into a non-square frame — that's how
+    /// the Sun was ending up as a vertical egg in the Compare panel.
+    /// Compute a size that preserves the CGImage's real aspect ratio with
+    /// the longer side bounded by `maxDimension`.
+    private static func aspectFitSize(_ cg: CGImage, maxDimension: CGFloat) -> NSSize {
+        let w = CGFloat(cg.width), h = CGFloat(cg.height)
+        guard w > 0, h > 0 else { return NSSize(width: maxDimension, height: maxDimension) }
+        return w >= h
+            ? NSSize(width: maxDimension, height: maxDimension * h / w)
+            : NSSize(width: maxDimension * w / h, height: maxDimension)
+    }
+
     static func load(url: URL, maxDimension: CGFloat) -> NSImage? {
         if url.pathExtension.lowercased() == FileCatalog.serExtension {
             return loadSER(url: url, maxDimension: maxDimension)
@@ -233,13 +306,19 @@ enum ThumbnailLoader {
             bitsPerComponent: 8, bytesPerRow: w * 4,
             space: cs, bitmapInfo: info
         ) {
-            ctx.interpolationQuality = .low
+            // .high so detail survives the thumbnail downscale — `.low`
+            // was making stacked TIFF previews in the Compare panel look
+            // dramatically softer than the SER frame-0 thumbnail (which
+            // samples nearest-neighbour), creating a false "stacked is
+            // blurry" impression the user flagged 2026-05-24.
+            ctx.interpolationQuality = .high
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
             if let normalised = ctx.makeImage() {
-                return NSImage(cgImage: normalised, size: NSSize(width: maxDimension, height: maxDimension))
+                let stretched = autoStretchPercentile(normalised) ?? normalised
+                return NSImage(cgImage: stretched, size: aspectFitSize(stretched, maxDimension: maxDimension))
             }
         }
-        return NSImage(cgImage: cg, size: NSSize(width: maxDimension, height: maxDimension))
+        return NSImage(cgImage: cg, size: aspectFitSize(cg, maxDimension: maxDimension))
     }
 
     /// Read frame 0 of a SER and produce an 8-bit thumbnail. Mono and Bayer
@@ -319,6 +398,6 @@ enum ThumbnailLoader {
                                 bytesPerRow: dstW * 4, space: cs, bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
                                 provider: provider, decode: nil, shouldInterpolate: true,
                                 intent: .defaultIntent) else { return nil }
-        return NSImage(cgImage: cg, size: NSSize(width: maxDimension, height: maxDimension))
+        return NSImage(cgImage: cg, size: aspectFitSize(cg, maxDimension: maxDimension))
     }
 }

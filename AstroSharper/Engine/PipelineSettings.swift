@@ -66,6 +66,20 @@ struct SharpenSettings: Equatable, Codable {
     /// the very detail we just amplified. Default 0 = off.
     var waveletNoiseThreshold: Double = 0.0
 
+    /// Edge-aware blur for the unsharp / wavelet base (guided filter).
+    /// When ON, replaces the Gaussian-blur step in unsharp mask with a
+    /// guided filter (He et al. 2010). Eliminates the bright-ring /
+    /// dark-band halo artefact that standard Gaussian unsharp produces
+    /// at high-contrast edges (solar limb against dark sky, sunspot
+    /// borders, Jupiter against black). The halo is normally invisible
+    /// because the off-limb is also bright noise — it only becomes
+    /// obvious when an aggressive tone curve (e.g. Sun Dual-Zone or a
+    /// V-curve) maps mid-tones to deep black. Default OFF since the
+    /// 30–40% extra compute is irrelevant per single sharpen but
+    /// wasted on normal captures where the halo isn't visible anyway.
+    /// Toggle in the Sharpen panel under "Suppress edge halo".
+    var edgeAwareBlur: Bool = false
+
     // -------------------------------------------------------------------
     // Block C — blind / tiled deconvolution plumbing
     // -------------------------------------------------------------------
@@ -154,6 +168,7 @@ struct SharpenSettings: Equatable, Codable {
         self.waveletEnabled  = try c.decodeIfPresent(Bool.self,    forKey: .waveletEnabled)  ?? false
         self.waveletScales   = try c.decodeIfPresent([Double].self, forKey: .waveletScales)  ?? [1.8, 1.4, 1.0, 0.6, 0.4, 0.3]
         self.waveletNoiseThreshold = try c.decodeIfPresent(Double.self, forKey: .waveletNoiseThreshold) ?? 0.0
+        self.edgeAwareBlur         = try c.decodeIfPresent(Bool.self,   forKey: .edgeAwareBlur)         ?? false
         // New Block C fields.
         self.denoiseBeforePercent = try c.decodeIfPresent(Double.self, forKey: .denoiseBeforePercent) ?? 75
         self.denoiseAfterPercent  = try c.decodeIfPresent(Double.self, forKey: .denoiseAfterPercent)  ?? 75
@@ -183,6 +198,7 @@ struct SharpenSettings: Equatable, Codable {
         waveletEnabled: Bool = false,
         waveletScales: [Double] = [1.8, 1.4, 1.0, 0.6, 0.4, 0.3],
         waveletNoiseThreshold: Double = 0.0,
+        edgeAwareBlur: Bool = false,
         denoiseBeforePercent: Double = 75,
         denoiseAfterPercent: Double = 75,
         processLuminanceOnly: Bool = true,
@@ -206,6 +222,7 @@ struct SharpenSettings: Equatable, Codable {
         self.waveletEnabled = waveletEnabled
         self.waveletScales = waveletScales
         self.waveletNoiseThreshold = waveletNoiseThreshold
+        self.edgeAwareBlur = edgeAwareBlur
         self.denoiseBeforePercent = denoiseBeforePercent
         self.denoiseAfterPercent = denoiseAfterPercent
         self.processLuminanceOnly = processLuminanceOnly
@@ -338,6 +355,44 @@ struct ToneCurveSettings: Equatable, Codable {
     /// gate also rejects any offset > 5 px as obviously wrong.
     var chromaticAlignment: Bool = false
 
+    /// Channel-Normalize (LSW 7.2.1 parity). Per-channel histogram
+    /// stretch so the per-channel [p1, p99] windows align on a common
+    /// range (the reference channel's, green by default). Gray-world
+    /// `autoWB` aligns MEANS; this fills the remaining gap that
+    /// shows up as greenish highlights / blue shadows on OSC bayer
+    /// frames. Runs AFTER auto-WB so the WB step gets the first
+    /// shot at neutralising the green cast.
+    /// Default OFF; OscDefaults turns it on for OSC sources where
+    /// the per-channel p99 spread is > 30%.
+    var channelNormalize: Bool = false
+
+    /// Purple-fringe suppression (LSW 7.1 parity). Hue-targeted
+    /// desaturation around the 290° purple band so OSC bayer
+    /// chromatic-aberration fringes near bright planetary limbs /
+    /// lunar terminators get blended toward their per-pixel luma.
+    /// Other hues pass through unchanged. Auto-engages on OSC
+    /// sources where ≥ 0.5% of sampled pixels fall in the purple
+    /// band; mono sources never need it.
+    var reducePurpleFringe: Bool = false
+
+    /// 0.0 = pass-through, 1.0 = full desaturation to grayscale
+    /// inside the band. Default 0.5 = halfway, matching LSW's
+    /// empirical "Reduce Purple" sweet spot.
+    var purpleFringeStrength: Double = 0.5
+
+    /// Solar Dual-Zone tone mapping. When ON, replaces the
+    /// control-points-based LUT with a hardcoded asinh-stretched-lower-
+    /// half + linear-upper-half curve that exposes faint off-limb
+    /// prominences while preserving disc surface detail. Validated
+    /// 2026-05-24 on TESTIMAGES/sun/14_09_57_fulldisc.ser. The
+    /// auto-detection is value-based (any pixel < 0.5 = off-limb), so
+    /// it only meaningfully affects images that actually have that
+    /// split — on a planet against dark sky it's effectively pure
+    /// asinh on the dark half, which is also fine. Independent of
+    /// `enabled`: when this is on, tone-curve fires regardless of
+    /// the main toggle (since this IS the curve).
+    var solarDualZone: Bool = false
+
     // MARK: - Codable
     /// Backwards-compatible decoder so older preset JSON keeps loading. The
     /// synthesised encoder is fine — new files always carry the field.
@@ -352,6 +407,10 @@ struct ToneCurveSettings: Equatable, Codable {
         self.saturation         = try c.decodeIfPresent(Double.self, forKey: .saturation)         ?? 1.0
         self.autoWB             = try c.decodeIfPresent(Bool.self,   forKey: .autoWB)             ?? false
         self.chromaticAlignment = try c.decodeIfPresent(Bool.self,   forKey: .chromaticAlignment) ?? false
+        self.channelNormalize   = try c.decodeIfPresent(Bool.self,   forKey: .channelNormalize)   ?? false
+        self.reducePurpleFringe   = try c.decodeIfPresent(Bool.self,   forKey: .reducePurpleFringe)   ?? false
+        self.purpleFringeStrength = try c.decodeIfPresent(Double.self, forKey: .purpleFringeStrength) ?? 0.5
+        self.solarDualZone        = try c.decodeIfPresent(Bool.self,   forKey: .solarDualZone)        ?? false
         self.brightness         = try c.decodeIfPresent(Double.self, forKey: .brightness)         ?? 0.0
         self.contrast           = try c.decodeIfPresent(Double.self, forKey: .contrast)           ?? 1.0
         self.highlights         = try c.decodeIfPresent(Double.self, forKey: .highlights)         ?? 0.0
@@ -368,19 +427,70 @@ struct ToneCurveSettings: Equatable, Codable {
         saturation: Double = 1.0,
         autoWB: Bool = false,
         chromaticAlignment: Bool = false,
+        channelNormalize: Bool = false,
+        reducePurpleFringe: Bool = false,
+        purpleFringeStrength: Double = 0.5,
         brightness: Double = 0.0,
         contrast: Double = 1.0,
         highlights: Double = 0.0,
-        shadows: Double = 0.0
+        shadows: Double = 0.0,
+        solarDualZone: Bool = false
     ) {
         self.enabled = enabled
         self.controlPoints = controlPoints
         self.saturation = saturation
         self.autoWB = autoWB
         self.chromaticAlignment = chromaticAlignment
+        self.channelNormalize = channelNormalize
+        self.reducePurpleFringe = reducePurpleFringe
+        self.purpleFringeStrength = purpleFringeStrength
         self.brightness = brightness
         self.contrast = contrast
         self.highlights = highlights
         self.shadows = shadows
+        self.solarDualZone = solarDualZone
+    }
+}
+
+/// Affinity Photo-style gradation curves. Four independent curves —
+/// Master + R + G + B — applied per pixel as a 1D LUT lookup:
+///   `out.{r,g,b} = {R,G,B}-curve(Master-curve(in.{r,g,b}))`
+///
+/// Each curve is a list of control points in normalised [0…1]²; the
+/// Catmull-Rom interpolator from `ToneCurveLUT.build` is reused. The
+/// default is identity (the diagonal y = x), so a fresh "enabled"
+/// toggle is a no-op until the user drags a point.
+///
+/// Replaces the prior hue + channel-mixer slider UX (2026-05-28) —
+/// gradation curves give the user finer control AND visually match
+/// Affinity Photo / Photoshop, which is what astrophoto users
+/// already know.
+struct ColoringSettings: Equatable, Codable {
+    var enabled: Bool = false
+    var masterPoints: [CGPoint] = ColoringSettings.identityPoints
+    var rPoints:      [CGPoint] = ColoringSettings.identityPoints
+    var gPoints:      [CGPoint] = ColoringSettings.identityPoints
+    var bPoints:      [CGPoint] = ColoringSettings.identityPoints
+
+    /// Identity curve — endpoints only, y = x.
+    static var identityPoints: [CGPoint] {
+        [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 1)]
+    }
+
+    /// True when all four curves are at identity. Pipeline uses this
+    /// as the no-op short-circuit so an enabled-but-untouched
+    /// Coloring section costs nothing.
+    var isIdentity: Bool {
+        Self.isIdentityCurve(masterPoints)
+            && Self.isIdentityCurve(rPoints)
+            && Self.isIdentityCurve(gPoints)
+            && Self.isIdentityCurve(bPoints)
+    }
+
+    private static func isIdentityCurve(_ pts: [CGPoint]) -> Bool {
+        guard pts.count == 2 else { return false }
+        let s = pts.sorted { $0.x < $1.x }
+        return abs(s[0].x) < 1e-4 && abs(s[0].y) < 1e-4
+            && abs(s[1].x - 1) < 1e-4 && abs(s[1].y - 1) < 1e-4
     }
 }

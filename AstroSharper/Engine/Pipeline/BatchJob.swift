@@ -27,6 +27,10 @@ final class BatchJob {
         var sharpen: SharpenSettings
         var stabilize: StabilizeSettings
         var toneCurve: ToneCurveSettings
+        /// Per-channel gradation curves (Master + R/G/B). Mirrors
+        /// app.coloring so the Apply / batch path bakes whatever the
+        /// user sees in the live preview into the output file.
+        var coloring: ColoringSettings = ColoringSettings()
     }
 
     enum Event {
@@ -63,10 +67,17 @@ final class BatchJob {
                 return
             }
 
-            // Build tone-curve LUT once.
-            let lut: MTLTexture? = config.toneCurve.enabled
-                ? ToneCurveLUT.build(points: config.toneCurve.controlPoints, device: MetalDevice.shared.device)
-                : nil
+            // Build tone-curve LUT once. Gated on `toneCurve.enabled` —
+            // dual-zone is a different LUT shape, not an override of the
+            // section toggle. If the user disabled Tone Curve, no LUT.
+            let lut: MTLTexture?
+            if config.toneCurve.enabled && config.toneCurve.solarDualZone {
+                lut = ToneCurveLUT.buildSolarDualZone(device: MetalDevice.shared.device)
+            } else if config.toneCurve.enabled {
+                lut = ToneCurveLUT.build(points: config.toneCurve.controlPoints, device: MetalDevice.shared.device)
+            } else {
+                lut = nil
+            }
 
             // Stabilization: compute shifts up front and optionally derive a
             // crop rectangle that's the intersection of all shifted frames.
@@ -201,7 +212,8 @@ final class BatchJob {
                     input: frameTex,
                     sharpen: config.sharpen,
                     toneCurve: config.toneCurve,
-                    toneCurveLUT: lut
+                    toneCurveLUT: lut,
+                    coloring: config.coloring
                 )
 
                 let suffix = BatchJob.suffix(for: config)
@@ -222,7 +234,8 @@ final class BatchJob {
                     input: stack,
                     sharpen: config.sharpen,
                     toneCurve: config.toneCurve,
-                    toneCurveLUT: lut
+                    toneCurveLUT: lut,
+                    coloring: config.coloring
                 )
                 let outURL = outputDir.appendingPathComponent("stacked_\(Int(Date().timeIntervalSince1970)).tif")
                 try? ImageTexture.write(texture: processed, to: outURL)

@@ -91,6 +91,30 @@ struct AstroSharperApp: App {
         .defaultSize(width: 600, height: 700)
         .windowResizability(.contentSize)
 
+        // SER Trim + Crop + Export — its own NSWindow (not a popover)
+        // so the user can drag it off the preview area and watch the
+        // live crop overlay while tuning the rect.
+        Window("SER Trim · Crop · Export", id: "ser-export") {
+            SerExportPanel()
+                .environmentObject(appModel)
+        }
+        .defaultPosition(.topTrailing)
+        .defaultSize(width: 420, height: 560)
+        .windowResizability(.contentSize)
+
+        // Post-export preview window. The export panel opens this
+        // after a successful write; the user inspects the result at
+        // native 1:1 and decides Keep (register in outputs) or
+        // Discard (delete). Until they decide, the file sits
+        // unregistered in the outputs folder.
+        Window("Export Preview", id: "export-preview") {
+            ExportPreviewWindow()
+                .environmentObject(appModel)
+        }
+        .defaultPosition(.center)
+        .defaultSize(width: 720, height: 600)
+        .windowResizability(.contentSize)
+
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("About AstroSharper") { showingAbout = true }

@@ -5,7 +5,188 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-01
+
 ### Added
+- **SER/AVI trim · crop · export pipeline** — set Start/End trim markers on the
+  scrub bar, crop, rotate (0/90/180/270), resize (1:1 … 1:16), bake in the live
+  Sharpen + Tone + Coloring, and export the clip to **GIF, MP4, APNG** or a single
+  TIFF frame. Export runs in a draggable panel with a Duration-driven UX and a
+  post-export preview window; trim/crop/export settings persist per source SER.
+- **Coloring section — Affinity-style 4-curve gradation editor** under Tone, with
+  per-channel hue tint + channel mixer. Applied on every output path (live preview,
+  Apply, Stack, Batch, Export) and saved/restored as part of a Preset.
+- **QuickLook integration** — Finder thumbnails and spacebar playback for SER files,
+  plus AVI thumbnails, via embedded QuickLook app-extensions.
+- **Solar Dual-Zone tone curve** (`ToneCurveSettings.solarDualZone`) — fixed-LUT
+  asinh off-limb + linear disc, auto-enabled in Sun — Full-Disk and Sun — Hα
+  Prominence presets, revealing prominences without touching the stacking pipeline.
+- **Delete File context menu** (with confirmation) in the file list.
+- **RGB histogram overlay** for SER/AVI scrub frames, read from the decoded Metal
+  texture, shown in the tone-curve editor for OSC stacks.
+- **Lucky Region stacking mode** (`LuckyStackMode.region`, CLI `--mode region`)
+  — AS!4-style per-tile frame selection. The image is divided into 32×32
+  tiles; for each tile, the engine picks adaptively 1-10 of the kept frames
+  where local quality at THAT tile was sharpest, then averages only those
+  (bilinear-blended at tile boundaries). Closes the gap on solar captures
+  where bare global stacking systematically lost 40-60% edge energy vs Frame 0
+  (the "stacking that's worse than a single frame is pointless" problem).
+  Verified on /Volumes/ASTRO/LUNT/AUTOTRANS/ Hα captures: bare stack -49%
+  edges, Lucky Region -16%, and visually CLEANER than Frame 0 with more
+  filamentary detail visible. Reuses the existing GPU quality-grader
+  threadgroup partials for the per-tile scoring (zero extra GPU work for
+  scoring; new `lucky_accumulate_region` Metal shader for the assembly).
+  Currently must be picked manually (Sun presets still ship with the older
+  `multiAPGrid: 0` setting pending Hα prominence verification).
+- **Live file-size refresh in the Inputs list** — a 5 s poller re-stats every
+  catalog file. The size column ticks up while SharpCap (or another capture
+  tool) is still writing to disk / NAS, and the row visibly indicates the
+  upload-in-progress state: dimmed text, an orange upload arrow next to the
+  filename, and the size in orange. When the size stops changing (one poll
+  with no growth), the row flips back to normal — that's the "OK to start
+  stacking now" signal. Cost is one stat() per Inputs file every 5 s
+  (negligible even over a NAS share).
+- **"If you like it — ☕ buy me a coffee" link** added to the splash footer
+  next to GitHub / AstroBin (the modal About sheet already had it).
+- **Drift correction (opt-in)** for slowly-drifting planets. When a long
+  capture's planet wandered across the frame, enable "Drift correction
+  (planet wandered)" in the Lucky Stack section (CLI `--drift-correct`).
+  It aligns by the background-subtracted disc CENTROID instead of phase
+  correlation — robust for a bright disc that drifts, and used for both
+  the reference build and the final per-frame shifts so the reference
+  can't ghost either. Default OFF (always-on perturbed the F3 baselines).
+  Note: this needs a reasonably-exposed disc; it can't rescue a very
+  low-contrast capture where the planet barely stands out from a bright
+  sky (the alignment is data-limited there — fix it capture-side with
+  more exposure / darker sky / shorter sub-captures).
+- **Stop button in the stacking progress overlay** (2026-05-22). Aborts an
+  in-flight lucky stack — the engine polls cancellation per frame, drains
+  its staging semaphore cleanly, removes any partial output, and resets
+  the UI immediately.
+- **Resizable preview / file-list split** — drag the divider between the
+  preview and the file list; defaults now favour the preview.
+- **Stacked outputs are never overwritten** — when a file of the same
+  name already exists, the new stack is numbered up (`name_1.tif`,
+  `name_2.tif`, …) so repeated stacks of the same source with different
+  settings sit side-by-side for comparison.
+
+### Changed
+- **SER scrubbing is now live** while dragging the frame slider (was: only
+  updated on release). The scrubber is a custom drag-gesture control — the
+  old NSSlider ran a modal tracking loop that blocked CoreAnimation from
+  presenting the Metal preview — backed by a synchronous decode + forced
+  redraw and a monotonic seq guard so fast scrubs don't flicker backwards.
+- **Info HUD defaults OFF** — the stats overlay no longer covers the image
+  on open; toggle it with the "i" button.
+- **Sun presets retuned** from a 10-run headless stacking benchmark:
+  Sun — Granulation and Sun — Hα Prominence now stack with NO multi-AP +
+  sigma-clip (Granulation also drops to keep 20%). Dense multi-AP was
+  shown to smear low-contrast solar surface and warp the limb.
+- **Outputs land next to the data.** Folder-watch writes
+  `<watchedFolder>/_luckystack`; a folder open writes
+  `<openedRoot>/_AstroSharper`. The sandbox container is now a transient
+  last-resort only (no longer "sticks").
+
+### Fixed
+- **Multi-AP smearing / blocky limb on low-contrast solar surface.** New
+  aperture-rejection gate in the AP-shift kernel: a cell earns a local
+  shift only when the SAD minimum is well-defined in BOTH axes (a real 2D
+  feature). The smooth solar limb (an aperture-problem valley) and flat
+  granulation cells fall back to global alignment. F3 confirms Jupiter
+  multi-AP unaffected.
+- **Crash stacking / scrubbing very large SERs (23–26 GB)** whose header
+  over-reports its frame count. New `SerReader.readableFrameCount` clamps
+  every frame loop (scrub, grade, accumulate, AutoAP, per-channel) to the
+  frames actually present in the mapped data; the scrubber stops at the
+  last truly-readable frame instead of freezing.
+
+### Changed
+- **AutoNuke button reads "AutoNuke is ON" / "AutoNuke is OFF"** so the
+  current state is unambiguous at a glance.
+- **Explicitly picking a preset now re-activates its section toggles.**
+  Choosing a target chip or a preset from the menu honours the enable
+  flags the preset saved (Sharpen / Tone Curve / Stabilize, plus the
+  noise / wavelet sub-flags) — so picking "Sun" actually turns on the
+  sections that preset needs. Auto-apply on file open / scroll / folder
+  watch still preserves the user's session toggle states (a file change
+  never silently flips a section back on). New `applyPreset(_:userInitiated:)`
+  distinguishes the two paths.
+
+### Fixed
+- **Crash when fast-forwarding / scrubbing a SER whose header overstates
+  its frame count** (truncated copy or a capture still being written).
+  `SerReader.withFrameBytes` guarded truncation with a `precondition` — a
+  fatal trap that the prefetcher's `try?` can't catch — so a speculative
+  prefetch past the real end of the file killed the whole app on the
+  `serPrefetch` queue. New `SerReader.canReadFrame(at:)` does a cheap
+  data-length check and `SerFrameLoader.loadFrame` now throws a catchable
+  error for missing frames, so they're skipped instead of crashing.
+
+### Changed
+- **Folder-watch control moved to the top toolbar** (next to Open). It
+  has to be reachable on an EMPTY capture folder before the session
+  starts, but the Lucky Stack section is SER-gated and disabled when no
+  files are present — so the control lived somewhere unusable. Now a
+  compact toolbar button (Watch / green watching-capsule + stop).
+- **Folder watch no longer interrupts the unattended flow with the
+  community-share prompt.** The share decision is made ONCE when arming
+  the watch (Auto-share / Don't share), then honoured silently for the
+  session — skipped entirely when community share is globally disabled.
+- **Inputs list auto-refreshes during folder watch.** New captures merge
+  into the Inputs file list on switch-into-Inputs and live while viewing
+  it, so you no longer have to re-open the folder to see them. Append-only
+  — existing selection / marks / preview survive.
+
+### Added
+- **Folder watch + auto-stack** (LSW 5.2 "realtime" parity, 2026-05-22).
+  Point AstroSharper at a SharpCap / FireCapture capture folder and it
+  stacks each new SER the moment its capture finishes — leave it running
+  overnight and wake up to stacked TIFFs. New `Engine/IO/FolderWatcher`
+  (kqueue `DispatchSource` on the folder fd) + pure-Swift
+  `WatchStabilityTracker` (size-stable completion detection, so half-
+  written SERs are never stacked). Existing files at start are snapshotted
+  as "seen" (backlog ignored); each new file is auto-stacked one-at-a-time
+  through the existing lucky-stack queue with its target auto-detected from
+  the filename (falling back to the active preset). Session-only —
+  explicit Start / Stop, no auto-resume on launch. UI lives in the Lucky
+  Stack section (`FolderWatchControl`).
+- **LSW 6.21.1 parity wave** (2026-05-21) — five LuckyStackWorker User Manual
+  gaps closed under the Quality + Speed + minimal-user-action filter:
+  - **Highlight-clipped overlay** (LSW 8.8). Toolbar toggle, keyboard shortcut
+    `C`. Tints per-channel ≥ 0.995 pixels solid red over the preview so polar
+    overexposure / Wiener overshoot is visible at a glance. Saved files
+    unaffected.
+  - **Pre-sharpen highlight suppression** (LSW 3.1.3). Hue-preserving tanh
+    roll-off above knee 0.85 fires in the AutoPSF post-pass when the bare
+    stack's p99 ≥ 0.98. Default ON; fixes the long-open upper-half
+    over-exposure on stacked Jupiter output. CLI `--no-pre-sharpen-suppression`
+    + `--pre-sharpen-knee N`.
+  - **Channel-Normalize** (LSW 7.2.1). Per-channel histogram stretch aligning
+    [p1, p99] windows on the green reference. Auto-engaged for OSC sources
+    via `OscDefaults.applyDefaults` as a sibling of `autoWB`.
+  - **Synthetic-PSF cascade fallback** (LSW 3.2.1). `AutoPSF.estimateCascade`
+    gains a seeing-index-driven Gaussian fall-through after planetary +
+    auto-ROI both bail. Default OFF per the lunar-bail lesson; opted in via
+    CLI `--synthetic-psf --seeing-index N` (Meteoblue 1–5 scale).
+  - **Purple-fringe auto-suppression** (LSW 7.1). Hue-targeted desaturation
+    around 290° with cos² falloff over ±30°. Auto-engaged on OSC sources
+    alongside autoWB + channelNormalize.
+
+### Fixed
+- **Output tab post-Apply lands on the newest file** instead of the
+  alphabetically-first one. `scanOutputFolder` now sorts by
+  `contentModificationDate` so Apply Sharpen / Apply Tone Curve runs select
+  + preview the file the batch just wrote, not a leftover from an earlier
+  session.
+- **Mouse-pan Y-axis inversion**. Dragging up no longer drives the image
+  down. AppKit's bottom-up `+Y` mouse delta now pairs with the shader's
+  top-down UV via `panPx.y = startOffset.y + delta.y` (X stays
+  `- delta.x`); hand-tool semantics restored on both axes.
+- **`batchTargetIDs` preview-file fallback**. Run Lucky Stack no longer
+  requires an extra click when a single file is already shown in the
+  preview — `previewFileID` is treated as the implicit target if nothing
+  is marked or selected. Precedence stays `marked > selected > preview`.
+
 - **AVI / MOV / MP4 / M4V lucky-stack** (E.1 SourceReader-driven LuckyRunner).
   `LuckyRunner` now consumes the `SourceReader` protocol instead of being
   hard-wired to `SerReader`. SER captures keep the zero-copy mmap fast path
@@ -21,6 +202,11 @@ the project follows semantic versioning once it leaves 0.x.
 ### Changed
 - CLI `astrosharper stack` accepts `.avi / .mov / .mp4 / .m4v` in addition
   to `.ser`.
+- **"Pick a target first" warning** moved from the small status-bar error
+  to a big red banner over the preview. Auto-engages whenever SER input is
+  loaded but no target preset is active; auto-clears the moment a target
+  chip is clicked. `allowsHitTesting(false)` so it never blocks the
+  preview underneath.
 
 ### Internal
 - `project.yml` pins `ARCHS = arm64` + `EXCLUDED_ARCHS = x86_64`. Engine

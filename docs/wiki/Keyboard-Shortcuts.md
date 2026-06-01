@@ -21,16 +21,18 @@
 
 | Shortcut | Action |
 | --- | --- |
-| `B` | Before / After toggle |
+| `B` | Compare side panel — toggle source-SER thumb vs. current file |
+| `C` | Highlight clipped pixels (per-channel ≥ 99.5 %) red over the preview — diagnostic-only, saved files unaffected |
+| `A` | Display auto-range (per-texture auto-stretch + pow midtone) |
 | `⌘=` (or `⌘+`) | Zoom in 25 % |
 | `⌘-` | Zoom out 25 % |
 | `⌘0` | Fit to window |
 | `⌘1` | 1:1 (one image pixel = one drawable pixel) |
 | `⌘2` | 200 % |
 | Double-click | Reset zoom to fit |
-| Mouse-drag horizontal | Photoshop-style zoom |
+| Mouse drag | Hand-tool pan (image follows cursor in both axes) |
+| ⌥ + scroll | Anchored zoom around cursor |
 | Trackpad pinch | Zoom around cursor |
-| Scroll wheel (zoomed in) | Pan |
 
 ## Player (Memory + SER scrub)
 

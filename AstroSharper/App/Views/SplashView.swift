@@ -112,6 +112,15 @@ struct SplashView: View {
             }
             .buttonStyle(.link)
 
+            Button {
+                NSWorkspace.shared.open(AppLinks.buyMeACoffee)
+            } label: {
+                Label("If you like it — ☕ buy me a coffee", systemImage: "cup.and.saucer.fill")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.link)
+            .help("Opens buymeacoffee.com/joergsflow in your browser.")
+
             Spacer()
         }
     }

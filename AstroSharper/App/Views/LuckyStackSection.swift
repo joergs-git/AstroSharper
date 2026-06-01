@@ -235,7 +235,7 @@ struct LuckyStackSection: View {
                     Spacer()
                     Toggle(isOn: $app.luckyStack.autoNuke) {
                         Label(
-                            app.luckyStack.autoNuke ? "AutoNuke ON" : "AutoNuke",
+                            app.luckyStack.autoNuke ? "AutoNuke is ON" : "AutoNuke is OFF",
                             systemImage: "wand.and.stars"
                         )
                             .font(.system(size: 12, weight: .semibold))
@@ -463,6 +463,15 @@ struct LuckyStackSection: View {
                 }
                 .help("Experimental: split Bayer SER into R/G/B planes, align + stack each independently. Catches per-frame chromatic dispersion at low altitudes (< 30°). Half-res extract + bilinear-upsample combine softens the output by ~1 px vs. the standard demosaic path — only enable when the chromatic-dispersion correction is actually needed. Bayer captures only. ~3× runtime cost.")
 
+                // Drift correction (opt-in) — fixes a slowly-drifting
+                // planet ghosting the stack.
+                HStack(spacing: 4) {
+                    Toggle("Drift correction (planet wandered)", isOn: $app.luckyStack.validateDrift)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                .help("Enable when a long capture's planet slowly drifted across the frame and the stack shows a ghost / double contour. Fits a robust drift trajectory through the per-frame shifts and snaps outlier frames (where alignment failed) back onto it. Default OFF — on well-tracked captures it can perturb the result, so only turn it on for a capture you can see ghosting.")
+
                 // Auto-PSF post-pass (Block C.1 v0).
                 HStack(spacing: 4) {
                     Toggle("Auto-PSF + Wiener", isOn: $app.luckyStack.autoPSF)
@@ -495,6 +504,13 @@ struct LuckyStackSection: View {
                         )
                         .controlSize(.small)
                     }
+
+                    // Block C.2 — auto-ROI cascade fallback. Off by
+                    // default; bracketed per-subject before relying on.
+                    Toggle("Auto-ROI fallback (lunar / textured)", isOn: $app.luckyStack.autoPSFAutoROI)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .help("When the planetary limb estimator finds no clean disc, fall back to scanning the frame for the strongest robust step edge and measure σ from its perpendicular LSF. Designed for lunar / textured / cropped subjects. Off by default — a wrong σ on these subjects is worse than no deconv. Skips the radial fade filter (no disc geometry); tiled deconv still applies when enabled.")
 
                     // Radial Fade Filter (RFF). Auto = σ-aware formula.
                     // Manual = expose inner / outer sliders. Off = skip the
@@ -586,6 +602,12 @@ struct LuckyStackSection: View {
                         .controlSize(.small)
                     }
                     .help("Wavelet soft-threshold applied after the Wiener restore. Suppresses residual ringing and amplified noise from the deconvolution. BiggSky-typical 75. Set to 1 for low-noise sources.")
+                    // Pre-sharpen highlight suppression is engine-side
+                    // auto-engaged (p99 ≥ 0.98 on the bare stack). No
+                    // GUI toggle on purpose — the user filter is
+                    // "minimal user-action needed"; the CLI escape
+                    // hatch `--no-pre-sharpen-suppression` covers
+                    // empirical regression testing.
 
                     // Block C.3 — tiled deconv with green/yellow/red mask.
                     HStack(spacing: 4) {
@@ -610,6 +632,39 @@ struct LuckyStackSection: View {
                             in: 4...16, step: 1
                         )
                         .controlSize(.small)
+                            .disabled(app.luckyStack.autoTileSize)
+
+                        // Block C.4 — scope-formula tile-size auto-calc.
+                        // When ON and scope params populated, engine
+                        // overrides the slider value via the BiggSky
+                        // formula (tileSize = focal/pixel × barlow).
+                        Toggle("Auto tile size (scope formula)", isOn: $app.luckyStack.autoTileSize)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .help("Override the tile grid using the BiggSky scope formula: tileSize = focalLength/pixelPitch × barlow, then grid = frame ÷ tileSize. Requires the three fields below; falls back to the slider value if any are missing or zero.")
+
+                        if app.luckyStack.autoTileSize {
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Focal mm").font(.caption2).foregroundColor(.secondary)
+                                    TextField("2032", value: $app.luckyStack.scopeFocalLengthMM, format: .number)
+                                        .textFieldStyle(.roundedBorder)
+                                        .controlSize(.small)
+                                }
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Pixel µm").font(.caption2).foregroundColor(.secondary)
+                                    TextField("3.75", value: $app.luckyStack.scopePixelPitchUm, format: .number)
+                                        .textFieldStyle(.roundedBorder)
+                                        .controlSize(.small)
+                                }
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Barlow").font(.caption2).foregroundColor(.secondary)
+                                    TextField("1.0", value: $app.luckyStack.scopeBarlow, format: .number)
+                                        .textFieldStyle(.roundedBorder)
+                                        .controlSize(.small)
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -713,6 +768,10 @@ struct LuckyStackSection: View {
                     app.runLuckyStackOnSelection()
                 }
                 .help("Stacks every marked or selected .ser file. Output goes to the configured Output Folder.")
+                // NB: the auto-stack folder watch control moved to the top
+                // toolbar (next to Open) 2026-05-22 — it must be reachable
+                // on an empty capture folder, but this whole section is
+                // SER-gated and disabled when no files are present.
 
                 Text(hintLine)
                     .font(.system(size: 10))

@@ -75,6 +75,14 @@ struct SharpnessDistribution: Equatable, Codable {
     /// Higher = more atmospheric jitter; informational signal that the
     /// lucky-stack registration step has more work to do.
     var jitterRMS: Float? = nil
+    /// Block A.5 — median half-flux radius (px) across the sampled
+    /// frames. Lower = sharper PSF concentration; nil when no
+    /// sample produced a usable HFR (effectively-empty frame).
+    /// Computed from the same luminance buffers the sharpness probe
+    /// reads, so the per-frame cost is one extra CPU pass (~few ms
+    /// on a 1280×720 frame). Cached on disk alongside the rest of
+    /// the distribution.
+    var medianHFR: Float? = nil
     /// Recommended fraction (0…1) of best frames to keep when stacking.
     let recommendedKeepFraction: Double
     /// Recommended absolute frame count to keep — `recommendedKeepFraction
@@ -306,6 +314,12 @@ final class SerQualityScanner {
 
             var scores: [Float] = []
             scores.reserveCapacity(sampleCount)
+            // A.5 — per-sample HFR. Reuses the same texture so the
+            // per-frame cost is one luminance readback + one HFR
+            // CPU pass (~few ms each on a 1280×720 frame). NaN /
+            // inf values are filtered before the median.
+            var hfrs: [Float] = []
+            hfrs.reserveCapacity(sampleCount)
             // Squared shift magnitudes between adjacent samples — squared so
             // we can finalise as RMS without an extra pass. Each pair only
             // costs one new FFT (the prior sample's FFT is reused as the
@@ -326,6 +340,17 @@ final class SerQualityScanner {
                 ) else { continue }
                 let s = probe.compute(texture: tex)
                 if s.isFinite { scores.append(s) }
+                // A.5: HFR. AutoPSF.readLuminance handles the rgba16 /
+                // rgba32 blit-staging dance for both formats; the
+                // returned [Float] is then fed to HalfFluxRadius. CPU
+                // cost on a 1280×720 luma buffer is ~3 ms — negligible
+                // on the once-per-SER scan budget.
+                if let (luma, lW, lH) = AutoPSF.readLuminance(
+                    texture: tex, device: MetalDevice.shared.device
+                ) {
+                    let h = HalfFluxRadius.compute(luma: luma, width: lW, height: lH)
+                    if h.isFinite, h > 0 { hfrs.append(h) }
+                }
                 // Compute the FFT once per sample. It serves as the "frame"
                 // FFT for this pair and the "reference" FFT for the next.
                 let curFFT = Align.computeFFT(of: tex)
@@ -344,10 +369,16 @@ final class SerQualityScanner {
             let jitter: Float? = shiftCount > 0
                 ? Float((shiftSqSum / Double(shiftCount)).squareRoot())
                 : nil
+            let medianHFR: Float? = {
+                guard !hfrs.isEmpty else { return nil }
+                let sorted = hfrs.sorted()
+                return sorted[sorted.count / 2]
+            }()
             let dist = Self.makeDistribution(
                 scores: scores,
                 totalFrames: total,
-                jitterRMS: jitter
+                jitterRMS: jitter,
+                medianHFR: medianHFR
             )
             await MainActor.run {
                 var stats = seedStats
@@ -386,7 +417,8 @@ final class SerQualityScanner {
     nonisolated private static func makeDistribution(
         scores: [Float],
         totalFrames: Int,
-        jitterRMS: Float? = nil
+        jitterRMS: Float? = nil,
+        medianHFR: Float? = nil
     ) -> SharpnessDistribution {
         let sorted = scores.sorted()
         func percentile(_ p: Double) -> Float {
@@ -412,6 +444,7 @@ final class SerQualityScanner {
             totalFrames: totalFrames,
             median: p50, p10: p10, p90: p90, min: lo, max: hi,
             jitterRMS: jitterRMS,
+            medianHFR: medianHFR,
             recommendedKeepFraction: rec.fraction,
             recommendedKeepCount: rec.count,
             recommendationText: rec.text

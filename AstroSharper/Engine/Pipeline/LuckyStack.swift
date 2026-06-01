@@ -36,14 +36,17 @@ enum RFFMode: String, CaseIterable, Identifiable, Codable {
 enum LuckyStackMode: String, CaseIterable, Identifiable, Codable {
     case lightspeed = "Lightspeed"
     case scientific = "Scientific"
+    case region     = "Lucky Region"
     var id: String { rawValue }
 
     var description: String {
         switch self {
         case .lightspeed:
-            return "AutoStakkert-equivalent. Laplacian quality, single-AP global alignment, fast."
+            return "Single-pass align + multi-AP refine + accumulate. The right default for clean captures (good seeing, low drift) — on quality data, indistinguishable from Scientific."
         case .scientific:
-            return "Reference-stack alignment, LoG quality, post-stack Wiener deconv. Slower, higher fidelity."
+            return "Adds an explicit top-25% reference build + re-alignment pass before stacking. Only moves the needle on HARD data: varying seeing, drift, low SNR. On clean captures it converges to Lightspeed (verified headless 2026-05-23: <0.1% RMS diff on BiggSky moon)."
+        case .region:
+            return "AS!4-style per-tile frame selection. Each 64×64 tile picks its own sharpest frames adaptively (1-10) so a sunspot region uses frames where it was sharpest, the limb region uses different frames. Bilinear blend at tile boundaries. Designed to beat Frame 0 on solar where global stacking systematically loses ~30% detail."
         }
     }
 }
@@ -57,6 +60,10 @@ struct LuckyStackBakeIn {
     var sharpen: SharpenSettings
     var toneCurve: ToneCurveSettings
     var toneCurveLUT: MTLTexture?
+    /// Per-channel gradation curves (Master + R/G/B). Forwarded to
+    /// Pipeline.process so the stacked output bakes whatever the user
+    /// sees in the live preview.
+    var coloring: ColoringSettings = ColoringSettings()
 }
 
 /// Optional extra stack outputs requested per .ser, on top of the default
@@ -254,6 +261,71 @@ struct LuckyStackOptions {
     var useAutoPSF: Bool = false
     var autoPSFSNR: Double = 50
 
+    /// Cascade fallback to the auto-ROI PSF estimator (Block C.2) when
+    /// the planetary limb-LSF estimator bails. Designed for lunar /
+    /// textured / cropped subjects where there is no clean planetary
+    /// disc but there IS a strong, clean step edge somewhere in the
+    /// frame (terminator, crater rim, ridge). Default OFF — opted in
+    /// per the `feedback_autopsf_lunar_bail.md` lesson: a wrong σ is
+    /// worse than no deconv. When the auto-ROI cascade succeeds, the
+    /// downstream pipeline runs Wiener with the estimated σ but
+    /// SKIPS the radial-fade filter (RFF assumes planetary disc
+    /// geometry that doesn't exist for an arbitrary interior edge).
+    /// Tiled-deconv blend (when enabled) still applies — it's
+    /// geometry-free.
+    var useAutoPSFAutoROI: Bool = false
+
+    /// Drift correction: snap per-frame global-shift outliers back onto a
+    /// robust drift trajectory before accumulation. Fixes the "planet
+    /// slowly drifted over a long capture → ghost / double contour"
+    /// failure where full-frame phase correlation fails on some frames
+    /// (small disc on dark sky, noise-dominated) and they accumulate at
+    /// the wrong position. Default OFF — on well-tracked captures the
+    /// real shift variation can exceed the outlier threshold, so always-on
+    /// perturbed the trusted F3 baselines (softer output). Opt in for a
+    /// capture you can see ghosting. CLI `--drift-correct`.
+    var validateDrift: Bool = false
+
+    /// Lucky-Region-only: detect the saturated solar disc in the
+    /// reference frame and exclude disc-tiles from the per-tile quality
+    /// scoring. Without this, on Hα prominence captures (saturated disc
+    /// + faint off-limb prominence) the per-tile quality ranking is
+    /// dominated by the disc, so the prominence-tile selection picks
+    /// frames where the DISC was sharpest, not where the PROMINENCE
+    /// was clearest. With this on, disc tiles just take the first
+    /// kept frame (disc is saturated → any frame is equivalent there)
+    /// and off-limb tiles do their own honest per-tile selection.
+    var discMaskScoring: Bool = false
+
+    /// Seeing-index-driven synthetic PSF fallback (LSW 3.2.1 parity).
+    /// When `useAutoPSF` is on AND both the planetary limb-LSF and the
+    /// auto-ROI step-edge estimators bail, the cascade falls through
+    /// to a synthetic Gaussian with σ chosen by the seeing index
+    /// (Meteoblue scale 1–5). RFF + tiled-deconv are skipped under
+    /// the synthetic case — no disc geometry, no per-tile PSF support.
+    ///
+    /// Default OFF per `feedback_autopsf_lunar_bail.md`: a wrong σ is
+    /// worse than no deconv at all, and a "guess" σ from the user's
+    /// chosen seeing index IS a guess. CLI `--synthetic-psf` opts
+    /// in; pair with `--seeing-index N` to pick the σ. The defaults
+    /// make this safe for the F3 regression set (BiggSky planetary
+    /// fixtures pass through the planetary estimator, lunar / solar
+    /// fixtures land at "bare stack" exactly as the baselines expect).
+    var useAutoPSFSyntheticFallback: Bool = false
+    var syntheticPSFSeeingIndex: Double = 3.0
+
+    /// Pre-sharpen highlight suppression (LSW 3.1.3 parity). When the
+    /// bare stack has p99 ≥ 0.98, soft-clips the brightest 5-15% via a
+    /// hue-preserving tanh roll-off BEFORE Wiener so the deconv can't
+    /// push already-bright pixels past clipping. Fixes the
+    /// "upper-half over-exposure on Jupiter" bug logged in tasks/todo.md
+    /// (polar regions reaching ~1.0 luma after Wiener restored high-
+    /// frequency energy on top of already-bright peaks).
+    /// Default ON. Set `preSharpenSuppressKnee` to 0 (or any value
+    /// outside [0.5, 0.99]) to fully disable.
+    var preSharpenSuppression: Bool = true
+    var preSharpenSuppressKnee: Double = 0.85
+
     /// Capture-gamma compensation around the auto-PSF + Wiener post-pass
     /// (Block C.6). 1.0 = no correction (data assumed linear). Typical
     /// SharpCap / FireCapture defaults apply gamma 2.0 by default; pre-
@@ -375,6 +447,25 @@ struct LuckyStackOptions {
     /// classification on small details; larger = smoother boundaries.
     /// Range [4, 16] in practice.
     var tiledDeconvAPGrid: Int = 8
+
+    /// Block C.4 — scope-formula tile-size auto-calc.
+    ///
+    /// When ON and all three scope parameters below are present, the
+    /// runner overrides `tiledDeconvAPGrid` after AutoAP using the
+    /// BiggSky-documented formula:
+    ///
+    ///     tileSize = round(focalLengthMM / pixelPitchUm × barlowMag, 100)
+    ///     grid     = clamp(minDim / tileSize, 4, 16)
+    ///
+    /// Wins over both the user's manual grid and AutoAP's heuristic
+    /// because the scope formula is a cleaner, scope-specific signal
+    /// than the subject-driven heuristic. Falls back silently when
+    /// the parameters aren't supplied (no scope info → use whichever
+    /// value the prior pass left in `tiledDeconvAPGrid`).
+    var autoTileSizeFromScope: Bool = false
+    var scopeFocalLengthMM: Double? = nil
+    var scopePixelPitchUm: Double? = nil
+    var scopeBarlowMagnification: Double = 1.0
 }
 
 enum LuckyStackProgress {
@@ -386,6 +477,7 @@ enum LuckyStackProgress {
     case writing
     case finished(URL)
     case error(String)
+    case cancelled
 }
 
 enum LuckyStack {
@@ -670,13 +762,18 @@ enum LuckyStack {
         return output
     }
 
+    /// Returns the detached Task so the caller can `.cancel()` it. The
+    /// runner's grading + accumulate loops poll `Task.checkCancellation()`
+    /// per frame, so a cancel bails within one frame and reports
+    /// `.cancelled` rather than `.finished`.
+    @discardableResult
     static func run(
         sourceURL: URL,
         outputURL: URL,
         options: LuckyStackOptions,
         pipeline: Pipeline,
         onProgress: @escaping @MainActor (LuckyStackProgress) -> Void
-    ) {
+    ) -> Task<Void, Never> {
         Task.detached(priority: .userInitiated) {
             await onProgress(.opening(url: sourceURL))
 
@@ -737,20 +834,17 @@ enum LuckyStack {
                 }
                 await onProgress(.writing)
 
-                // Optional bake-in: route the stacked texture through the
-                // user's current sharpen + tone pipeline before writing so
-                // the saved file matches the live preview.
-                var final: MTLTexture
-                if let bake = options.bakeIn {
-                    final = pipeline.process(
-                        input: stacked,
-                        sharpen: bake.sharpen,
-                        toneCurve: bake.toneCurve,
-                        toneCurveLUT: bake.toneCurveLUT
-                    )
-                } else {
-                    final = stacked
-                }
+                // Final-image variable. Initialised to the bare stack;
+                // mutates through AutoPSF (linear PSF correction) FIRST,
+                // then bake-in (Sharpen + Tone) — the only physically
+                // correct order. The previous order applied bake-in
+                // first, so Wiener deconv ran on top of an already-
+                // sharpened + tone-mapped image (non-linear), producing
+                // visible ringing + over-sharpened halos that the user
+                // reported as "schrott" on Sun presets with bake-in on.
+                // Wiener assumes linear-light photons → must precede
+                // non-linear tone-curve + sharpen-overshoot operations.
+                var final: MTLTexture = stacked
 
                 // Auto-PSF post-pass (Block C.1 v0): estimate σ from the
                 // limb LSF and apply Wiener deconv, wrapped by dual-
@@ -765,15 +859,50 @@ enum LuckyStack {
                 if options.useAutoPSF {
                     let device = MetalDevice.shared.device
 
-                    // Pre-flight PSF estimate on the bare stack — if
-                    // this fails we skip the entire post-pass and
-                    // write the stack as-is.
-                    let psfPreflight = AutoPSF.estimate(texture: final, device: device)
+                    // Pre-flight PSF estimate on the bare stack —
+                    // planetary limb-LSF first, then auto-ROI cascade
+                    // (Block C.2) when enabled. If both fail we skip
+                    // the entire post-pass and write the stack as-is.
+                    let psfPreflight = AutoPSF.estimateCascade(
+                        texture: final,
+                        device: device,
+                        autoROIFallback: options.useAutoPSFAutoROI,
+                        syntheticFallback: options.useAutoPSFSyntheticFallback,
+                        syntheticSeeingIndex: Float(options.syntheticPSFSeeingIndex)
+                    )
 
-                    if let psf = psfPreflight {
-                        NSLog("AutoPSF: σ=%.2f conf=%.2f r=%.0f at (%.0f, %.0f)",
-                              psf.sigma, psf.confidence, psf.discRadius,
-                              psf.discCenter.x, psf.discCenter.y)
+                    if let psfEst = psfPreflight {
+                        // Extract σ + flag whether RFF can apply. RFF
+                        // assumes planetary disc geometry that doesn't
+                        // exist when σ came from auto-ROI; the tiled
+                        // blend (geometry-free) still applies.
+                        let psfSigma: Float = psfEst.sigma
+                        let psfIsAutoROI: Bool
+                        let psfPlanetary: AutoPSF.Result?
+                        switch psfEst {
+                        case .planetary(let r):
+                            psfIsAutoROI = false
+                            psfPlanetary = r
+                            NSLog("AutoPSF: planetary σ=%.2f conf=%.2f r=%.0f at (%.0f, %.0f)",
+                                  r.sigma, r.confidence, r.discRadius,
+                                  r.discCenter.x, r.discCenter.y)
+                        case .autoROI(let r):
+                            psfIsAutoROI = true
+                            psfPlanetary = nil
+                            NSLog("AutoPSF: auto-ROI σ=%.2f conf=%.2f dirStd=%.1f° stepC=%.3f at (%.0f, %.0f) — RFF skipped (no disc geometry)",
+                                  r.sigma, r.confidence, r.dirStdDeg, r.stepContrast,
+                                  r.edgePoint.x, r.edgePoint.y)
+                        case .synthetic(let s, let seeing):
+                            // Treat like auto-ROI for downstream gating:
+                            // no disc geometry → no RFF (which assumes
+                            // planetary disc), and downstream tiled-deconv
+                            // also skipped under `psfIsAutoROI` so we
+                            // route through the same code path.
+                            psfIsAutoROI = true
+                            psfPlanetary = nil
+                            NSLog("AutoPSF: synthetic σ=%.2f from seeing-index=%.1f — RFF + tiled-deconv skipped (no measured geometry)",
+                                  s, seeing)
+                        }
 
                         // Stage 1: pre-denoise (Block C.5 first half).
                         if options.denoisePrePercent > 0 {
@@ -784,6 +913,39 @@ enum LuckyStack {
                                 device: device
                             ) {
                                 final = denoised
+                            }
+                        }
+
+                        // Stage 1.5: pre-sharpen highlight suppression
+                        // (LSW 3.1.3 parity). Soft-clips luma above the
+                        // knee BEFORE Wiener fires so deconvolution can't
+                        // push already-bright pixels past clipping —
+                        // fixes the upper-half overexposure on stacked
+                        // Jupiter output that the symmetric percentile
+                        // remap can't recover from at the saved-file
+                        // stage. Auto-engages only when the bare stack
+                        // has p99 ≥ 0.98 (genuine about-to-clip
+                        // highlights); lunar / solar frames with
+                        // well-distributed bright pixels are passed
+                        // through unchanged so the kernel never softens
+                        // the wide-range cases the auto-recovery wants
+                        // to see at full dynamic range.
+                        if options.preSharpenSuppression {
+                            if let pts = pipeline.computeLumaPercentiles(
+                                input: final,
+                                lowPercentile: 0.01,
+                                highPercentile: 0.99
+                            ), HighlightSuppression.shouldEngage(highlightP99: pts.white) {
+                                if let suppressed = HighlightSuppression.apply(
+                                    input: final,
+                                    knee: Float(options.preSharpenSuppressKnee),
+                                    pipeline: pipeline,
+                                    device: device
+                                ) {
+                                    NSLog("Pre-sharpen highlight suppression: p99=%.3f knee=%.2f engaged",
+                                          pts.white, options.preSharpenSuppressKnee)
+                                    final = suppressed
+                                }
                             }
                         }
 
@@ -807,7 +969,7 @@ enum LuckyStack {
                             Wiener.deconvolve(
                                 input: final,
                                 output: deconvTex,
-                                sigma: psf.sigma,
+                                sigma: psfSigma,
                                 snr: Float(options.autoPSFSNR),
                                 device: device,
                                 captureGamma: safeGamma,
@@ -822,7 +984,7 @@ enum LuckyStack {
                             // Tiled deconv stays available as a manual
                             // option for subjects where the radial
                             // assumption doesn't fit (multi-feature
-                            // solar surface, future use cases).
+                            // solar surface, auto-ROI fallback).
                             // σ-aware RFF defaults (2026-05-01) fit to user
                             // picks across 3 disc sizes:
                             //   mars  r=58  σ=2.90 σ/r=5.0% → inner 0.65 (A)
@@ -835,17 +997,37 @@ enum LuckyStack {
                             // the formula. Self-tuning per disc geometry: large
                             // planetary disc → tight RFF, sharp limb. Small disc
                             // → wide RFF, no dark-ring artifact.
-                            // RFF Off (user GUI setting): skip the radial fade
-                            // entirely; the bare Wiener output stands in for
-                            // the blend. Useful where the auto fade looks wrong
-                            // — solar Hα chromosphere edge per 2026-05-01
-                            // user feedback.
+                            // RFF skipped when:
+                            //   - User toggled RFF Off (solar Hα limb edge case)
+                            //     → bare Wiener output, identical to the
+                            //     pre-C.2 behaviour. Tiled deconv is NOT
+                            //     applied even if enabled — the user asked
+                            //     for "no radial fade" historically meant
+                            //     "no blend at all".
+                            //   - σ came from auto-ROI cascade (no disc
+                            //     geometry) → fall through to tiled-deconv
+                            //     blend when enabled (geometry-free), else
+                            //     bare Wiener output.
                             if options.disableRFF {
                                 NSLog("RFF: disabled by user (Off mode) — using bare Wiener output")
                                 final = deconvTex
-                                // Skip the rest of the radial / tiled blend block.
-                                // Continue to denoise via the post-stage check below.
-                            } else {
+                            } else if psfIsAutoROI {
+                                if options.useTiledDeconv {
+                                    if let blended = Self.tiledDeconvBlend(
+                                        pre: final,
+                                        deconv: deconvTex,
+                                        apGrid: options.tiledDeconvAPGrid,
+                                        pipeline: pipeline,
+                                        device: device
+                                    ) {
+                                        final = blended
+                                    } else {
+                                        final = deconvTex
+                                    }
+                                } else {
+                                    final = deconvTex
+                                }
+                            } else if let psf = psfPlanetary {
                                 let sigma = Float(psf.sigma)
                                 let radius = max(Float(1), Float(psf.discRadius))
                                 let ratio = sigma / radius
@@ -882,7 +1064,13 @@ enum LuckyStack {
                                 } else {
                                     final = deconvTex
                                 }
-                            }   // end RFF-on branch (else of disableRFF)
+                            } else {
+                                // Defensive — should be unreachable: psfIsAutoROI
+                                // is false and disableRFF is false, so
+                                // psfPlanetary must be non-nil. Treat as bare
+                                // deconv if we ever fall here.
+                                final = deconvTex
+                            }
                         }
 
                         // Stage 3: post-denoise (Block C.5 second half).
@@ -897,8 +1085,36 @@ enum LuckyStack {
                             }
                         }
                     } else {
-                        NSLog("AutoPSF: estimation skipped (no clean disc — likely lunar / textured subject); bare stack written, dual-stage denoise also skipped since it wraps the deconv it has nothing to do without")
+                        // Cascade landed at nil — which means at least
+                        // one fallback was disabled. Surface which one
+                        // so the user knows whether to enable the auto-
+                        // ROI or synthetic path next time.
+                        var notes: [String] = []
+                        if !options.useAutoPSFAutoROI {
+                            notes.append("auto-ROI cascade not enabled — pass --auto-psf-roi for lunar / textured fallback")
+                        }
+                        if !options.useAutoPSFSyntheticFallback {
+                            notes.append("synthetic fallback disabled — re-enable for a seeing-index σ when measurement bails")
+                        }
+                        let cascadeNote = notes.isEmpty ? "all cascade paths bailed" : notes.joined(separator: "; ")
+                        NSLog("AutoPSF: estimation skipped (%@); bare stack written, dual-stage denoise also skipped since it wraps the deconv it has nothing to do without", cascadeNote)
                     }
+                }
+
+                // Bake-in (Sharpen + Tone) AFTER AutoPSF. Wiener has
+                // already corrected for the PSF on linear data; now the
+                // user's sharpen + tone-curve get a clean PSF-corrected
+                // input. Sun-Hα-Prominence with dual-zone tone curve
+                // works correctly here because dual-zone is non-linear
+                // (asinh) and runs LAST, on already-deconvolved data.
+                if let bake = options.bakeIn {
+                    final = pipeline.process(
+                        input: final,
+                        sharpen: bake.sharpen,
+                        toneCurve: bake.toneCurve,
+                        toneCurveLUT: bake.toneCurveLUT,
+                        coloring: bake.coloring
+                    )
                 }
 
                 // Stack-end auto-recovery (always-on). Mean-stacking lifts
@@ -931,8 +1147,13 @@ enum LuckyStack {
                     )
                 }
 
+                try Task.checkCancellation()
                 try ImageTexture.write(texture: final, to: outputURL)
                 await onProgress(.finished(outputURL))
+            } catch is CancellationError {
+                // User pressed Stop — leave no partial file behind.
+                try? FileManager.default.removeItem(at: outputURL)
+                await onProgress(.cancelled)
             } catch {
                 await onProgress(.error("\(error)"))
             }
@@ -972,6 +1193,11 @@ private final class LuckyRunner {
     let normalizePSO: MTLComputePipelineState
     let apShiftPSO: MTLComputePipelineState
     let accumLocalPSO: MTLComputePipelineState
+    /// Lucky Region accumulator: per-output-pixel chooses the kept frames
+    /// from its tile's adaptive top-K selection, bilinear-blended across
+    /// the 4 adjacent tiles. Designed to beat Frame 0 on solar surface
+    /// where global stacking systematically loses detail.
+    let accumRegionPSO: MTLComputePipelineState
     // B.1 sigma-clip kernels — only built when options.sigmaThreshold is set.
     lazy var welfordPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_welford_step")
     lazy var clippedAccumPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_accumulate_clipped")
@@ -1073,6 +1299,7 @@ private final class LuckyRunner {
         self.normalizePSO = Self.makePSO(library: lib, device: device, fn: "lucky_normalize")
         self.apShiftPSO  = Self.makePSO(library: lib, device: device, fn: "compute_ap_shifts")
         self.accumLocalPSO = Self.makePSO(library: lib, device: device, fn: "lucky_accumulate_local")
+        self.accumRegionPSO = Self.makePSO(library: lib, device: device, fn: "lucky_accumulate_region")
 
         let W = reader.imageWidth
         let H = reader.imageHeight
@@ -1171,7 +1398,7 @@ private final class LuckyRunner {
                   options.masterFlatURL?.lastPathComponent ?? "—")
         }
 
-        self.quality = QualityGrader(device: dev, frameCount: reader.frameCount, w: W, h: H, pso: qualityPSO)
+        self.quality = QualityGrader(device: dev, frameCount: reader.readableFrameCount, w: W, h: H, pso: qualityPSO)
     }
 
     static func makePSO(library: MTLLibrary, device: MTLDevice, fn: String) -> MTLComputePipelineState {
@@ -1357,7 +1584,7 @@ private final class LuckyRunner {
     // MARK: - Public driver
 
     func run(progress: @escaping (LuckyStackProgress) -> Void) async throws -> MTLTexture {
-        let total = reader.frameCount
+        let total = reader.readableFrameCount   // clamp to frames actually present
 
         // Stage 1: grade every frame.
         try await gradeAllFrames(progress: progress)
@@ -1428,6 +1655,24 @@ private final class LuckyRunner {
             referenceTex = refTex
         }
 
+        // Drift validation (Block B.4) on the global per-frame shifts.
+        // A slowly-drifting planet (mount tracking error / field rotation
+        // over a 30 s capture) makes full-frame phase correlation fail on
+        // some frames — a small bright disc on a large dark sky is noise-
+        // dominated, so the odd frame locks on the DC peak at (0,0) or a
+        // spurious offset instead of tracking the drift. Those frames then
+        // accumulate at the wrong position → a ghost / double contour.
+        // Replaying the kept frames in CHRONOLOGICAL order and replacing
+        // any shift that deviates > threshold from the linearly-
+        // extrapolated drift trajectory with the prediction snaps the
+        // outliers back onto the single drift line, killing the ghost.
+        // No-op on well-tracked captures (shifts already smooth → no
+        // outliers), so it's always-on.
+        // (Drift correction now happens inside alignAgainstReference via
+        // disc-centroid alignment when options.validateDrift is set — it
+        // replaces phase correlation for BOTH the reference build and the
+        // final per-frame shifts, so the reference can't ghost either.)
+
         // AutoAP — empirical AP-grid + patchHalf + drop-list + deconv-
         // tile-size selection from the reference luma. Runs CPU-side
         // off the reference texture we already built; cost ~50 ms
@@ -1442,6 +1687,13 @@ private final class LuckyRunner {
                 keptOrder: kept
             )
         }
+
+        // Block C.4 — scope-formula tile-size override. Runs after
+        // AutoAP so the scope formula wins over AutoAP's subject-
+        // driven heuristic when the user has supplied scope params.
+        // No-op when the auto toggle is off or any scope parameter
+        // is missing.
+        applyScopeFormulaTileSize()
 
         // Stage 3: weighted accumulation. Four paths, picked in order:
         //   - useTwoStageQuality : per-AP local quality re-rank,
@@ -1562,12 +1814,17 @@ private final class LuckyRunner {
     // MARK: - Stage helpers
 
     private func gradeAllFrames(progress: @escaping (LuckyStackProgress) -> Void) async throws {
-        let total = reader.frameCount
+        let total = reader.readableFrameCount   // clamp to frames actually present
         var lastReported = -1
 
         // Streaming loop; one cmd buffer per frame, but we never wait between
         // frames except for staging slot availability.
         for frameIndex in 0..<total {
+            // Stop press during grading: break to the drain below so the
+            // staging semaphore is rebalanced before we bail. The throw
+            // happens AFTER the drain (see end of function); throwing here
+            // would dispose an unbalanced semaphore → libdispatch trap.
+            if Task.isCancelled { break }
             stagingSemaphore.wait()
             let slot = frameIndex % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -1624,6 +1881,11 @@ private final class LuckyRunner {
         // Replenish all staging slots before returning.
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
     }
 
     private func loadAndUnpack(frameIndex: Int, into existing: MTLTexture?) async throws -> MTLTexture {
@@ -1685,6 +1947,7 @@ private final class LuckyRunner {
         progress(.buildingReference(done: 0, total: indices.count))
 
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -1711,6 +1974,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         // Normalize.
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
@@ -1727,9 +1995,33 @@ private final class LuckyRunner {
         return accum
     }
 
+    /// Disc-centroid shift for drift correction. Full-frame phase
+    /// correlation fails on a low-contrast planet against a not-very-dark
+    /// background (the odd frame locks on the DC peak or scatters — seen
+    /// as a huge global-shift sigma), so a slowly-drifting planet ghosts
+    /// the stack. The brightness centroid of the background-subtracted
+    /// disc tracks the planet directly, immune to that failure. Background
+    /// = the luma median (robust on a bright-sky frame); only pixels above
+    /// it contribute, so the disc dominates the centroid.
+    static func discCentroid(_ luma: [Float], n: Int) -> SIMD2<Float> {
+        var sorted = luma
+        sorted.sort()
+        let bg = sorted[sorted.count / 2]
+        var sumI = 0.0, sumX = 0.0, sumY = 0.0
+        for y in 0..<n {
+            let row = y * n
+            for x in 0..<n {
+                let v = Double(luma[row + x]) - Double(bg)
+                if v > 0 { sumI += v; sumX += Double(x) * v; sumY += Double(y) * v }
+            }
+        }
+        guard sumI > 1e-6 else { return SIMD2<Float>(Float(n) / 2, Float(n) / 2) }
+        return SIMD2<Float>(Float(sumX / sumI), Float(sumY / sumI))
+    }
+
     private func alignAgainstReference(referenceTex: MTLTexture, indices: [Int]) async throws -> [Int: SIMD2<Float>] {
         let n = options.alignmentResolution
-        let refLuma = try await extractLuma(referenceTex, size: n)
+        var refLuma = try await extractLuma(referenceTex, size: n)
         let scaleX = Float(W) / Float(n)
         let scaleY = Float(H) / Float(n)
 
@@ -1746,8 +2038,52 @@ private final class LuckyRunner {
             }
         }
 
+        // Off-limb alignment: when `discMaskScoring` is on (prominence
+        // captures), replace bright-disc pixels in BOTH refLuma and each
+        // frame luma with the off-disc median BEFORE phase correlation.
+        // Without this, the saturated disc dominates the cross-power
+        // spectrum and locks alignment onto disc-edge sub-pixel jitter
+        // — the off-limb prominence then gets accumulated at jittered
+        // positions and averages out to a soft blob. With masking, the
+        // alignment honestly tracks off-limb features (the prominence
+        // itself or any nearby limb structure).
+        if options.discMaskScoring {
+            let refThresh = (refLuma.max() ?? 1.0) * 0.9
+            let refOff = refLuma.filter { $0 < refThresh }
+            if !refOff.isEmpty {
+                let refMed = refOff.sorted()[refOff.count / 2]
+                refLuma = refLuma.map { $0 > refThresh ? refMed : $0 }
+                for i in lumas.indices {
+                    let frThresh = (lumas[i].data.max() ?? 1.0) * 0.9
+                    let frOff = lumas[i].data.filter { $0 < frThresh }
+                    if frOff.isEmpty { continue }
+                    let frMed = frOff.sorted()[frOff.count / 2]
+                    lumas[i].data = lumas[i].data.map { $0 > frThresh ? frMed : $0 }
+                }
+                NSLog("LuckyRegion: off-limb alignment active (disc pixels replaced with off-limb median before phase correlation)")
+            }
+        }
+
         var result: [Int: SIMD2<Float>] = [:]
         var shifts = [SIMD2<Float>](repeating: .zero, count: lumas.count)
+
+        // Drift correction: replace phase correlation with disc-centroid
+        // alignment. Robustly tracks a drifting planet on a low-contrast /
+        // bright-sky background where full-frame phase correlation
+        // scatters (huge shift sigma → ghost). Same code path serves both
+        // the reference build and the final per-frame alignment, so the
+        // reference itself is no longer a ghost. Shift convention matches
+        // the accumulator's `frame[gid - shift]`: shift = refCentroid -
+        // frameCentroid, scaled to full res.
+        if options.validateDrift {
+            let refC = Self.discCentroid(refLuma, n: n)
+            for (i, item) in lumas.enumerated() {
+                let c = Self.discCentroid(item.data, n: n)
+                shifts[i] = SIMD2<Float>((refC.x - c.x) * scaleX, (refC.y - c.y) * scaleY)
+            }
+            for (i, item) in lumas.enumerated() { result[item.idx] = shifts[i] }
+            return result
+        }
 
         if #available(macOS 14.0, *), let gpu = gpuCorrelator {
             // GPU path — feed each frame through the pre-built MPSGraph.
@@ -1823,6 +2159,7 @@ private final class LuckyRunner {
         progress(.buildingReference(done: 0, total: indices.count))
 
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -1850,6 +2187,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
             enc.setComputePipelineState(normalizePSO)
@@ -1879,7 +2221,97 @@ private final class LuckyRunner {
         // Only allocated when scientific + multi-AP is on AND a reference is
         // available to compute against.
         let useMultiAP = options.useMultiAP && options.mode == .scientific && referenceTex != nil
+        let useRegion = options.mode == .region
         let gridSize = options.multiAPGrid
+
+        // Lucky Region: precompute per-tile frame selections once, upload
+        // to GPU buffers reused across all kept-frame dispatches. The
+        // selection runs on the full GpuQualityGrader output (covers ALL
+        // frames, not just kept) so a tile can choose its sharpest frames
+        // independent of the global keep% selection — that's the whole
+        // point: a frame outside the global top-N% might be the best for
+        // ONE region (a moment of good seeing local to that tile).
+        var regionTileFramesBuf: MTLBuffer?
+        var regionTileCountsBuf: MTLBuffer?
+        var regionTilesX: UInt32 = 0
+        var regionTilesY: UInt32 = 0
+        var regionMaxK: UInt32 = 0
+        let REGION_TILE_PX: UInt32 = 32
+        if useRegion {
+            // 32-pixel tiles aggregate 2×2 of the existing 16-pixel
+            // quality-grader threadgroups — pure CPU re-aggregation, no
+            // extra GPU work. Smaller than the 64-px AS!4 default but
+            // empirically (2026-05-24 bracket on 13_08_56_) finer tiles
+            // reduce bilinear-blend smearing at sub-tile features.
+            let perTile = quality.computePerTileVariances(aggregation: Int(REGION_TILE_PX) / 16)
+            // qualityFraction tighter (0.85) so only frames within 15%
+            // of the per-tile best qualify — turns saturated "every tile
+            // picks 10" into truly adaptive selection. maxK=5 caps the
+            // averaging so smearing stays bounded; minK=1 falls back to
+            // pure "lucky region" (single sharpest frame) on tiles with
+            // a clear quality peak.
+            // Disc-mask: on Hα prominence captures the saturated disc
+            // dominates the global Laplacian and pulls per-tile selection
+            // toward "frames where the disc was sharpest" — irrelevant
+            // to the off-limb prominence. Mask short-circuits disc tiles
+            // to the first eligible frame (saturated = all equivalent)
+            // so off-limb tiles drive the honest selection.
+            var discMask: [Bool]? = nil
+            var promBrightness: QualityGrader.PerTileQuality? = nil
+            if options.discMaskScoring, let refTex = referenceTex {
+                let dm = detectDiscTiles(
+                    device: device, queue: queue,
+                    referenceTex: refTex,
+                    tilesX: perTile.tilesX,
+                    tilesY: perTile.tilesY,
+                    tilePx: Int(REGION_TILE_PX)
+                )
+                discMask = dm
+                let n = dm.filter { $0 }.count
+                NSLog("LuckyRegion: disc-mask flagged %d of %d tiles (%.0f%% disc)",
+                      n, dm.count, 100.0 * Double(n) / max(1.0, Double(dm.count)))
+                // Brightness-based per-tile quality for off-limb tiles:
+                // best frame = the one where this tile is BRIGHTEST.
+                // Atmospheric seeing smears faint photons over more
+                // pixels (lower peak/mean), so highest mean intensity =
+                // best seeing moment for the faint feature in this tile
+                // = sharpest wisp morphology. Variance-based scoring
+                // would rank dark-sky shot-noise instead of signal.
+                promBrightness = quality.computePerTileBrightness(aggregation: Int(REGION_TILE_PX) / 16)
+                NSLog("LuckyRegion: brightness-quality active for off-limb tiles (faint-feature mode)")
+            }
+            let selection = selectFramesPerTile(
+                quality: perTile,
+                eligibleFrames: indices,
+                minK: 1,
+                maxK: 1,
+                qualityFraction: 1.0,
+                discMask: discMask,
+                brightnessQuality: promBrightness
+            )
+            regionTileFramesBuf = device.makeBuffer(
+                bytes: selection.frameIndices,
+                length: selection.frameIndices.count * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared
+            )
+            regionTileCountsBuf = device.makeBuffer(
+                bytes: selection.perTileCounts,
+                length: selection.perTileCounts.count * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared
+            )
+            regionTilesX = UInt32(selection.tilesX)
+            regionTilesY = UInt32(selection.tilesY)
+            regionMaxK   = UInt32(selection.maxK)
+            // Region mode iterates over ALL frames (not just kept) because
+            // any frame might be the best one for SOME tile. The selection
+            // step already filtered to per-tile top-K; the shader skips
+            // frames not in any of a pixel's 4 surrounding tiles' selections.
+            // Log so we can see the per-tile distribution roughly.
+            let nonZero = selection.perTileCounts.filter { $0 > 0 }.count
+            let avgK = selection.perTileCounts.map(Int.init).reduce(0, +) / max(1, nonZero)
+            NSLog("LuckyRegion: %dx%d tiles, avg K=%d frames/tile (of max %d)",
+                  selection.tilesX, selection.tilesY, avgK, selection.maxK)
+        }
         var shiftMaps: [MTLTexture] = []
         if useMultiAP {
             for _ in 0..<options.stagingPoolSize {
@@ -1910,6 +2342,7 @@ private final class LuckyRunner {
         }
 
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -1921,8 +2354,32 @@ private final class LuckyRunner {
             let shift = shifts[idx] ?? SIMD2<Float>(0, 0)
             totalWeight += Double(weight)
 
+            // Region mode bypasses both Multi-AP and single-AP accumulate.
+            // The region shader does its own per-pixel tile lookup.
+            if useRegion,
+               let tf = regionTileFramesBuf,
+               let tc = regionTileCountsBuf,
+               let enc = cmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(accumRegionPSO)
+                enc.setTexture(frameTex, index: 0)
+                enc.setTexture(accum, index: 1)
+                enc.setBuffer(tf, offset: 0, index: 0)
+                enc.setBuffer(tc, offset: 0, index: 1)
+                var rp = LuckyRegionParamsCPU(
+                    shift: shift,
+                    frameIndex: UInt32(idx),
+                    tilesX: regionTilesX,
+                    tilesY: regionTilesY,
+                    tilePx: REGION_TILE_PX,
+                    maxK: regionMaxK
+                )
+                enc.setBytes(&rp, length: MemoryLayout<LuckyRegionParamsCPU>.stride, index: 2)
+                let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: accumRegionPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+            }
             // Optional Multi-AP local shift refinement.
-            if useMultiAP, let refTex = referenceTex {
+            else if useMultiAP, let refTex = referenceTex {
                 let mapTex = shiftMaps[slot]
                 if let enc = cmd.makeComputeCommandEncoder() {
                     enc.setComputePipelineState(apShiftPSO)
@@ -1976,11 +2433,25 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
+        // Region mode produces a properly-averaged output via per-pixel
+        // weights summing to 1.0 (bilinear tile blend × 1/K-per-tile
+        // averaging), so the global invTotalWeight normalize step is
+        // skipped — calling it with 1/totalWeight (which was never
+        // accumulated in region mode) would over-scale the texture.
+        // Region's output still goes through the normalizePSO with a
+        // unit scale only to clamp negative/overshooting values into
+        // [0,1] like the other modes.
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
             enc.setComputePipelineState(normalizePSO)
             enc.setTexture(accum, index: 0)
-            var p = LuckyNormalizeParams(invTotalWeight: 1.0 / Float(totalWeight))
+            let scale: Float = useRegion ? 1.0 : Float(1.0 / totalWeight)
+            var p = LuckyNormalizeParams(invTotalWeight: scale)
             enc.setBytes(&p, length: MemoryLayout<LuckyNormalizeParams>.stride, index: 0)
             let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: normalizePSO)
             enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
@@ -2078,6 +2549,7 @@ private final class LuckyRunner {
 
         progress(.stacking(done: 0, total: frameCount * 2))
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -2116,6 +2588,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         // CPU: per-AP CONTINUOUS quality weights.
         //
@@ -2132,14 +2609,21 @@ private final class LuckyRunner {
         // keepFractionPerAP keeps its meaning as the 50%-point of the
         // sigmoid centred at that rank: best-ranked frames pull
         // toward weight 1, frames well past the rank pull toward 0.
-        // Transition width = 10% of frameCount so the taper is
-        // selective but not abrupt — the per-AP "luckiness" survives
-        // without the visual artifacts.
+        // Transition width = 20% of frameCount so neighbouring APs'
+        // keep weights overlap heavily — the prior 10% width was too
+        // narrow on solar Hα, where adjacent APs picked nearly-disjoint
+        // top-N% subsets and wavelet-sharpening then amplified the
+        // per-pixel brightness differences as a visible cellular
+        // pattern at the AP grid boundaries (user report 2026-05-01).
+        // Wider sigmoid → more shared frames between neighbours → the
+        // per-AP "luckiness" still survives because the rank centre is
+        // unchanged, but the cell-to-cell brightness drift is smoothed
+        // out by the larger overlap.
         let perAPRaw = perAPBuf.contents().assumingMemoryBound(to: Float.self)
         let perAPScores = Array(UnsafeBufferPointer(start: perAPRaw, count: apCount * frameCount))
         let perAPKeepCount = max(1, Int((Double(frameCount) * max(0.01, min(1.0, keepFractionPerAP))).rounded(.up)))
         let kSoft = Float(perAPKeepCount)
-        let widthSoft = max(1.0, Float(frameCount) * 0.1)
+        let widthSoft = max(1.0, Float(frameCount) * 0.2)
 
         // Adaptive AP rejection (Block B.3). Compute a single "average
         // sharpness" score per AP cell by averaging perAPScores across
@@ -2208,6 +2692,7 @@ private final class LuckyRunner {
         let wtTex = Self.makeFloatBuffer(device: device, w: W, h: H, format: .rgba32Float)
 
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -2247,6 +2732,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         // Final per-pixel divide.
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
@@ -2325,6 +2815,7 @@ private final class LuckyRunner {
 
         progress(.stacking(done: 0, total: indices.count))
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -2378,6 +2869,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         // Per-pixel divide: out = accum / weight.
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
@@ -2429,6 +2925,7 @@ private final class LuckyRunner {
         // ---- Pass 1: Welford ----
         progress(.stacking(done: 0, total: indices.count * 2))
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -2465,6 +2962,11 @@ private final class LuckyRunner {
         // Drain in-flight slots so the Welford state is fully realised.
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         // ---- Pass 2: Clipped accumulate ----
         let keptScores = indices.map { scores[$0] }
@@ -2479,6 +2981,7 @@ private final class LuckyRunner {
 
         let frameCount = UInt32(indices.count)
         for (i, idx) in indices.enumerated() {
+            if Task.isCancelled { break }   // bail to the drain below, NOT mid-loop
             stagingSemaphore.wait()
             let slot = i % options.stagingPoolSize
             let frameTex = frameTextures[slot]
@@ -2520,6 +3023,11 @@ private final class LuckyRunner {
         }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.wait() }
         for _ in 0..<options.stagingPoolSize { stagingSemaphore.signal() }
+        // Now that the staging semaphore is rebalanced (drained above),
+        // it's safe to bail on a Stop press. Throwing earlier — mid-loop —
+        // left the semaphore unbalanced and crashed libdispatch when the
+        // runner deallocated it.
+        try Task.checkCancellation()
 
         // ---- Pass 3: per-pixel divide ----
         if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
@@ -2616,7 +3124,7 @@ private final class LuckyRunner {
         let input = AutoAPInput(
             imageWidth: lumaW,
             imageHeight: lumaH,
-            frameCount: reader.frameCount,
+            frameCount: reader.readableFrameCount,
             targetType: targetType,
             referenceLuminance: luma,
             priorGrid: options.multiAPGrid,
@@ -2665,6 +3173,44 @@ private final class LuckyRunner {
         let minDim = min(W, H)
         let suggestedGrid = max(4, min(16, minDim / max(50, result.deconvTileSize)))
         options.tiledDeconvAPGrid = suggestedGrid
+    }
+
+    /// Block C.4 — scope-formula tile-size override.
+    ///
+    /// When `options.autoTileSizeFromScope` is true AND all three
+    /// scope parameters (focal length, pixel pitch, Barlow) are
+    /// present + valid, override `options.tiledDeconvAPGrid` with
+    /// the grid count derived from the BiggSky formula:
+    ///
+    ///     tileSizePx = round(focalLengthMM / pixelPitchUm × barlowMag, 100)
+    ///     grid       = clamp(minDim / tileSizePx, 4, 16)
+    ///
+    /// Runs AFTER `applyAutoAP` so the scope formula wins over the
+    /// AutoAP subject-driven heuristic. Silent no-op when the
+    /// toggle is off or any scope parameter is missing — falls
+    /// through to whatever value the prior pass (AutoAP or user
+    /// manual) left in `tiledDeconvAPGrid`.
+    private func applyScopeFormulaTileSize() {
+        guard options.autoTileSizeFromScope else { return }
+        guard
+            let f = options.scopeFocalLengthMM,
+            let p = options.scopePixelPitchUm,
+            f.isFinite, p.isFinite, f > 0, p > 0
+        else {
+            NSLog("C.4: --auto-tile-size set but scope parameters missing; keeping grid=%d",
+                  options.tiledDeconvAPGrid)
+            return
+        }
+        let tileSizePx = CaptureGeometry.tileSize(
+            focalLengthMM: f,
+            pixelPitchUm: p,
+            barlowMagnification: options.scopeBarlowMagnification
+        )
+        let minDim = min(W, H)
+        let grid = max(4, min(16, minDim / max(50, tileSizePx)))
+        NSLog("C.4: scope formula focal=%.0fmm pixel=%.2fµm barlow=%.2f → tileSize=%dpx grid=%d×%d (frame %d×%d)",
+              f, p, options.scopeBarlowMagnification, tileSizePx, grid, grid, W, H)
+        options.tiledDeconvAPGrid = grid
     }
 }
 
@@ -2726,6 +3272,287 @@ private final class QualityGrader {
         }
         return variances
     }
+
+    /// Per-tile per-frame variance, where each tile aggregates an
+    /// `aggregation`×`aggregation` block of the existing 16×16 GPU
+    /// threadgroups. For Lucky Region stacking (AS!4-style): instead of
+    /// reducing to one score per frame, we want one score per
+    /// (frame, tile_y, tile_x) so we can pick which frames to average
+    /// PER TILE — the frame that was sharpest near a sunspot may not be
+    /// the same one that was sharpest near the limb.
+    ///
+    /// Returns a flat array of size `frameCount * tileCountY * tileCountX`,
+    /// indexed as `[f * tilesY * tilesX + ty * tilesX + tx]`. Caller asks
+    /// for `aggregation = 4` to get 64×64 tiles (4 × 16-pixel threadgroups).
+    /// Reuses the same Laplacian partials the global grader already wrote,
+    /// so this is a pure CPU re-aggregation — no extra GPU work.
+    struct PerTileQuality {
+        let variances: [Float]   // [f * tilesY * tilesX + ty * tilesX + tx]
+        let tilesX: Int
+        let tilesY: Int
+    }
+
+    /// Per-tile per-frame MEAN brightness. For faint diffuse off-limb
+    /// features (Hα prominence wisps), brightness is a more honest
+    /// "quality" signal than variance — atmospheric seeing smears
+    /// photons across more pixels (lower peak brightness), so the
+    /// frame with the HIGHEST mean intensity in a prominence tile is
+    /// the moment of best seeing for that wisp. Variance on the same
+    /// tile is dominated by dark-sky shot noise and ranks noise
+    /// instead of signal.
+    func computePerTileBrightness(aggregation: Int = 4) -> PerTileQuality {
+        precondition(aggregation > 0)
+        let ptr = partialsBuffer.contents().assumingMemoryBound(to: QualityPartialResult.self)
+        let tilesX = (groupsX + aggregation - 1) / aggregation
+        let tilesY = (groupsY + aggregation - 1) / aggregation
+        let perFrame = tilesX * tilesY
+        var out = [Float](repeating: 0, count: frameCount * perFrame)
+        for f in 0..<frameCount {
+            let frameOffset = f * groupsPerFrame
+            for ty in 0..<tilesY {
+                for tx in 0..<tilesX {
+                    var s: Double = 0
+                    var cnt: UInt64 = 0
+                    let gy0 = ty * aggregation
+                    let gy1 = min(gy0 + aggregation, groupsY)
+                    let gx0 = tx * aggregation
+                    let gx1 = min(gx0 + aggregation, groupsX)
+                    for gy in gy0..<gy1 {
+                        for gx in gx0..<gx1 {
+                            let r = ptr[frameOffset + gy * groupsX + gx]
+                            s += Double(r.sum)
+                            cnt += UInt64(r.count)
+                        }
+                    }
+                    if cnt > 0 {
+                        out[f * perFrame + ty * tilesX + tx] = Float(s / Double(cnt))
+                    }
+                }
+            }
+        }
+        return PerTileQuality(variances: out, tilesX: tilesX, tilesY: tilesY)
+    }
+
+    func computePerTileVariances(aggregation: Int = 4) -> PerTileQuality {
+        precondition(aggregation > 0)
+        let ptr = partialsBuffer.contents().assumingMemoryBound(to: QualityPartialResult.self)
+        let tilesX = (groupsX + aggregation - 1) / aggregation
+        let tilesY = (groupsY + aggregation - 1) / aggregation
+        let perFrame = tilesX * tilesY
+        var out = [Float](repeating: 0, count: frameCount * perFrame)
+        for f in 0..<frameCount {
+            let frameOffset = f * groupsPerFrame
+            for ty in 0..<tilesY {
+                for tx in 0..<tilesX {
+                    var s: Double = 0, sq: Double = 0
+                    var cnt: UInt64 = 0
+                    let gy0 = ty * aggregation
+                    let gy1 = min(gy0 + aggregation, groupsY)
+                    let gx0 = tx * aggregation
+                    let gx1 = min(gx0 + aggregation, groupsX)
+                    for gy in gy0..<gy1 {
+                        for gx in gx0..<gx1 {
+                            let r = ptr[frameOffset + gy * groupsX + gx]
+                            s  += Double(r.sum)
+                            sq += Double(r.sumSq)
+                            cnt += UInt64(r.count)
+                        }
+                    }
+                    if cnt > 0 {
+                        let n = Double(cnt)
+                        let mean = s / n
+                        let varV = sq / n - mean * mean
+                        out[f * perFrame + ty * tilesX + tx] = Float(max(0, varV))
+                    }
+                }
+            }
+        }
+        return PerTileQuality(variances: out, tilesX: tilesX, tilesY: tilesY)
+    }
+}
+
+// MARK: - Lucky Region: per-tile frame selection
+
+/// Per-tile lookup of which frames to average for that tile, ready for
+/// upload to the GPU as a flat MTLBuffer. `frameIndices` is a flat
+/// `[tilesY][tilesX][maxK]` table, with `perTileCounts[t]` saying how
+/// many entries of slot `[t * maxK + ...]` are valid. Padding slots hold
+/// `UInt32.max` as a sentinel.
+struct RegionFrameSelection {
+    let frameIndices: [UInt32]
+    let perTileCounts: [UInt32]
+    let tilesX: Int
+    let tilesY: Int
+    let maxK: Int
+}
+
+/// Pick frames adaptively per tile from per-tile quality scores.
+/// For each tile: sort frames by local sharpness, take the best one,
+/// then keep adding frames as long as their quality is ≥
+/// `qualityFraction × best_quality` AND we haven't hit `maxK`. Always
+/// take at least `minK` frames so a flat distribution still gets noise
+/// reduction. Sharp-peak distributions naturally collapse to ~`minK`
+/// frames (preserves detail). Flat distributions extend toward `maxK`
+/// (noise reduction wins). 2026-05-24 default `qualityFraction = 0.5`
+/// — frames within 50% of the best are "competitive" enough to include.
+fileprivate func selectFramesPerTile(
+    quality: QualityGrader.PerTileQuality,
+    eligibleFrames: [Int],
+    minK: Int = 1,
+    maxK: Int = 10,
+    qualityFraction: Float = 0.5,
+    discMask: [Bool]? = nil,                // tile inside saturated disc → take first eligible
+    brightnessQuality: QualityGrader.PerTileQuality? = nil  // when supplied, off-limb tiles pick best by BRIGHTNESS (best for faint prominence wisps where Laplacian reads noise instead of signal)
+) -> RegionFrameSelection {
+    let tiles = quality.tilesX * quality.tilesY
+    var indices = [UInt32](repeating: UInt32.max, count: tiles * maxK)
+    var counts = [UInt32](repeating: 0, count: tiles)
+    var scratch: [(q: Float, i: UInt32)] = []
+    scratch.reserveCapacity(eligibleFrames.count)
+    guard !eligibleFrames.isEmpty else {
+        return RegionFrameSelection(
+            frameIndices: indices, perTileCounts: counts,
+            tilesX: quality.tilesX, tilesY: quality.tilesY, maxK: maxK
+        )
+    }
+
+    for t in 0..<tiles {
+        // Disc tile: saturated, every frame equivalent there. Just take
+        // the first eligible frame so the accumulator has something to
+        // contribute at this tile. Skips the expensive quality sort.
+        if let mask = discMask, t < mask.count, mask[t] {
+            indices[t * maxK + 0] = UInt32(eligibleFrames[0])
+            counts[t] = 1
+            continue
+        }
+        // Off-limb tile with brightness-quality supplied: rank frames
+        // by per-tile MEAN BRIGHTNESS. Brightest = most-concentrated
+        // prominence flux = best seeing moment for THIS tile. The
+        // standard variance-based scoring picks the noisiest frame in
+        // dark off-limb tiles (Laplacian is dominated by shot noise
+        // when the signal is faint), which is the opposite of what
+        // we want.
+        let scoreSrc = brightnessQuality?.variances ?? quality.variances
+        scratch.removeAll(keepingCapacity: true)
+        for f in eligibleFrames {
+            scratch.append((scoreSrc[f * tiles + t], UInt32(f)))
+        }
+        scratch.sort { $0.q > $1.q }
+        let bestQ = max(scratch[0].q, 1e-9)
+        let threshold = bestQ * qualityFraction
+        var selected = 0
+        for s in scratch {
+            if selected >= maxK { break }
+            if s.q < threshold && selected >= minK { break }
+            indices[t * maxK + selected] = s.i
+            selected += 1
+        }
+        counts[t] = UInt32(selected)
+    }
+    return RegionFrameSelection(
+        frameIndices: indices,
+        perTileCounts: counts,
+        tilesX: quality.tilesX,
+        tilesY: quality.tilesY,
+        maxK: maxK
+    )
+}
+
+/// Detect which tiles fall inside the saturated solar disc by reading
+/// the reference texture and asking: does this tile have >50% of its
+/// pixels above 90% of the global max? Cheap CPU pass — only runs
+/// once at stack start when `discMaskScoring` is on. The reference
+/// texture is on `.private` storage (GPU-only); we blit it into a
+/// shared-storage staging texture first since `getBytes` doesn't work
+/// on private-storage textures (it silently hangs / no-ops).
+fileprivate func detectDiscTiles(
+    device: MTLDevice,
+    queue: MTLCommandQueue,
+    referenceTex: MTLTexture,
+    tilesX: Int, tilesY: Int, tilePx: Int
+) -> [Bool] {
+    let W = referenceTex.width
+    let H = referenceTex.height
+    let desc = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: referenceTex.pixelFormat,
+        width: W, height: H, mipmapped: false
+    )
+    desc.storageMode = .shared
+    desc.usage = [.shaderRead]
+    guard let staging = device.makeTexture(descriptor: desc) else { return [] }
+    if let cmd = queue.makeCommandBuffer(), let blit = cmd.makeBlitCommandEncoder() {
+        blit.copy(from: referenceTex, sourceSlice: 0, sourceLevel: 0,
+                  sourceOrigin: .init(x: 0, y: 0, z: 0),
+                  sourceSize: .init(width: W, height: H, depth: 1),
+                  to: staging, destinationSlice: 0, destinationLevel: 0,
+                  destinationOrigin: .init(x: 0, y: 0, z: 0))
+        blit.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+    }
+    let region = MTLRegion(origin: .init(x: 0, y: 0, z: 0),
+                           size: .init(width: W, height: H, depth: 1))
+    switch staging.pixelFormat {
+    case .rgba16Float:
+        var buf = [UInt16](repeating: 0, count: W * H * 4)
+        staging.getBytes(&buf, bytesPerRow: W * 8, from: region, mipmapLevel: 0)
+        return discTilesFromHalfFloat(buf, W: W, H: H, tilesX: tilesX, tilesY: tilesY, tilePx: tilePx)
+    case .rgba32Float:
+        var buf = [Float](repeating: 0, count: W * H * 4)
+        staging.getBytes(&buf, bytesPerRow: W * 16, from: region, mipmapLevel: 0)
+        return discTilesFromFloat32(buf, W: W, H: H, tilesX: tilesX, tilesY: tilesY, tilePx: tilePx)
+    default:
+        return []
+    }
+}
+
+fileprivate func discTilesFromFloat32(_ buf: [Float], W: Int, H: Int, tilesX: Int, tilesY: Int, tilePx: Int) -> [Bool] {
+    var maxV: Float = 0
+    for i in stride(from: 0, to: buf.count, by: 4) { if buf[i] > maxV { maxV = buf[i] } }
+    let thresh = maxV * 0.9
+    var mask = [Bool](repeating: false, count: tilesX * tilesY)
+    for ty in 0..<tilesY {
+        for tx in 0..<tilesX {
+            let y0 = ty * tilePx, y1 = min(y0 + tilePx, H)
+            let x0 = tx * tilePx, x1 = min(x0 + tilePx, W)
+            var hot = 0, total = 0
+            for y in y0..<y1 {
+                let row = y * W * 4
+                for x in x0..<x1 {
+                    if buf[row + x * 4] > thresh { hot += 1 }
+                    total += 1
+                }
+            }
+            if total > 0 && hot * 2 > total { mask[ty * tilesX + tx] = true }
+        }
+    }
+    return mask
+}
+
+fileprivate func discTilesFromHalfFloat(_ buf: [UInt16], W: Int, H: Int, tilesX: Int, tilesY: Int, tilePx: Int) -> [Bool] {
+    // Use UInt16 raw value as a proxy — for the disc-vs-sky decision we
+    // only need ORDERING, not absolute value. Saturated disc pixels
+    // have the highest UInt16 values.
+    var maxV: UInt16 = 0
+    for i in stride(from: 0, to: buf.count, by: 4) { if buf[i] > maxV { maxV = buf[i] } }
+    let thresh = UInt16(Float(maxV) * 0.9)
+    var mask = [Bool](repeating: false, count: tilesX * tilesY)
+    for ty in 0..<tilesY {
+        for tx in 0..<tilesX {
+            let y0 = ty * tilePx, y1 = min(y0 + tilePx, H)
+            let x0 = tx * tilePx, x1 = min(x0 + tilePx, W)
+            var hot = 0, total = 0
+            for y in y0..<y1 {
+                let row = y * W * 4
+                for x in x0..<x1 {
+                    if buf[row + x * 4] > thresh { hot += 1 }
+                    total += 1
+                }
+            }
+            if total > 0 && hot * 2 > total { mask[ty * tilesX + tx] = true }
+        }
+    }
+    return mask
 }
 
 // MARK: - Layout-mirror structs (must match Shaders.metal)
@@ -2740,6 +3567,17 @@ private struct QualityPartialResult {
 private struct LuckyAccumParams {
     var weight: Float
     var shift: SIMD2<Float>
+}
+
+/// Mirrors `LuckyRegionParams` in Shaders.metal exactly. Used by the
+/// per-frame region-accumulate dispatch.
+private struct LuckyRegionParamsCPU {
+    var shift: SIMD2<Float>
+    var frameIndex: UInt32
+    var tilesX: UInt32
+    var tilesY: UInt32
+    var tilePx: UInt32
+    var maxK: UInt32
 }
 
 /// Mirrors CalibrationParams in Shaders.metal exactly.

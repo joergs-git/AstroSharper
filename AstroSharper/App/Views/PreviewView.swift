@@ -35,6 +35,18 @@ struct PreviewView: View {
         MetalPreviewRepresentable()
             .background(Color.black)
             .overlay(placeholderOverlay)
+            .overlay {
+                // Live crop overlay — only when the user has set a crop
+                // rect via the Export panel. The source pixel coords get
+                // mapped to view coords using the same uniform letterbox
+                // fit logic the Metal shader uses (no distortion).
+                if let r = app.serCropRect,
+                   let dim = app.previewStats.dimensions,
+                   dim.width > 0 && dim.height > 0 {
+                    Self.cropOverlay(rectInSource: r, srcW: dim.width, srcH: dim.height)
+                        .allowsHitTesting(false)
+                }
+            }
             .overlay(alignment: .bottomLeading) {
                 if app.hudVisible && app.previewFileID != nil {
                     PreviewStatsHUD(
@@ -42,7 +54,8 @@ struct PreviewView: View {
                         onCalculateVideoQuality: currentEntryIsSER && app.previewStats.totalFrames > 1
                             ? { app.calculateVideoQualityForCurrentFile() }
                             : nil,
-                        isScanning: app.isCalculatingVideoQuality
+                        isScanning: app.isCalculatingVideoQuality,
+                        stabilizerShifts: app.lastStabilizerShifts
                     )
                     .transition(.opacity)
                 }
@@ -94,6 +107,20 @@ struct PreviewView: View {
                         .progressViewStyle(.linear)
                         .frame(width: 280, height: 6)
                         .tint(AppPalette.accent)
+
+                        // Stop button — aborts the in-flight stack. The
+                        // engine polls cancellation per frame, so it
+                        // unwinds promptly and removes any partial output.
+                        Button(role: .destructive) {
+                            app.cancelLuckyStack()
+                        } label: {
+                            Label("Stop", systemImage: "stop.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .controlSize(.regular)
+                        .padding(.top, 2)
                     }
                     .padding(28)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
@@ -178,12 +205,66 @@ struct PreviewView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: app.previewError)
+            // Preemptive "pick a target" banner. Appears any time the user
+            // has SER input loaded but hasn't picked a target preset —
+            // before they press Run Lucky Stack and bounce off the
+            // .error("Pick a target first") status-bar message that was
+            // too easy to miss (low contrast text in the menubar). Big +
+            // red + dead centre over the preview makes the next step
+            // unmistakable. Auto-clears the moment the user clicks a
+            // target chip; never blocks the preview itself (lower z).
+            .overlay(alignment: .top) {
+                if needsTargetPickWarning {
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.white)
+                            .font(.system(size: 22, weight: .bold))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Pick a target first")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundColor(.white)
+                            Text("Click one of the planet / Sun / Moon chips at the top of the window before Run Lucky Stack.")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.white.opacity(0.92))
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
+                    .frame(maxWidth: 620)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.red.opacity(0.85))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.30), lineWidth: 1)
+                    )
+                    .padding(.top, 56)   // sit below the previewError banner if both fire
+                    .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .allowsHitTesting(false)   // never block the preview underneath
+                }
+            }
+            .animation(.easeInOut(duration: 0.22), value: needsTargetPickWarning)
             // Mini-map overlay was disabled — pan/zoom recomputed it on
             // every drag tick, and the user found it slow without
             // commensurate value. The view + computation helpers stay in
             // the codebase (PreviewMiniMap.swift, publishViewport()) for
             // future revival.
             .environmentObject(app)
+    }
+
+    /// True when the user has SER input visible (Inputs section + at
+    /// least one .ser in the catalog) but no target preset is active.
+    /// The Lucky Stack run will reject in that state — surface it
+    /// preemptively so the user can fix it before pressing Run.
+    private var needsTargetPickWarning: Bool {
+        guard app.displayedSection == .inputs else { return false }
+        guard app.presets.activeID == nil else { return false }
+        return app.catalog.files.contains { $0.isSER }
     }
 
     private func jobOverlayLabel(processed: Int, total: Int) -> String {
@@ -204,6 +285,54 @@ struct PreviewView: View {
                 Text("Open a folder with ⌘O or drag one in")
                     .font(.caption)
                     .foregroundColor(.secondary.opacity(0.7))
+            }
+        }
+    }
+
+    /// Visualise the crop rect over the preview. The Metal shader uses
+    /// a uniform letterbox fit (no axis distortion), so we replicate
+    /// that math here: scale = min(viewW/srcW, viewH/srcH), then center
+    /// the fitted content. Outside the rect we tint dim, inside we draw
+    /// a thin yellow stroke with corner ticks so the user can see crop
+    /// edges even at low zoom.
+    @ViewBuilder
+    static func cropOverlay(rectInSource r: CGRect, srcW: Int, srcH: Int) -> some View {
+        GeometryReader { geo in
+            let viewW = geo.size.width
+            let viewH = geo.size.height
+            let sw = CGFloat(srcW)
+            let sh = CGFloat(srcH)
+            let scale = min(viewW / sw, viewH / sh)
+            let fittedW = sw * scale
+            let fittedH = sh * scale
+            let offsetX = (viewW - fittedW) * 0.5
+            let offsetY = (viewH - fittedH) * 0.5
+            let cropX = offsetX + r.origin.x * scale
+            let cropY = offsetY + r.origin.y * scale
+            let cropW = r.width * scale
+            let cropH = r.height * scale
+
+            ZStack(alignment: .topLeading) {
+                // Dim outside the crop window. A single black-with-alpha
+                // mask, with the crop rect blendModed back to clear so
+                // only the surround stays dimmed.
+                Rectangle()
+                    .fill(Color.black.opacity(0.45))
+                    .mask {
+                        Rectangle()
+                            .overlay(
+                                Rectangle()
+                                    .frame(width: max(0, cropW), height: max(0, cropH))
+                                    .position(x: cropX + cropW * 0.5, y: cropY + cropH * 0.5)
+                                    .blendMode(.destinationOut)
+                            )
+                            .compositingGroup()
+                    }
+                // Inside-rect stroke.
+                Rectangle()
+                    .stroke(Color.yellow.opacity(0.9), lineWidth: 1.5)
+                    .frame(width: max(0, cropW), height: max(0, cropH))
+                    .position(x: cropX + cropW * 0.5, y: cropY + cropH * 0.5)
             }
         }
     }
@@ -276,6 +405,16 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     // every file/frame switch and made browsing large SERs feel laggy.
     private let qualityScanner = SerQualityScanner()
 
+    /// LRU + 4-frame look-ahead cache for SER playback. Hits the cache
+    /// instead of disk on the timer's hot tick path; the prefetch
+    /// keeps the next 4 upcoming frames warm so NAS-based SERs don't
+    /// freeze on per-frame I/O.
+    private let serPrefetcher = SerFramePrefetcher(device: MetalDevice.shared.device)
+    /// CPU-side low-res scrub cache — no Metal-kernel contention with
+    /// the full-res prefetcher / main load. Drives drag-preview on
+    /// 4 GB+ SERs where full-res decodes are too slow per scrub step.
+    private let serScrubCache = SerScrubLowResCache(device: MetalDevice.shared.device)
+
     /// Texture pixel dimensions of the currently-shown preview, exposed so
     /// the ZoomableMTKView can compute fit-scale for anchored zooming.
     var texturePixelSize: CGSize? {
@@ -327,6 +466,30 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     //     final image is full-res Wiener once the user lets go.
     private let reprocessSubject = PassthroughSubject<Void, Never>()
 
+    /// Fires after the user STOPS scrubbing a SER (debounced). During a
+    /// fast-forward the per-frame path only paints the raw decoded frame
+    /// (instant); the expensive auto-range percentile recompute + full
+    /// sharpen / tone pipeline run ONCE here when the scrub settles. This
+    /// is what keeps manual fast-forward usable as a quick visual scan on
+    /// large SERs — running both per frame at 30 fps was the lag.
+    private let serScrubSettleSubject = PassthroughSubject<Void, Never>()
+
+    /// Monotonic dispatch counter for SER frame loads. Each scrub /
+    /// playback frame request bumps it; `applyLoadedSerFrame` only paints
+    /// when the arriving frame's sequence is the newest seen, so an
+    /// earlier-dispatched frame that finishes LATE (out of order) is
+    /// dropped — preventing the preview from flicking backwards — while
+    /// every in-flight frame that IS the latest still paints. Replaces
+    /// the old strict `index == dispatchedIndex` guard, which dropped
+    /// every intermediate frame during a fast scrub (so nothing moved on
+    /// screen until the user stopped).
+    private var serDispatchSeq: Int = 0
+    private var lastPaintedScrubSeq: Int = 0
+    /// Wall-clock of the last scrub-driven frame load. Used to rate-limit
+    /// the synchronous scrub sink to ~30 decodes/s without a scheduler
+    /// timer (which would stall inside the slider's modal tracking loop).
+    private var lastScrubLoadTime: CFTimeInterval = 0
+
     // Zoom / pan state — UI lives here, MTKView queries via draw().
     var zoomScale: Float = 1.0
     var panPx: SIMD2<Float> = .zero
@@ -334,6 +497,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     // Tone curve LUT cache
     private var lutTex: MTLTexture?
     private var lastLUTPoints: [CGPoint] = []
+    /// Tracks whether the cached `lutTex` was built via Solar Dual-Zone
+    /// (fixed asinh + linear curve) vs the standard control-points
+    /// Catmull-Rom path. Used to invalidate the cache when the user
+    /// toggles between the two.
+    private var lastLUTSolarDualZone: Bool = false
 
     init(app: AppModel) {
         self.app = app
@@ -368,6 +536,9 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         app.$toneCurve.removeDuplicates()
             .sink { [weak self] _ in self?.reprocessSubject.send(()) }
             .store(in: &cancellables)
+        app.$coloring.removeDuplicates()
+            .sink { [weak self] _ in self?.reprocessSubject.send(()) }
+            .store(in: &cancellables)
         app.$previewFileID.removeDuplicates()
             .sink { [weak self] _ in self?.loadCurrentFile() }
             .store(in: &cancellables)
@@ -380,12 +551,19 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 self?.loadCurrentFile()
             }
             .store(in: &cancellables)
-        app.$showAfter
-            .sink { [weak self] _ in self?.view?.needsDisplay = true }
-            .store(in: &cancellables)
+        // Compare side panel toggle was previously wired to a Before/After
+        // main-view flip via `app.$showAfter`. The flip was retired
+        // 2026-05-03 — main view always shows the manipulated result;
+        // comparison happens via the dedicated side panel instead.
         // displayAutoRange toggle: just trigger a redraw — the cached
         // percentiles are reused, no recompute needed.
         app.$displayAutoRange
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.view?.needsDisplay = true }
+            .store(in: &cancellables)
+        // Highlight-clipped overlay toggle (LSW 8.8) — purely visual,
+        // just nudges the MTKView to redraw with the new uniform.
+        app.$highlightClipped
             .removeDuplicates()
             .sink { [weak self] _ in self?.view?.needsDisplay = true }
             .store(in: &cancellables)
@@ -397,12 +575,29 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             .throttle(for: .milliseconds(16), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] _ in self?.view?.needsDisplay = true }
             .store(in: &cancellables)
-        // SER frame scrub — throttled to ~30 fps so dragging stays smooth
-        // even on multi-thousand-frame SERs.
+        // SER frame scrub. Deliberately a SYNCHRONOUS sink with a manual
+        // time-gate rather than a Combine `.throttle(scheduler:)`. A
+        // SwiftUI Slider drag runs a modal NSEventTrackingRunLoopMode
+        // loop; the throttle's scheduler-timer doesn't fire in that mode,
+        // so it held every intermediate value and only emitted on
+        // release — the preview looked frozen until you let go. A plain
+        // @Published sink fires inline on the set (during tracking too);
+        // we rate-limit by wall-clock so a 5000-frame drag still only
+        // decodes ~30×/s. The settle subject lands the exact final frame
+        // + the full pipeline once the drag stops.
         app.$previewSerFrameIndex
             .removeDuplicates()
-            .throttle(for: .milliseconds(33), scheduler: DispatchQueue.main, latest: true)
-            .sink { [weak self] _ in self?.loadCurrentSerFrame() }
+            .sink { [weak self] _ in self?.serScrubIndexChanged() }
+            .store(in: &cancellables)
+
+        // Drag release: when isSerScrubbing flips true → false, the
+        // settle subject fires a full-res decode of the LANDED frame
+        // (no longer the nearest-cached neighbour the drag showed).
+        app.$isSerScrubbing
+            .removeDuplicates()
+            .sink { [weak self] dragging in
+                if !dragging { self?.serScrubSettleSubject.send(()) }
+            }
             .store(in: &cancellables)
         // SER playback stopped → run the percentile recompute + pipeline
         // on whichever frame the user landed on. During playback both are
@@ -411,7 +606,33 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         app.$serPlaybackActive
             .removeDuplicates()
             .sink { [weak self] active in
-                guard let self, !active, self.beforeTex != nil else { return }
+                guard let self else { return }
+                // Tune the prefetcher's look-ahead — playback needs a
+                // deeper buffer than scrubbing so the (now bounded-
+                // parallel) decode queue can stay ahead of the timer.
+                self.serPrefetcher.setPlaybackMode(active)
+                if active {
+                    let idx = self.app.previewSerFrameIndex
+                    let total = self.app.previewSerFrameCount
+                    // Fire prefetch on BOTH caches. The full-res
+                    // prefetcher has 12-deep lookahead; the low-res
+                    // cache materialises thumbs around the playhead
+                    // so playbackPaintCachedFrame's tier-2 fallback
+                    // has something to show on cache misses (avoids
+                    // the "Standbild for the first 3 runs" symptom).
+                    self.serPrefetcher.prefetch(after: idx, totalFrames: total)
+                    // Request low-res thumbs around the playhead so
+                    // tier-2 has neighbours to fall back on.
+                    let lowResBudget = 8
+                    for off in 0..<lowResBudget {
+                        let i = (idx + off) % max(1, total)
+                        self.serScrubCache.requestThumb(at: i)
+                    }
+                    return
+                }
+                // Playback STOP — settle the landed frame with the
+                // full pipeline.
+                guard self.beforeTex != nil else { return }
                 self.refreshDisplayAutoRange()
                 self.view?.needsDisplay = true
                 self.reprocess()
@@ -439,6 +660,26 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         reprocessSubject
             .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
             .sink { [weak self] in self?.reprocess(preview: false) }
+            .store(in: &cancellables)
+
+        // SER scrub-settle: 160 ms after the user stops fast-forwarding,
+        // run the auto-range recompute + full pipeline once on the landed
+        // frame. During the scrub itself `applyLoadedSerFrame` only paints
+        // the raw frame, so flipping through thousands of large frames
+        // stays instant for visual scanning.
+        serScrubSettleSubject
+            .debounce(for: .milliseconds(160), scheduler: DispatchQueue.main)
+            .sink { [weak self] in
+                guard let self, !self.app.serPlaybackActive else { return }
+                // Land the EXACT final frame first (the last scrub index
+                // change may have been rate-limited out), then run the
+                // auto-range recompute + full sharpen / tone pipeline once.
+                self.loadCurrentSerFrame()
+                guard self.beforeTex != nil else { return }
+                self.refreshDisplayAutoRange()
+                self.view?.needsDisplay = true
+                self.reprocess()
+            }
             .store(in: &cancellables)
 
         // Zoom shortcuts (⌘+ ⌘- ⌘0 ⌘1 ⌘2). The View menu posts a
@@ -602,11 +843,50 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         var serHeader: SerHeader?
         var aviReader: AviReader?
         if isSER {
-            serHeader = try? SerReader(url: url).header
+            let serReader = try? SerReader(url: url)
+            serHeader = serReader?.header
             if let h = serHeader {
-                app.previewSerFrameCount = h.frameCount
-                app.previewSerFrameIndex = 0
-                stats.totalFrames = h.frameCount
+                // Use the ACTUALLY-readable frame count, not the header's
+                // declared one — an aborted / truncated capture can claim
+                // more frames than the file contains, and scrubbing into
+                // those phantom frames froze the preview (canReadFrame
+                // correctly refuses to read past the mapped data).
+                let realCount = serReader?.readableFrameCount ?? h.frameCount
+                app.previewSerFrameCount = realCount
+                // Derive the actual capture FPS from the SER's optional
+                // per-frame timestamp trailer (FireCapture / SharpCap /
+                // ASIStudio populate it; some older tools don't). nil →
+                // scrub bar falls back to a 30 fps display estimate.
+                app.previewSerCapturedFPS = serReader?.capturedFPS
+                // Trim range + crop region are per-file. Restore from
+                // the per-URL memory if the user previously set marks
+                // on this SER — keeps the IN/OUT positions across
+                // re-export rounds with different settings. Clamp to
+                // the readable range in case the file was truncated.
+                if let pair = app.rememberedSerTrimRanges[url] {
+                    let last = max(0, realCount - 1)
+                    app.serTrimStart = pair.0.map { max(0, min(last, $0)) }
+                    app.serTrimEnd = pair.1.map { max(0, min(last, $0)) }
+                } else {
+                    app.serTrimStart = nil
+                    app.serTrimEnd = nil
+                }
+                app.serCropRect = nil
+                app.serCropAspect = .free
+                // Restore the last-viewed frame for this SER when the
+                // user round-trips between sections. Clamp to the
+                // actual readable range in case the file was truncated.
+                let remembered = app.rememberedSerFrameIndices[url] ?? 0
+                app.previewSerFrameIndex = max(0, min(realCount - 1, remembered))
+                // Bind both caches to this SER. Full-res prefetcher
+                // handles release / play-time decodes; low-res scrub
+                // cache handles drag previews. Low-res prefill runs
+                // CPU-side (no Metal contention) so even on 4 GB+
+                // SERs the main frame-0 load isn't starved.
+                serPrefetcher.setURL(url)
+                serScrubCache.setURL(url)
+                serScrubCache.prefillSparse(totalFrames: realCount)
+                stats.totalFrames = realCount
                 stats.dimensions = (h.imageWidth, h.imageHeight)
                 stats.bitDepth = h.pixelDepthPerPlane
                 stats.bayerLabel = Self.bayerLabel(for: h.colorID)
@@ -646,6 +926,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         } else {
             app.previewSerFrameCount = 0
             app.previewSerFrameIndex = 0
+            app.previewSerCapturedFPS = nil
         }
         app.previewStats = stats
 
@@ -724,6 +1005,11 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             // Skip the on-disk histogram path for any frame-sequence file —
             // Histogram.compute reads via ImageIO which doesn't grok SER/AVI.
             let hist = (isSER || isAVI) ? [] : Histogram.compute(url: url)
+            // Per-channel histogram for the Tone Curve editor's RGB
+            // overlay — cheap single-pass companion read.
+            let histRGB: ChannelHistogram = (isSER || isAVI)
+                ? ChannelHistogram(r: [], g: [], b: [])
+                : Histogram.computeRGB(url: url)
             // Sharpness probe deliberately NOT auto-run on file open — at full
             // source resolution it adds 5-30 ms per click, which becomes
             // unbearable when the user is fanning through a folder of large
@@ -749,6 +1035,19 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 // the same region) work without re-zooming after every click.
                 // Double-click on the preview / ⌘0 still reset to fit.
                 self.app.previewHistogram = hist
+                // For SER / AVI the ImageIO-based RGB pass returns empty
+                // (formats it can't open). Compute from the just-decoded
+                // preview texture instead so OSC Bayer SERs also get a
+                // per-channel histogram in the Tone Curve editor.
+                if histRGB.r.isEmpty, let t = tex {
+                    let device = MetalDevice.shared.device
+                    let queue = MetalDevice.shared.commandQueue
+                    self.app.previewHistogramRGB = Histogram.computeRGB(
+                        texture: t, device: device, queue: queue
+                    )
+                } else {
+                    self.app.previewHistogramRGB = histRGB
+                }
                 if let dim = tex.map({ ($0.width, $0.height) }) {
                     self.app.previewStats.dimensions = dim
                 }
@@ -919,6 +1218,167 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     /// requested frame and re-runs the processing pipeline. Throttled in
     /// the subscription so rapid scrubs don't queue up. Despite the
     /// historical name this also handles AVI frame access.
+    /// Synchronous handler for a scrub index change. Fires inline on the
+    /// `@Published` set — so it runs even inside the slider's modal
+    /// tracking loop, unlike a scheduler-based throttle. Rate-limited by
+    /// wall-clock to ~30 decodes/s. During playback it always loads (the
+    /// timer drives the cadence). The settle subject (debounced) lands
+    /// the exact final frame + full pipeline once the drag stops.
+    /// Playback paint path — three-tier fallback like a real video
+    /// player so motion stays visible even when the full-res decoder
+    /// is still loading the requested frame:
+    ///
+    ///   1. Full-res cache hit → paint instantly (best case).
+    ///   2. Full-res miss → paint the low-res thumb at this index
+    ///      (or the nearest cached thumb). User sees motion
+    ///      immediately, slightly soft, rather than a frozen frame
+    ///      waiting for disk + Metal.
+    ///   3. Both miss → keep the previously painted frame on screen.
+    ///
+    /// On every tick we ALSO re-arm both caches so the upcoming
+    /// frames stay warm. The bounded-parallel prefetcher (max 2
+    /// decode workers) replaced the old serial queue, so the full-
+    /// res buffer fills ~2× faster.
+    private func playbackPaintCachedFrame() {
+        guard let id = app.previewFileID,
+              let entry = app.catalog.files.first(where: { $0.id == id }),
+              entry.isSER else { return }
+        let idx = app.previewSerFrameIndex
+        let total = app.previewSerFrameCount
+        serPrefetcher.setURL(entry.url)
+        serScrubCache.setURL(entry.url)
+        serPrefetcher.prefetch(after: idx, totalFrames: total)
+        // Ask the low-res cache to materialise this exact index too —
+        // cheap, and the next tick can hit it while the full-res
+        // decode is still in flight.
+        serScrubCache.requestThumb(at: idx)
+
+        // Tier 1: full-res cache hit.
+        if let cached = serPrefetcher.cachedFrame(at: idx) {
+            serDispatchSeq += 1
+            let tex = entry.meridianFlipped
+                ? RotateTexture.rotate180(cached, device: MetalDevice.shared.device)
+                : cached
+            applyLoadedSerFrame(
+                tex: tex,
+                dispatchedID: id,
+                dispatchedSeq: serDispatchSeq,
+                frameIndex: idx
+            )
+            return
+        }
+
+        // Tier 2: low-res fallback. Paint the thumb at idx if cached,
+        // else the nearest cached thumb. This keeps motion visible
+        // while the full-res decoder catches up.
+        let lowRes = serScrubCache.cachedThumb(at: idx)
+            ?? serScrubCache.nearestCachedThumb(to: idx)?.texture
+        if let lowRes {
+            paintScrubLowRes(lowRes, flipped: entry.meridianFlipped, frameIndex: idx)
+            return
+        }
+        // Tier 3: nothing usable — leave the last painted frame on
+        // screen. Frame counter still advances; the next tick has a
+        // higher chance of hitting cache.
+    }
+
+    private func serScrubIndexChanged() {
+        if app.serPlaybackActive {
+            // Playback path — CACHE ONLY, no fresh async load.
+            //
+            // The old per-tick `loadCurrentSerFrame()` fanned out
+            // async dispatches onto a global queue; each one called
+            // `SerFrameLoader.loadFrame` which serialises on
+            // `MetalDevice.shared.commandQueue.waitUntilCompleted`.
+            // The prefetcher's serial queue queues buffers there too.
+            // Result: every tick stacks more Metal command buffers
+            // behind the prefetch, so for the first 200-500 ms after
+            // Play we got a "Standbild" (nothing paints) followed by
+            // a burst (everything completes at once).
+            //
+            // Now: we ONLY paint cached frames + keep the prefetcher
+            // refilling. Cache misses just skip the tick — the screen
+            // keeps the last painted frame, the prefetcher catches up
+            // on the next tick. Smooth (slower) > stuttery (bursty).
+            playbackPaintCachedFrame()
+            return
+        }
+        let now = CACurrentMediaTime()
+        if now - lastScrubLoadTime >= 0.03 {
+            lastScrubLoadTime = now
+            loadScrubFrameSync()
+        }
+        // Always arm the settle pass — its debounce fires on release and
+        // loads the EXACT landed frame (in case the last index change was
+        // rate-limited out) before running auto-range + the pipeline.
+        serScrubSettleSubject.send(())
+    }
+
+    /// Synchronous scrub-frame load: decode + paint INLINE on the main
+    /// thread (no background-queue → `main.async` hop). Cache hits are
+    /// instant; a miss decodes here directly (tens of ms for a large
+    /// frame — acceptable for a visual scan, and it's gated to ~30/s).
+    /// Falls back to the async `loadCurrentSerFrame` for AVI.
+    ///
+    /// Speed-up: SER-load primes the cache with 16 sparse frames
+    /// (prefillSparse), so scrubbing near a prefilled position hits
+    /// cache and returns instantly. Hot lookahead (prefetch(after:))
+    /// warms the next 4 frames around the current position.
+    private func loadScrubFrameSync() {
+        guard let id = app.previewFileID,
+              let entry = app.catalog.files.first(where: { $0.id == id })
+        else { return }
+        guard entry.isSER else { loadCurrentSerFrame(); return }
+        let frameIndex = app.previewSerFrameIndex
+        serPrefetcher.setURL(entry.url)
+        serScrubCache.setURL(entry.url)
+
+        // Drag-active path: low-res scrub cache only. Decoupled from
+        // the Metal-kernel-bound full-res prefetcher, so it stays
+        // responsive on 4 GB+ SERs where each full-res decode is
+        // 300-500 ms. Request the EXACT frame's thumb in the background
+        // (lands on the next drag pulse) and show nearest-cached now.
+        if app.isSerScrubbing {
+            serScrubCache.requestThumb(at: frameIndex)
+            let lowRes = serScrubCache.cachedThumb(at: frameIndex)
+                ?? serScrubCache.nearestCachedThumb(to: frameIndex)?.texture
+            if let lowRes {
+                paintScrubLowRes(lowRes, flipped: entry.meridianFlipped, frameIndex: frameIndex)
+                return
+            }
+            // Low-res cache also missed (e.g. first drag right after
+            // load, before any thumb has decoded). Skip the full-res
+            // sync decode here — it would block the main thread for
+            // hundreds of milliseconds on a 4 GB SER. The next pulse
+            // will likely have a thumb ready. If we have any prior
+            // texture in `beforeTex`, just leave it visible.
+            return
+        }
+
+        // Idle / release: full-res decode of the exact frame.
+        serPrefetcher.prefetch(after: frameIndex, totalFrames: app.previewSerFrameCount)
+        guard let raw = serPrefetcher.loadFrameSync(at: frameIndex) else { return }
+        let tex: MTLTexture = entry.meridianFlipped
+            ? RotateTexture.rotate180(raw, device: MetalDevice.shared.device)
+            : raw
+        afterTex = nil
+        beforeTex = tex
+        app.previewStats.currentFrame = frameIndex + 1
+        app.previewStats.currentSharpness = nil
+        view?.draw()
+    }
+
+    private func paintScrubLowRes(_ raw: MTLTexture, flipped: Bool, frameIndex: Int) {
+        let tex: MTLTexture = flipped
+            ? RotateTexture.rotate180(raw, device: MetalDevice.shared.device)
+            : raw
+        afterTex = nil
+        beforeTex = tex
+        app.previewStats.currentFrame = frameIndex + 1
+        app.previewStats.currentSharpness = nil
+        view?.draw()
+    }
+
     func loadCurrentSerFrame() {
         guard let id = app.previewFileID,
               let entry = app.catalog.files.first(where: { $0.id == id }),
@@ -933,12 +1393,34 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         // frame N+10 would draw N+5 over N+10 and flip the visible frame
         // backwards relative to the slider.
         let dispatchedID = id
-        let dispatchedFrameIndex = frameIndex
+        serDispatchSeq += 1
+        let dispatchedSeq = serDispatchSeq
+        // SER hot path: synchronous cache hit returns inline (no
+        // background dispatch needed) so the timer-driven playback
+        // doesn't pay the GCD round-trip on a cache hit. Miss falls
+        // through to the background load below. Prefetch is fired
+        // immediately so the next 4 frames warm up regardless of
+        // whether the current frame was a hit or miss.
+        if isSER {
+            serPrefetcher.setURL(url)
+            serPrefetcher.prefetch(after: frameIndex, totalFrames: app.previewSerFrameCount)
+            if let cached = serPrefetcher.cachedFrame(at: frameIndex) {
+                let flippedHit: MTLTexture? = flipped
+                    ? RotateTexture.rotate180(cached, device: MetalDevice.shared.device)
+                    : cached
+                self.applyLoadedSerFrame(
+                    tex: flippedHit, dispatchedID: dispatchedID,
+                    dispatchedSeq: dispatchedSeq,
+                    frameIndex: frameIndex
+                )
+                return
+            }
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             var tex: MTLTexture?
             if isSER {
-                tex = try? SerFrameLoader.loadFrame(url: url, frameIndex: frameIndex, device: MetalDevice.shared.device)
+                tex = self.serPrefetcher.loadFrameSync(at: frameIndex)
             } else {
                 // AVI — instantiate a lightweight reader per scrub. The
                 // generator caches under the hood so consecutive frame-N
@@ -953,46 +1435,67 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             // frames must stay snappy. The HUD's currentSharpness goes blank
             // during scrub; the "Calculate Video Quality" button populates
             // the sampled distribution when the user opts in.
+            let texFinal = tex
             DispatchQueue.main.async {
-                guard self.app.previewFileID == dispatchedID else { return }
-                // During SER playback the timer typically advances faster
-                // than the disk read finishes (especially on NAS). The
-                // strict index-match check used to drop EVERY decoded
-                // frame as "stale" — leaving the user staring at a frozen
-                // texture while the frame counter ticked through. During
-                // playback we accept any successful decode; when NOT
-                // playing back we keep the strict guard so fast scrubbing
-                // doesn't paint stale frames in the wrong order.
-                if !self.app.serPlaybackActive {
-                    guard self.app.previewSerFrameIndex == dispatchedFrameIndex else { return }
-                }
-                guard let tex else { return }
-                // Drop the stale sharpened texture so the raw frame paints
-                // immediately. Without this the user stares at the previous
-                // frame's "after" texture until the sharpen / tone-curve
-                // pipeline finishes for the new frame — which is what made
-                // scrubbing feel laggy. The pipeline still runs and replaces
-                // afterTex when it lands.
-                self.afterTex = nil
-                self.beforeTex = tex
-                self.app.previewStats.currentFrame = frameIndex + 1
-                self.app.previewStats.currentSharpness = nil
-                // SER playback path: skip the percentile recompute AND
-                // the full reprocess() pipeline. Each tick gets a fresh
-                // NAS frame; running Wiener / sharpen / tone-curve per
-                // frame at 18 fps blocks the timer cadence and drops
-                // visible frames. The auto-range stays at whatever was
-                // computed for the first frame — fine for playback since
-                // consecutive SER frames have near-identical histograms.
-                if !self.app.serPlaybackActive {
-                    self.refreshDisplayAutoRange()
-                }
-                self.view?.needsDisplay = true
-                if !self.app.serPlaybackActive {
-                    self.reprocess()
-                }
+                self.applyLoadedSerFrame(
+                    tex: texFinal,
+                    dispatchedID: dispatchedID,
+                    dispatchedSeq: dispatchedSeq,
+                    frameIndex: frameIndex
+                )
             }
         }
+    }
+
+    /// Commit a freshly-loaded SER / AVI frame to the preview state.
+    /// Shared by:
+    ///   - the cache-hit fast path in `loadCurrentSerFrame` (no GCD
+    ///     hop, no disk read)
+    ///   - the disk-load slow path (background queue → main hop)
+    /// Stale-load guard: dispatchedID must still match `previewFileID`.
+    /// During active SER playback the index-match guard is relaxed so
+    /// the timer keeps painting frames even when disk I/O lags behind
+    /// the cadence.
+    private func applyLoadedSerFrame(
+        tex: MTLTexture?,
+        dispatchedID: UUID,
+        dispatchedSeq: Int,
+        frameIndex: Int
+    ) {
+        guard app.previewFileID == dispatchedID else { return }
+        // Drop only frames that arrive OUT OF ORDER (an earlier dispatch
+        // finishing after a later one) — this keeps the preview from
+        // flicking backwards during a fast scrub while still painting
+        // every intermediate frame that is the newest seen. The old
+        // `index == dispatchedFrameIndex` guard dropped ALL in-flight
+        // frames mid-scrub, so nothing moved until the user stopped.
+        guard dispatchedSeq >= lastPaintedScrubSeq else { return }
+        lastPaintedScrubSeq = dispatchedSeq
+        guard let tex else { return }
+        // Drop the stale sharpened texture so the raw frame paints
+        // immediately. Without this the user stares at the previous
+        // frame's "after" texture until the sharpen / tone-curve
+        // pipeline finishes for the new frame — which is what made
+        // scrubbing feel laggy. The pipeline still runs and replaces
+        // afterTex when it lands.
+        afterTex = nil
+        beforeTex = tex
+        app.previewStats.currentFrame = frameIndex + 1
+        app.previewStats.currentSharpness = nil
+        // Force an IMMEDIATE synchronous render rather than the deferred
+        // `needsDisplay` path. While the user drags the SER scrub slider
+        // (or any control), the main run loop is in
+        // NSEventTrackingRunLoopMode and the on-demand MTKView redraw
+        // that `needsDisplay = true` schedules does NOT fire until the
+        // drag ends — so frames appeared frozen mid-scrub and only
+        // updated on release. `draw()` renders the new beforeTex on the
+        // spot regardless of run-loop mode.
+        view?.draw()
+        // The expensive auto-range recompute + full pipeline are armed by
+        // `serScrubIndexChanged` (settle debounce), NOT here — so the
+        // per-frame scrub path only pays the decode + draw. Playback skips
+        // the heavy pass entirely (the timer drives the cadence; running
+        // the pipeline per frame would block it).
     }
 
     // MARK: - Processing
@@ -1028,6 +1531,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
 
         let sharpen = app.sharpen
         let tone = app.toneCurve
+        let coloring = app.coloring
 
         // Identity short-circuit at the call site too — when the user has
         // nothing turned on, don't kick a background pipeline pass at all.
@@ -1041,10 +1545,17 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             && (tone.controlPoints.count > 2
                 || tone.controlPoints.first != .zero
                 || tone.controlPoints.last != CGPoint(x: 1, y: 1))
+        // Coloring is its own gate — enabled section with at least one
+        // non-identity curve. Without this guard the call-site short-
+        // circuit below skips pipeline.process entirely when ONLY the
+        // Coloring section is dialled in, and the user's curve edits
+        // never reach the GPU (the bug the user just reported).
+        let coloringActive = coloring.enabled && !coloring.isIdentity
         let nothingActive = !tone.autoWB
             && !tone.chromaticAlignment
             && !sharpen.enabled
-            && (!tone.enabled || (!toneCurveActive && bcIsIdentity && satIsIdentity))
+            && !coloringActive
+            && (!tone.enabled || (!toneCurveActive && !tone.solarDualZone && bcIsIdentity && satIsIdentity))
         if nothingActive {
             afterTex = nil
             view?.needsDisplay = true
@@ -1068,6 +1579,7 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 sharpen: sharpen,
                 toneCurve: tone,
                 toneCurveLUT: lut,
+                coloring: coloring,
                 preview: preview,
                 onStageChange: { [weak self] stage in
                     // Pipeline runs on background queue; UI state must be
@@ -1104,11 +1616,24 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     }
 
     private func ensureLUT(for tone: ToneCurveSettings) -> MTLTexture? {
+        // Tone subsystem is gated on `tone.enabled` — if the user
+        // disabled the Tone Curve section, NOTHING tone-side fires
+        // (including solarDualZone). Dual-zone is just a different
+        // LUT shape selected when the section is enabled.
         guard tone.enabled else { return nil }
-        if lutTex != nil, lastLUTPoints == tone.controlPoints { return lutTex }
+        if tone.solarDualZone {
+            if lutTex != nil, lastLUTSolarDualZone { return lutTex }
+            let newLUT = ToneCurveLUT.buildSolarDualZone(device: MetalDevice.shared.device)
+            lutTex = newLUT
+            lastLUTSolarDualZone = true
+            lastLUTPoints = []
+            return newLUT
+        }
+        if lutTex != nil, !lastLUTSolarDualZone, lastLUTPoints == tone.controlPoints { return lutTex }
         let newLUT = ToneCurveLUT.build(points: tone.controlPoints, device: MetalDevice.shared.device)
         lutTex = newLUT
         lastLUTPoints = tone.controlPoints
+        lastLUTSolarDualZone = false
         return newLUT
     }
 
@@ -1128,6 +1653,12 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         var autoGamma: Float
         var displayGain: Float
         var autoRangeOn: UInt32
+        // Highlight-clipped overlay (LSW 8.8). Mirrors the same-named
+        // fields on the Metal-side struct in Shaders.metal — must stay
+        // in sync field-for-field, or `setFragmentBytes` will pack the
+        // values into the wrong shader slots.
+        var clipOverlayOn: UInt32
+        var clipThreshold: Float
     }
 
     // Cached auto-range params. Recomputed only when beforeTex changes
@@ -1203,9 +1734,10 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         let tw = Float(beforeTex?.width ?? 1)
         let th = Float(beforeTex?.height ?? 1)
 
-        // Before/After toggle: pass splitX=1 (fully "after") when showAfter is on,
-        // else 0 (fully "before"). The display shader already handles both paths.
-        let split: Float = app.showAfter ? 1.0 : 0.0
+        // Compare side panel replaced the old Before/After main-view flip
+        // (2026-05-03). Always render fully "after" (post-pipeline);
+        // direct comparison now happens via the side-panel thumbnails.
+        let split: Float = 1.0
         let autoOn = app.displayAutoRange
         let user: Float = Float(max(0.1, app.displayGain))
         let bk: Float = autoOn ? displayBlack : 0
@@ -1222,7 +1754,9 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             autoScale: sc,
             autoGamma: gm,
             displayGain: user,
-            autoRangeOn: autoOn ? 1 : 0
+            autoRangeOn: autoOn ? 1 : 0,
+            clipOverlayOn: app.highlightClipped ? 1 : 0,
+            clipThreshold: 0.995
         )
         // One-shot diagnostic: log the exact uniforms whenever they
         // CHANGE. Frequent draws don't spam the log because the values
@@ -1314,13 +1848,18 @@ final class ZoomableMTKView: MTKView {
         guard isPanDragging else { return }
 
         let current = toDrawable(convert(event.locationInWindow, from: nil))
-        // Hand-tool pan — image follows the cursor on BOTH axes.
-        // Subtracting the Y delta makes the image follow the hand
-        // (the shader's panPx.y convention is inverted from what one
-        // would naively expect; this empirical sign matches the X
-        // axis behaviour).
+        // Hand-tool pan — image follows the cursor on both axes.
+        // X: AppKit and shader agree on direction (right is +). Drag
+        //    right → see more of left side → cx decreases → panPx.x
+        //    must go negative → subtract the positive delta.
+        // Y: AppKit Y is bottom-up (+ = mouse moved up), but the shader's
+        //    `cy = 0.5 - panPx.y / …` interprets a NEGATIVE panPx.y as
+        //    "shift content up". Earlier subtract-on-both-axes was the
+        //    bug: dragging up made the image drift down (user-reported
+        //    2026-05-21). Subtract on X, ADD on Y → hand-tool follow on
+        //    both axes.
         c.panPx.x = panStartOffset.x - Float(current.x - panDragStart.x)
-        c.panPx.y = panStartOffset.y - Float(current.y - panDragStart.y)
+        c.panPx.y = panStartOffset.y + Float(current.y - panDragStart.y)
         needsDisplay = true
     }
 

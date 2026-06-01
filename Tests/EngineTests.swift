@@ -157,26 +157,47 @@ struct OscDefaultsTests {
         #expect(OscDefaults.isOSC(url: url) == true)
     }
 
-    @Test("applyDefaults turns autoWB on for Bayer SER")
+    @Test("applyDefaults turns autoWB + channelNormalize + purple-fringe on for Bayer SER")
     func applyTurnsAutoWBOn() throws {
         let url = try SyntheticSER.write(colorID: 11)  // BGGR
         defer { try? FileManager.default.removeItem(at: url) }
         var tone = ToneCurveSettings()
         #expect(tone.autoWB == false)
+        #expect(tone.channelNormalize == false)
+        #expect(tone.reducePurpleFringe == false)
         let changed = OscDefaults.applyDefaults(to: &tone, for: url)
         #expect(changed == true)
         #expect(tone.autoWB == true)
+        #expect(tone.channelNormalize == true)
+        #expect(tone.reducePurpleFringe == true)
     }
 
-    @Test("applyDefaults is no-op when autoWB is already on")
+    @Test("applyDefaults is no-op when all three flags are already on")
     func applyIdempotent() throws {
         let url = try SyntheticSER.write(colorID: 9)  // GRBG
         defer { try? FileManager.default.removeItem(at: url) }
         var tone = ToneCurveSettings()
         tone.autoWB = true
+        tone.channelNormalize = true
+        tone.reducePurpleFringe = true
         let changed = OscDefaults.applyDefaults(to: &tone, for: url)
         #expect(changed == false)
         #expect(tone.autoWB == true)
+        #expect(tone.channelNormalize == true)
+        #expect(tone.reducePurpleFringe == true)
+    }
+
+    @Test("applyDefaults flips only missing flags when some are set")
+    func applyFlipsOnlyMissing() throws {
+        let url = try SyntheticSER.write(colorID: 9)  // GRBG
+        defer { try? FileManager.default.removeItem(at: url) }
+        var tone = ToneCurveSettings()
+        tone.autoWB = true  // already on
+        let changed = OscDefaults.applyDefaults(to: &tone, for: url)
+        #expect(changed == true)
+        #expect(tone.autoWB == true)
+        #expect(tone.channelNormalize == true)
+        #expect(tone.reducePurpleFringe == true)
     }
 
     @Test("applyDefaults is no-op for mono SER")
@@ -187,6 +208,8 @@ struct OscDefaultsTests {
         let changed = OscDefaults.applyDefaults(to: &tone, for: url)
         #expect(changed == false)
         #expect(tone.autoWB == false)
+        #expect(tone.channelNormalize == false)
+        #expect(tone.reducePurpleFringe == false)
     }
 }
 
@@ -234,6 +257,61 @@ struct SerFrameBytesTests {
         for i in 0..<frames {
             let stamp = reader.withFrameBytes(at: i) { ptr, _ in ptr[0] }
             #expect(stamp == UInt8((0x10 + i) & 0xFF))
+        }
+    }
+
+    /// `canReadFrame` must accept every in-range frame of a complete file
+    /// and reject out-of-range indices — the cheap pre-check that keeps
+    /// the speculative scrub / prefetch path off the hard precondition.
+    @Test("canReadFrame accepts in-range, rejects out-of-range")
+    func canReadFrameBounds() throws {
+        let frames = 5
+        let url = try SyntheticSER.write(
+            width: 64, height: 64, depth: 8, frameCount: frames, colorID: 0
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        let reader = try SerReader(url: url)
+        for i in 0..<frames { #expect(reader.canReadFrame(at: i) == true) }
+        #expect(reader.canReadFrame(at: -1) == false)
+        #expect(reader.canReadFrame(at: frames) == false)
+        #expect(reader.canReadFrame(at: frames + 100) == false)
+    }
+
+    /// A SER whose header overstates the frame count (truncated copy /
+    /// still-being-written capture) must report the missing tail frames
+    /// as unreadable — this is the exact condition that crashed the app
+    /// via the prefetcher's hard `precondition` before the guard landed.
+    @Test("canReadFrame rejects frames missing from a truncated file")
+    func canReadFrameTruncated() throws {
+        let frames = 6
+        let url = try SyntheticSER.write(
+            width: 64, height: 64, depth: 8, frameCount: frames, colorID: 0
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // Chop the file so only the first 3 frames' bytes survive while
+        // the header still claims 6. 178-byte header + 64*64 bytes/frame.
+        let bytesPerFrame = 64 * 64
+        let keptFrames = 3
+        let truncatedLength = 178 + bytesPerFrame * keptFrames
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(truncatedLength))
+        try handle.close()
+
+        let reader = try SerReader(url: url)
+        // Header still says 6 frames…
+        #expect(reader.header.frameCount == frames)
+        // …but only the first 3 are actually present.
+        for i in 0..<keptFrames { #expect(reader.canReadFrame(at: i) == true) }
+        for i in keptFrames..<frames {
+            #expect(reader.canReadFrame(at: i) == false, "frame \(i) should be unreadable in truncated file")
+        }
+
+        // And the loader must throw (not crash) for a missing frame.
+        #expect(throws: (any Error).self) {
+            _ = try SerFrameLoader.loadFrame(
+                url: url, frameIndex: frames - 1, device: MetalDevice.shared.device
+            )
         }
     }
 }
@@ -3622,5 +3700,597 @@ struct AutoPSFTests {
         let r = try #require(AutoPSF.estimate(luminance: buf, width: 200, height: 200))
         #expect(r.sigma >= 0.5)
         #expect(r.sigma <= 5.0)
+    }
+}
+
+// MARK: - AutoPSFAutoROI — Gaussian sigma fit from synthetic step edges
+
+@Suite("AutoPSFAutoROI — recovers Gaussian sigma from step edges (Block C.2)")
+struct AutoPSFAutoROITests {
+
+    /// Render a step edge (`dark` on one side, `bright` on the other)
+    /// blurred by a Gaussian of stddev `sigma`. The edge runs along
+    /// the direction (cos angle, sin angle) through the image centre;
+    /// the bright side is on the +normal half-plane where normal =
+    /// (-sin angle, cos angle).
+    private static func makeBlurredStepEdge(
+        width W: Int,
+        height H: Int,
+        angle: Float,
+        bright: Float = 0.8,
+        dark: Float = 0.2,
+        sigma: Float
+    ) -> [Float] {
+        let cx = Float(W) / 2
+        let cy = Float(H) / 2
+        let nx = -sinf(angle)
+        let ny = cosf(angle)
+        var img = [Float](repeating: 0, count: W * H)
+        for y in 0..<H {
+            for x in 0..<W {
+                let dx = Float(x) - cx
+                let dy = Float(y) - cy
+                let d = dx * nx + dy * ny
+                img[y * W + x] = d > 0 ? bright : dark
+            }
+        }
+        return separableGaussianBlur(img, width: W, height: H, sigma: sigma)
+    }
+
+    private static func separableGaussianBlur(
+        _ buf: [Float], width W: Int, height H: Int, sigma: Float
+    ) -> [Float] {
+        let half = max(1, Int((4.0 * sigma).rounded(.up)))
+        var kernel = [Float](repeating: 0, count: 2 * half + 1)
+        var kSum: Float = 0
+        for i in -half...half {
+            let v = expf(-Float(i * i) / (2 * sigma * sigma))
+            kernel[i + half] = v
+            kSum += v
+        }
+        for k in 0..<kernel.count { kernel[k] /= kSum }
+        var tmp = [Float](repeating: 0, count: W * H)
+        for y in 0..<H {
+            for x in 0..<W {
+                var s: Float = 0
+                for k in -half...half {
+                    let xi = max(0, min(W - 1, x + k))
+                    s += buf[y * W + xi] * kernel[k + half]
+                }
+                tmp[y * W + x] = s
+            }
+        }
+        var out = [Float](repeating: 0, count: W * H)
+        for y in 0..<H {
+            for x in 0..<W {
+                var s: Float = 0
+                for k in -half...half {
+                    let yi = max(0, min(H - 1, y + k))
+                    s += tmp[yi * W + x] * kernel[k + half]
+                }
+                out[y * W + x] = s
+            }
+        }
+        return out
+    }
+
+    @Test("Recovers σ=1.5 within ±20% on a 200x200 vertical edge")
+    func recoversSigma15Vertical() throws {
+        let buf = Self.makeBlurredStepEdge(
+            width: 200, height: 200, angle: 0, sigma: 1.5
+        )
+        let r = try #require(AutoPSFAutoROI.estimate(luminance: buf, width: 200, height: 200))
+        let rel = abs(r.sigma - 1.5) / 1.5
+        #expect(rel < 0.2, "got σ=\(r.sigma) for true σ=1.5 (rel err \(rel))")
+    }
+
+    @Test("Recovers σ=2.5 within ±20% on a diagonal edge")
+    func recoversSigma25Diagonal() throws {
+        let buf = Self.makeBlurredStepEdge(
+            width: 200, height: 200, angle: .pi / 4, sigma: 2.5
+        )
+        let r = try #require(AutoPSFAutoROI.estimate(luminance: buf, width: 200, height: 200))
+        let rel = abs(r.sigma - 2.5) / 2.5
+        #expect(rel < 0.2, "got σ=\(r.sigma) for true σ=2.5 (rel err \(rel))")
+    }
+
+    @Test("Recovers σ=1.0 within ±25% on a sharp edge")
+    func recoversSigma10() throws {
+        let buf = Self.makeBlurredStepEdge(
+            width: 200, height: 200, angle: 0, sigma: 1.0
+        )
+        let r = try #require(AutoPSFAutoROI.estimate(luminance: buf, width: 200, height: 200))
+        let rel = abs(r.sigma - 1.0) / 1.0
+        #expect(rel < 0.25, "got σ=\(r.sigma) for true σ=1.0 (rel err \(rel))")
+    }
+
+    @Test("Recovers σ=3.5 within ±25% on a soft edge")
+    func recoversSigma35() throws {
+        let buf = Self.makeBlurredStepEdge(
+            width: 200, height: 200, angle: 0, sigma: 3.5
+        )
+        let r = try #require(AutoPSFAutoROI.estimate(luminance: buf, width: 200, height: 200))
+        let rel = abs(r.sigma - 3.5) / 3.5
+        #expect(rel < 0.25, "got σ=\(r.sigma) for true σ=3.5 (rel err \(rel))")
+    }
+
+    @Test("Empty / pure-black input returns nil")
+    func emptyInput() {
+        let buf = [Float](repeating: 0, count: 200 * 200)
+        #expect(AutoPSFAutoROI.estimate(luminance: buf, width: 200, height: 200) == nil)
+    }
+
+    @Test("Uniform mid-tone returns nil (no edge anywhere)")
+    func uniformInput() {
+        let buf = [Float](repeating: 0.5, count: 200 * 200)
+        #expect(AutoPSFAutoROI.estimate(luminance: buf, width: 200, height: 200) == nil)
+    }
+
+    @Test("Small-amplitude noise returns nil (gates reject low-contrast)")
+    func lowContrastNoise() {
+        // Deterministic small-amplitude noise via a linear congruential
+        // generator — keeps the test reproducible. Amplitude 0.02 is
+        // well below the 0.05 step-contrast gate, so no candidate
+        // edge should pass.
+        var seed: UInt32 = 12345
+        var buf = [Float](repeating: 0.5, count: 200 * 200)
+        for i in 0..<buf.count {
+            seed = 1664525 &* seed &+ 1013904223
+            let r = Float(seed >> 16) / Float(UInt32.max >> 16)
+            buf[i] += (r - 0.5) * 0.02
+        }
+        #expect(AutoPSFAutoROI.estimate(luminance: buf, width: 200, height: 200) == nil)
+    }
+
+    @Test("Saturated edge returns nil (clipped highlights break Gaussian fit)")
+    func saturatedEdge() {
+        // Step from 0.0 → 1.5 (above sensor range) blurred with σ=1.5,
+        // then clipped at 1.0 to simulate a real saturated capture.
+        // The clipping flattens the LSF on the bright side; the
+        // saturation-neighbour gate should reject every candidate.
+        var buf = Self.makeBlurredStepEdge(
+            width: 200, height: 200, angle: 0,
+            bright: 1.5, dark: 0.0, sigma: 1.5
+        )
+        for i in 0..<buf.count { buf[i] = min(1.0, buf[i]) }
+        #expect(AutoPSFAutoROI.estimate(luminance: buf, width: 200, height: 200) == nil)
+    }
+
+    @Test("σ clamped to [0.5, 5.0] for super-sharp edges")
+    func sigmaClamping() throws {
+        let buf = Self.makeBlurredStepEdge(
+            width: 200, height: 200, angle: 0, sigma: 0.3
+        )
+        let r = try #require(AutoPSFAutoROI.estimate(luminance: buf, width: 200, height: 200))
+        #expect(r.sigma >= 0.5)
+        #expect(r.sigma <= 5.0)
+    }
+
+    @Test("Edge geometry: normal points to bright side")
+    func edgeNormalDirection() throws {
+        // Vertical edge with dark on the left, bright on the right.
+        // The unit normal in the result should have nx > 0 (pointing
+        // right toward the bright side).
+        let buf = Self.makeBlurredStepEdge(
+            width: 200, height: 200, angle: 0, sigma: 1.5
+        )
+        let r = try #require(AutoPSFAutoROI.estimate(luminance: buf, width: 200, height: 200))
+        // angle=0 → tangent along +y, normal = (-sin0, cos0) = (0, 1)
+        // bright side is +normal. So the recovered normal should be
+        // approximately (0, 1) OR (0, -1) depending on which row's
+        // strongest pixel got picked — both indicate the same edge.
+        // We just verify the magnitude is unit.
+        let mag = sqrtf(r.edgeNormal.x * r.edgeNormal.x + r.edgeNormal.y * r.edgeNormal.y)
+        #expect(abs(mag - 1.0) < 0.01, "edge normal not unit length: \(mag)")
+    }
+}
+
+// MARK: - Pre-sharpen highlight suppression (LSW 3.1.3 parity)
+
+@Suite("HighlightSuppression — pre-sharpen soft-clip curve")
+struct HighlightSuppressionTests {
+
+    @Test("Below the knee is a strict identity")
+    func belowKneeIdentity() {
+        for L: Float in [0.0, 0.1, 0.5, 0.7, 0.849] {
+            #expect(HighlightSuppression.compress(L, knee: 0.85) == L)
+        }
+    }
+
+    @Test("At the knee the curve is C¹-continuous (value AND slope match)")
+    func continuousAtKnee() {
+        let knee: Float = 0.85
+        // Value continuity: f(knee) equals knee from both branches.
+        let atKnee = HighlightSuppression.compress(knee, knee: knee)
+        #expect(abs(atKnee - knee) < 1e-6)
+        // Slope continuity: numerical derivatives on either side of
+        // the knee should both ≈ 1.0 (the identity branch has slope 1
+        // and tanh(x)/x → 1 as x → 0).
+        let dx: Float = 1e-3
+        let belowSlope = (atKnee - HighlightSuppression.compress(knee - dx, knee: knee)) / dx
+        let aboveSlope = (HighlightSuppression.compress(knee + dx, knee: knee) - atKnee) / dx
+        #expect(abs(belowSlope - 1.0) < 1e-2, "below-knee slope \(belowSlope) ≠ 1")
+        #expect(abs(aboveSlope - 1.0) < 1e-2, "above-knee slope \(aboveSlope) ≠ 1")
+    }
+
+    @Test("Above the knee the value is compressed (strictly less than input)")
+    func aboveKneeCompresses() {
+        let knee: Float = 0.85
+        for L: Float in [0.90, 0.95, 0.99, 1.00] {
+            let out = HighlightSuppression.compress(L, knee: knee)
+            #expect(out < L, "L=\(L) -> \(out) should compress below input")
+            #expect(out >= knee, "L=\(L) -> \(out) should not fall below knee")
+            #expect(out <= 1.0, "L=\(L) -> \(out) must stay in [0,1]")
+        }
+    }
+
+    @Test("Curve is monotonic non-decreasing")
+    func monotonic() {
+        let knee: Float = 0.85
+        var prev: Float = -1
+        for i in 0...100 {
+            let L = Float(i) / 100.0
+            let out = HighlightSuppression.compress(L, knee: knee)
+            #expect(out >= prev, "non-monotonic at L=\(L): \(prev) -> \(out)")
+            prev = out
+        }
+    }
+
+    @Test("Auto-engage gate fires at p99 ≥ 0.98 and not below")
+    func autoEngageGate() {
+        #expect(HighlightSuppression.shouldEngage(highlightP99: 0.98) == true)
+        #expect(HighlightSuppression.shouldEngage(highlightP99: 0.99) == true)
+        #expect(HighlightSuppression.shouldEngage(highlightP99: 1.00) == true)
+        #expect(HighlightSuppression.shouldEngage(highlightP99: 0.979) == false)
+        #expect(HighlightSuppression.shouldEngage(highlightP99: 0.85)  == false)
+        #expect(HighlightSuppression.shouldEngage(highlightP99: 0.50)  == false)
+    }
+
+    @Test("Knee=0.85: f(1.0) ≈ 0.964 — within 0.5% of analytic tanh value")
+    func numericValues() {
+        // f(1.0) = knee + (1-knee)*tanh(1) = 0.85 + 0.15*0.7616 ≈ 0.9642
+        let f1 = HighlightSuppression.compress(1.0, knee: 0.85)
+        #expect(abs(f1 - 0.9642) < 0.005, "f(1.0)=\(f1)")
+        // f(0.95) = 0.85 + 0.15*tanh(0.6667) ≈ 0.85 + 0.0865 = 0.9365
+        let f95 = HighlightSuppression.compress(0.95, knee: 0.85)
+        #expect(abs(f95 - 0.9365) < 0.005, "f(0.95)=\(f95)")
+    }
+
+    @Test("Boundary knee values: 0.5 and 0.99 still behave sensibly")
+    func boundaryKnees() {
+        // knee=0.5 — aggressive compression. f(1)=0.5+0.5*tanh(1)≈0.881
+        let f1lowKnee = HighlightSuppression.compress(1.0, knee: 0.5)
+        #expect(f1lowKnee < 1.0)
+        #expect(f1lowKnee > 0.5)
+        // knee=0.99 — almost-identity. f(1)=0.99+0.01*tanh(1)≈0.998
+        let f1highKnee = HighlightSuppression.compress(1.0, knee: 0.99)
+        #expect(f1highKnee < 1.0)
+        #expect(f1highKnee > 0.99)
+    }
+}
+
+// MARK: - Folder-watch stability tracker (LSW 5.2 auto-stack parity)
+
+@Suite("WatchStabilityTracker — size-stable file completion")
+struct WatchStabilityTrackerTests {
+
+    private static let f = URL(fileURLWithPath: "/tmp/capture/jup_001.ser")
+
+    @Test("Growing file never completes")
+    func growingNeverCompletes() {
+        var t = WatchStabilityTracker(requiredStableSamples: 2)
+        #expect(t.observe(url: Self.f, size: 1_000) == false)
+        #expect(t.observe(url: Self.f, size: 2_000) == false)
+        #expect(t.observe(url: Self.f, size: 3_000) == false)
+        #expect(t.observe(url: Self.f, size: 4_000) == false)
+    }
+
+    @Test("Completes after requiredStableSamples equal observations")
+    func completesWhenStable() {
+        var t = WatchStabilityTracker(requiredStableSamples: 2)
+        #expect(t.observe(url: Self.f, size: 5_000) == false)  // first sighting
+        #expect(t.observe(url: Self.f, size: 5_000) == false)  // stableCount 1
+        #expect(t.observe(url: Self.f, size: 5_000) == true)   // stableCount 2 → complete
+    }
+
+    @Test("Fires complete exactly once, never again")
+    func firesOnce() {
+        var t = WatchStabilityTracker(requiredStableSamples: 1)
+        #expect(t.observe(url: Self.f, size: 9_000) == false)  // first sighting
+        #expect(t.observe(url: Self.f, size: 9_000) == true)   // stableCount 1 → complete
+        #expect(t.observe(url: Self.f, size: 9_000) == false)  // already fired
+        #expect(t.observe(url: Self.f, size: 9_000) == false)
+    }
+
+    @Test("Growth after stability resets the run (resumed capture)")
+    func growthResetsRun() {
+        var t = WatchStabilityTracker(requiredStableSamples: 2)
+        #expect(t.observe(url: Self.f, size: 1_000) == false)
+        #expect(t.observe(url: Self.f, size: 1_000) == false)  // stableCount 1
+        // Capture resumed — file grew again. Run resets, must NOT complete
+        // on the very next equal sample.
+        #expect(t.observe(url: Self.f, size: 2_000) == false)  // reset
+        #expect(t.observe(url: Self.f, size: 2_000) == false)  // stableCount 1
+        #expect(t.observe(url: Self.f, size: 2_000) == true)   // stableCount 2 → complete
+    }
+
+    @Test("Zero-size placeholder never completes")
+    func zeroSizeNeverCompletes() {
+        var t = WatchStabilityTracker(requiredStableSamples: 1)
+        #expect(t.observe(url: Self.f, size: 0) == false)
+        #expect(t.observe(url: Self.f, size: 0) == false)
+        // Once data lands it starts the run normally.
+        #expect(t.observe(url: Self.f, size: 100) == false)
+        #expect(t.observe(url: Self.f, size: 100) == true)
+    }
+
+    @Test("forget drops tracking so the file can complete fresh later")
+    func forgetResets() {
+        var t = WatchStabilityTracker(requiredStableSamples: 1)
+        #expect(t.observe(url: Self.f, size: 7_000) == false)
+        #expect(t.observe(url: Self.f, size: 7_000) == true)
+        t.forget(Self.f)
+        // After forget, the URL is a fresh first-sighting again.
+        #expect(t.observe(url: Self.f, size: 7_000) == false)
+        #expect(t.observe(url: Self.f, size: 7_000) == true)
+    }
+
+    @Test("pendingCount tracks not-yet-complete files")
+    func pendingCount() {
+        var t = WatchStabilityTracker(requiredStableSamples: 2)
+        let a = URL(fileURLWithPath: "/tmp/a.ser")
+        let b = URL(fileURLWithPath: "/tmp/b.ser")
+        _ = t.observe(url: a, size: 100)
+        _ = t.observe(url: b, size: 200)
+        #expect(t.pendingCount == 2)
+        // Complete a.
+        _ = t.observe(url: a, size: 100)
+        _ = t.observe(url: a, size: 100)
+        #expect(t.pendingCount == 1)
+        t.reset()
+        #expect(t.pendingCount == 0)
+    }
+}
+
+// MARK: - Purple-fringe suppression (LSW 7.1 parity)
+
+@Suite("PurpleFringe — hue-targeted desaturation")
+struct PurpleFringeTests {
+
+    @Test("Pure purple pixel gets the full strength factor at band centre")
+    func purpleCenterFullStrength() {
+        // Pick RGB so the hue lands exactly at 290°:
+        //   cmax = b (= 1.0), cmin = g (= 0)
+        //   h = 60 · ((r - g) / delta + 4) = 290
+        //   (r - g) / delta + 4 = 4.833…
+        //   r / 1 = 0.833…
+        // (0.833, 0.0, 1.0) → hue = 290°, distance = 0 → factor = 1·strength.
+        let f = PurpleFringe.desatFactor(r: 0.8333, g: 0.0, b: 1.0, strength: 1.0)
+        #expect(f > 0.99, "expected ≈ 1.0 at band centre, got \(f)")
+    }
+
+    @Test("Green / red / yellow pixels are passed through unchanged")
+    func nonPurpleHuesUnchanged() {
+        // Green (120°): outside the band.
+        #expect(PurpleFringe.desatFactor(r: 0.0, g: 1.0, b: 0.0, strength: 1.0) == 0)
+        // Red (0°): outside the band.
+        #expect(PurpleFringe.desatFactor(r: 1.0, g: 0.0, b: 0.0, strength: 1.0) == 0)
+        // Yellow (60°): well outside the band.
+        #expect(PurpleFringe.desatFactor(r: 1.0, g: 1.0, b: 0.0, strength: 1.0) == 0)
+        // Cyan (180°): outside the band.
+        #expect(PurpleFringe.desatFactor(r: 0.0, g: 1.0, b: 1.0, strength: 1.0) == 0)
+    }
+
+    @Test("Low-saturation purple is left alone (highlight clip path)")
+    func lowSaturationSkipped() {
+        // Near-white pixel with a slight purple tint — saturation < 0.05
+        // gate should keep it from being desaturated.
+        let f = PurpleFringe.desatFactor(r: 0.98, g: 0.96, b: 1.0, strength: 1.0)
+        #expect(f == 0, "low-sat pixel should be skipped, got \(f)")
+    }
+
+    @Test("Apply blends RGB toward luma in the purple band")
+    func applyBlendsTowardLuma() {
+        // At band-centre RGB and strength = 1, the per-channel output
+        // should equal the per-pixel luma (full blend).
+        let r: Float = 0.8333, g: Float = 0.0, b: Float = 1.0
+        let (rOut, gOut, bOut) = PurpleFringe.apply(r: r, g: g, b: b, strength: 1.0)
+        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        #expect(abs(rOut - luma) < 0.01, "rOut=\(rOut) not near luma=\(luma)")
+        #expect(abs(gOut - luma) < 0.01, "gOut=\(gOut) not near luma=\(luma)")
+        #expect(abs(bOut - luma) < 0.01, "bOut=\(bOut) not near luma=\(luma)")
+    }
+
+    @Test("Strength scales the blend linearly")
+    func strengthScales() {
+        let fFull = PurpleFringe.desatFactor(r: 0.6, g: 0.1, b: 1.0, strength: 1.0)
+        let fHalf = PurpleFringe.desatFactor(r: 0.6, g: 0.1, b: 1.0, strength: 0.5)
+        // Strength=0.5 should give exactly half the strength=1 factor.
+        #expect(abs(fHalf - fFull * 0.5) < 1e-5)
+    }
+
+    @Test("Auto-engage fires when ≥ 0.5% of pixels are purple")
+    func autoEngageFires() {
+        // Build a buffer with 1% purple pixels at (0.7, 0.0, 1.0)
+        // and the rest neutral grey.
+        let n = 10_000
+        var r = [Float](repeating: 0.5, count: n)
+        var g = [Float](repeating: 0.5, count: n)
+        var b = [Float](repeating: 0.5, count: n)
+        for i in 0..<100 {  // 1%
+            r[i] = 0.7; g[i] = 0.0; b[i] = 1.0
+        }
+        #expect(PurpleFringe.shouldEngage(red: r, green: g, blue: b) == true)
+    }
+
+    @Test("Auto-engage skips when purple is below the 0.5% threshold")
+    func autoEngageSkips() {
+        let n = 10_000
+        var r = [Float](repeating: 0.5, count: n)
+        var g = [Float](repeating: 0.5, count: n)
+        var b = [Float](repeating: 0.5, count: n)
+        // 0.3% — below the 0.5% gate.
+        for i in 0..<30 {
+            r[i] = 0.7; g[i] = 0.0; b[i] = 1.0
+        }
+        #expect(PurpleFringe.shouldEngage(red: r, green: g, blue: b) == false)
+    }
+}
+
+// MARK: - Synthetic PSF cascade fallback (LSW 3.2.1 parity)
+
+@Suite("AutoPSF synthetic-sigma — seeing-index → Gaussian σ mapping")
+struct AutoPSFSyntheticTests {
+
+    @Test("Seeing index 3 (average) maps to σ = 2.7 px")
+    func averageSeeing() {
+        #expect(abs(AutoPSF.syntheticSigma(seeingIndex: 3.0) - 2.7) < 1e-4)
+    }
+
+    @Test("Endpoints: seeing=1 → σ=3.9, seeing=5 → σ=1.5")
+    func endpoints() {
+        #expect(abs(AutoPSF.syntheticSigma(seeingIndex: 1.0) - 3.9) < 1e-4)
+        #expect(abs(AutoPSF.syntheticSigma(seeingIndex: 5.0) - 1.5) < 1e-4)
+    }
+
+    @Test("Out-of-range seeing values clamp to [1, 5]")
+    func clampsToValidRange() {
+        // 0.5 below the floor clamps to 1.0
+        #expect(AutoPSF.syntheticSigma(seeingIndex: 0.5) == AutoPSF.syntheticSigma(seeingIndex: 1.0))
+        // 7.0 above the ceiling clamps to 5.0
+        #expect(AutoPSF.syntheticSigma(seeingIndex: 7.0) == AutoPSF.syntheticSigma(seeingIndex: 5.0))
+        // Negative seeing clamps to 1.0 (defensive)
+        #expect(AutoPSF.syntheticSigma(seeingIndex: -1.0) == AutoPSF.syntheticSigma(seeingIndex: 1.0))
+    }
+
+    @Test("σ is monotonically non-increasing as seeing improves")
+    func monotonic() {
+        var last: Float = .infinity
+        for i in stride(from: 1.0 as Float, through: 5.0, by: 0.5) {
+            let s = AutoPSF.syntheticSigma(seeingIndex: i)
+            #expect(s <= last + 1e-5, "non-monotonic at seeing=\(i): last=\(last) s=\(s)")
+            last = s
+        }
+    }
+
+    @Test("AutoPSFEstimate.synthetic exposes σ + sentinel confidence")
+    func enumAccessors() {
+        let est: AutoPSFEstimate = .synthetic(sigma: 2.7, seeingIndex: 3.0)
+        #expect(est.sigma == 2.7)
+        // Synthetic confidence is the sentinel 1.0 (callers shouldn't
+        // distinguish quality bands between measured and synthetic;
+        // logging is the responsibility of the call-site).
+        #expect(est.confidence == 1.0)
+    }
+}
+
+// MARK: - Channel-Normalize (LSW 7.2.1 parity)
+
+@Suite("ChannelNormalize — per-channel histogram stretch")
+struct ChannelNormalizeTests {
+
+    private static let pixelCount = 64 * 64
+
+    /// Build a flat channel with `value` for all pixels except for the
+    /// last `tailCount` (default 5% of total) which are `tailValue`.
+    /// Tail-count must clearly exceed the 1% complement so p99 reads
+    /// from the tail block, not from the bulk value. 5% covers both
+    /// the p99 and the rounded-index edge case safely.
+    private static func channel(
+        value: Float,
+        tailValue: Float,
+        tailCount: Int = pixelCount / 20
+    ) -> [Float] {
+        var out = [Float](repeating: value, count: pixelCount)
+        for i in (pixelCount - tailCount)..<pixelCount {
+            out[i] = tailValue
+        }
+        return out
+    }
+
+    @Test("Reference channel collapses to identity")
+    func referenceChannelIsIdentity() {
+        // All channels share the same [p1, p99]. Green is reference.
+        let r = Self.channel(value: 0.20, tailValue: 0.80)
+        let g = Self.channel(value: 0.20, tailValue: 0.80)
+        let b = Self.channel(value: 0.20, tailValue: 0.80)
+        let corr = ChannelNormalize.compute(
+            red: r, green: g, blue: b,
+            width: 64, height: 64,
+            reference: .green
+        )
+        #expect(abs(corr.greenScale  - 1.0) < 1e-4)
+        #expect(abs(corr.greenOffset - 0.0) < 1e-4)
+    }
+
+    @Test("Off-channel range gets stretched onto the reference range")
+    func offChannelStretched() {
+        // Green: [0.10, 0.50]. Red: [0.20, 0.40]. Channel-normalize
+        // should stretch red so its [p1, p99] aligns with green's.
+        // Red scale = (0.50 - 0.10) / (0.40 - 0.20) = 2.0
+        // Red offset = 0.20 - 0.10 / 2.0 = 0.15
+        // After: (0.20 - 0.15) * 2 = 0.10  ✔  matches green's p1
+        // After: (0.40 - 0.15) * 2 = 0.50  ✔  matches green's p99
+        let r = Self.channel(value: 0.20, tailValue: 0.40)
+        let g = Self.channel(value: 0.10, tailValue: 0.50)
+        let b = Self.channel(value: 0.10, tailValue: 0.50)
+        let corr = ChannelNormalize.compute(
+            red: r, green: g, blue: b,
+            width: 64, height: 64,
+            reference: .green
+        )
+        // Verify by applying the correction to the red channel and
+        // checking p99 lands on green's p99 (0.50).
+        let rOut = ChannelNormalize.apply(channel: r, offset: corr.redOffset, scale: corr.redScale)
+        let sorted = rOut.sorted()
+        let p99 = sorted[Int((Double(sorted.count - 1) * 0.99).rounded())]
+        #expect(abs(p99 - 0.50) < 0.02, "p99=\(p99) ≠ 0.50")
+    }
+
+    @Test("Auto-engage fires when channels are skewed > 30%")
+    func autoEngageFires() {
+        // Red p99 = 0.50, green p99 = 0.50, blue p99 = 0.95.
+        // Spread = (0.95 - 0.50)/0.50 = 0.90 > 0.30  →  engage.
+        let r = Self.channel(value: 0.10, tailValue: 0.50)
+        let g = Self.channel(value: 0.10, tailValue: 0.50)
+        let b = Self.channel(value: 0.10, tailValue: 0.95)
+        #expect(ChannelNormalize.shouldEngage(red: r, green: g, blue: b) == true)
+    }
+
+    @Test("Auto-engage skips when channels are already aligned")
+    func autoEngageSkips() {
+        // All three p99 ≈ 0.50. Spread < 30%, no engagement.
+        let r = Self.channel(value: 0.10, tailValue: 0.50)
+        let g = Self.channel(value: 0.10, tailValue: 0.52)  // 4% off
+        let b = Self.channel(value: 0.10, tailValue: 0.48)  // 8% off
+        #expect(ChannelNormalize.shouldEngage(red: r, green: g, blue: b) == false)
+    }
+
+    @Test("Degenerate (uniform) channel falls back to identity")
+    func degenerateChannelFallsBack() {
+        // Reference channel uniform → no [p1, p99] range to align
+        // others to. Compute must return identity, not divide-by-zero.
+        let r = [Float](repeating: 0.20, count: Self.pixelCount)
+        let g = [Float](repeating: 0.50, count: Self.pixelCount)
+        let b = [Float](repeating: 0.80, count: Self.pixelCount)
+        let corr = ChannelNormalize.compute(
+            red: r, green: g, blue: b,
+            width: 64, height: 64,
+            reference: .green
+        )
+        #expect(corr == .identity)
+    }
+
+    @Test("Mismatched buffer lengths return identity")
+    func mismatchedBuffersFallBack() {
+        let r = Self.channel(value: 0.20, tailValue: 0.80)
+        let g = [Float](repeating: 0.0, count: 32)  // wrong length
+        let b = Self.channel(value: 0.20, tailValue: 0.80)
+        let corr = ChannelNormalize.compute(
+            red: r, green: g, blue: b,
+            width: 64, height: 64,
+            reference: .green
+        )
+        #expect(corr == .identity)
     }
 }

@@ -5,7 +5,7 @@ Five minutes from install to first stacked image.
 ## Install
 
 ```bash
-git clone https://github.com/joergsflow/astrosharper.git
+git clone https://github.com/joergs-git/AstroSharper.git
 cd astrosharper
 xcodegen generate
 open AstroSharper.xcodeproj
@@ -25,7 +25,7 @@ Press ⌘R in Xcode to build & run. (Mac App Store release coming soon — this 
 
 3. **Mark for batch** — checkbox column or `Space`. Marks override selection for batch jobs (use marks when you want to lock a working set without losing the selection).
 
-4. **Pick a preset** — toolbar dropdown. Built-in presets exist for Sun · Granulation, Sun · Prominences, Moon · Detail, Jupiter · Belts, Saturn · Rings, Mars · Surface, and a generic "Other". AstroSharper auto-detects the target from the filename when possible.
+4. **Pick a preset** — toolbar dropdown or a target chip. The 10 built-ins are: Sun — Granulation / Full Disk / Hα Prominence, Moon — High Detail / Wide Field, Jupiter — Standard / Belt Detail, Saturn — Standard / Ring Emphasis, Mars — Standard. AstroSharper auto-detects the target from the filename when possible; see [Presets](Presets.md) for what each one does and why. Explicitly picking a preset turns on the sections it needs; filename auto-detect leaves your toggles as they are.
 
 5. **Apply ALL Stuff** — `⇧⌘A`. The button picks the right pipeline:
    - SER selected → Lucky Stack
