@@ -30,3 +30,8 @@ Package.resolved
 
 # Supabase CLI cache (auto-created by `supabase` invocations)
 supabase/.temp/
+
+# Secrets — App Store Connect API keys must never be committed.
+*.p8
+private_keys/
+.appstoreconnect/

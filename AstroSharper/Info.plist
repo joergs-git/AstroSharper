@@ -16,6 +16,10 @@
     <string>$(PRODUCT_NAME)</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- Required for Mac App Store submission. Astrophotography image
+         processing → Photography category (matches AstroBlinkV2). -->
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.photography</string>
     <key>CFBundleShortVersionString</key>
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
