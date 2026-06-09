@@ -26,6 +26,15 @@
     <string>Copyright © 2026 joergsflow. All rights reserved.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!--
+      Export compliance. AstroSharper uses only HTTPS (URLSession) and
+      Apple's own crypto for that transport — no proprietary or custom
+      encryption. That qualifies for the standard exemption, so this is
+      declared false and the App Store no longer prompts for an annual
+      self-classification report on every upload.
+    -->
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
