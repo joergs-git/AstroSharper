@@ -213,6 +213,18 @@ struct AstroSharperApp: App {
     /// timeout in UpdateChecker so a flaky network can't delay
     /// anything; failures are silent (NSLog only).
     private func runUpdateCheck() {
+        #if APP_STORE
+        // Mac App Store build: the in-app update checker surfaces a
+        // GitHub DMG download, which counts as steering users to an
+        // off-platform distribution channel — App Review Guideline
+        // 2.4.5 / 3.2.2 forbid this for App Store apps. The whole
+        // check is compiled out so `pendingUpdate` stays nil and the
+        // update alert (with its "Direct download" button) can never
+        // fire. App Store users receive updates through the App
+        // Store's own mechanism. The Developer ID / GitHub build does
+        // NOT define APP_STORE, so it keeps the updater unchanged.
+        return
+        #else
         Task {
             let result = await UpdateChecker.checkForUpdate()
             await MainActor.run {
@@ -228,6 +240,7 @@ struct AstroSharperApp: App {
                 }
             }
         }
+        #endif
     }
 
     private var updateAlertTitle: String {

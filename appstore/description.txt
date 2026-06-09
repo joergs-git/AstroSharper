@@ -1,0 +1,38 @@
+AstroSharper turns long planetary, solar and lunar capture sessions into crisp final images — natively on your Mac. Built from the ground up in Swift and Metal for Apple Silicon, it runs every step on the GPU: quality grading, alignment, lucky stacking, wavelet sharpening and deconvolution. No Python wrappers, no Wine, no Boot Camp.
+
+ONE-CLICK STACKING
+Drop a folder of SER captures, switch on the AutoNuke master toggle and press Run Lucky Stack. The engine decides everything per capture — alignment-point geometry, PSF sigma, keep-percentage and whether to use multi-point local refinement — so there is nothing to guess at. Walk away and come back to a stacked, aligned, deconvolved master file.
+
+Already have stacked TIFF, PNG or JPEG images? Skip stacking entirely and use the post-processing sharpening and tone pipeline on its own — same UI, same Apple-Silicon-native speed.
+
+ALIGNMENT & STACKING
+- Two stacking modes: Lightspeed (single best-frame reference, global alignment) and Scientific (top-percent reference build with multi-point local refinement).
+- Disc-centroid and reference-ROI stabilization that lock onto the solar or lunar limb, a sunspot or a crater — robust against thin cloud and seeing wobble.
+- Per-channel stacking for one-shot-colour cameras, catching per-frame atmospheric chromatic dispersion the standard path cannot see.
+- Drizzle 1.5x / 2x / 3x reconstruction with anti-aliasing pre-filter.
+- Opt-in drift correction for an object that slowly wandered across a long capture.
+
+SHARPENING & DECONVOLUTION
+- Auto-PSF measures the point-spread function straight from the planetary limb — no manual sigma, no tile grid.
+- Wiener and Lucy-Richardson deconvolution, a-trous wavelet sharpening and unsharp masking, all GPU-accelerated.
+- A 4K solar frame goes through unsharp mask in under 10 ms on an Apple M2.
+- Tone curve, brightness/contrast and hue/saturation editing in perceptual colour space.
+
+QUALITY INTELLIGENCE
+- Per-frame sharpness HUD with a live variance-of-Laplacian readout, dimensions, bit depth and capture timestamp.
+- One-click video-quality analysis that samples your capture and recommends a keep-percentage.
+- On-disk quality cache, so re-opening a capture you already scanned is instant.
+- Sortable sharpness column to find the sharpest frame in a folder of intermediates.
+
+FOLDER WATCH & AUTO-STACK
+Point AstroSharper at your capture folder and walk away. Each new SER is stacked the moment its capture finishes writing — leave it running overnight and wake up to a folder of finished masters. Size-stability gating means a half-written file is never read too early, and the existing backlog is left untouched.
+
+FORMATS
+- Input: SER, AVFoundation-supported video, and TIFF / PNG / JPEG for post-processing.
+- Output: 16-bit TIFF, PNG, JPEG, plus animated and video exports.
+- Quick Look thumbnails and previews for SER files, right in the Finder.
+
+BUILT FOR APPLE SILICON
+AstroSharper is a true native Mac app — fast, quiet and fully sandboxed. Made for astrophotographers who always wished their Windows-only stacking workflow had a proper macOS home.
+
+Feedback is always welcome.

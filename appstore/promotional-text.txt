@@ -1,0 +1,1 @@
+Native macOS lucky imaging for Sun, Moon and planets. Drop a SER capture, press Run, and AutoNuke aligns, stacks and deconvolves it — no parameters to guess.

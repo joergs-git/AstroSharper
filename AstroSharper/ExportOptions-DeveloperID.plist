@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Developer ID export options for the notarized GitHub release (the
+  existing distribution channel — unchanged). Used by:
+    xcodebuild -exportArchive -exportOptionsPlist \
+      AstroSharper/ExportOptions-DeveloperID.plist ...
+  Produces a Developer-ID-signed .app for ditto-zip → notarytool →
+  stapler → gh release. The APP_STORE compile flag is NOT passed for
+  this build, so the in-app update checker stays active.
+-->
+<plist version="1.0">
+<dict>
+	<key>method</key>
+	<string>developer-id</string>
+	<key>teamID</key>
+	<string>FDSVBU33S8</string>
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<key>signingCertificate</key>
+	<string>Developer ID Application</string>
+</dict>
+</plist>

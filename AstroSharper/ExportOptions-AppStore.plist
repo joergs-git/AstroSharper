@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Mac App Store export options. Used by:
+    xcodebuild -exportArchive -exportOptionsPlist \
+      AstroSharper/ExportOptions-AppStore.plist ...
+  Uploads the signed .pkg straight to App Store Connect. Mirrors the
+  AstroBlinkV2 setup: Apple Distribution cert, automatic signing,
+  Xcode manages the Mac App Store provisioning profiles for the app
+  and the three embedded QuickLook extensions on the fly via
+  -allowProvisioningUpdates.
+-->
+<plist version="1.0">
+<dict>
+	<key>method</key>
+	<string>app-store-connect</string>
+	<key>destination</key>
+	<string>upload</string>
+	<key>teamID</key>
+	<string>FDSVBU33S8</string>
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<key>signingCertificate</key>
+	<string>Apple Distribution</string>
+	<!--
+	  We bump CURRENT_PROJECT_VERSION / MARKETING_VERSION ourselves in
+	  project.yml as part of the release procedure, so Xcode must not
+	  rewrite them during export.
+	-->
+	<key>manageAppVersionAndBuildNumber</key>
+	<false/>
+</dict>
+</plist>
