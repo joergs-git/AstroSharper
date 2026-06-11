@@ -27,8 +27,22 @@ enum PreviewZoomCommand {
     case oneToEight    // 1:8 — image at 12.5%
 }
 
+/// Quits the app when its last window is closed. AstroSharper is a
+/// single-main-window utility, so without this the app can linger running
+/// with no window and no menu item to reopen it — which App Review flagged
+/// under Guideline 4. Apple explicitly endorses quit-on-close for
+/// single-window apps. Auxiliary tool windows (Howto, Community, SER
+/// Export, Export Preview) keep the app alive while any of them is open;
+/// the app only terminates once every window is gone.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
+}
+
 @main
 struct AstroSharperApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var appModel = AppModel()
     @StateObject private var launchTracker = LaunchTracker.shared
     @State private var showingAbout = false
@@ -180,10 +194,19 @@ struct AstroSharperApp: App {
                 }
                 .keyboardShortcut("c", modifiers: [.command, .shift])
                 Divider()
+                // "Check for updates…" drives the GitHub manifest check,
+                // which is itself compiled out in the App Store build — so
+                // the menu item would be a dead no-op there. Hide it too.
+                #if !APP_STORE
                 Button("Check for updates…") { runUpdateCheck() }
+                #endif
                 Button("AstroSharper on GitHub") { NSWorkspace.shared.open(AppLinks.github) }
                 Button("Example images on AstroBin") { NSWorkspace.shared.open(AppLinks.astrobinProfile) }
+                // Donation entry point — removed from the App Store build
+                // (App Review Guideline 3.1.1, donations must use IAP).
+                #if !APP_STORE
                 Button("Buy me a coffee ☕️")    { CoffeeSupportDialog.presentNow() }
+                #endif
             }
         }
     }

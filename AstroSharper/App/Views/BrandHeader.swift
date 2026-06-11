@@ -26,7 +26,10 @@ struct BrandHeader: View {
                     }
                     // Inline coffee-link directly under the title + version
                     // so it sits in the user's eye-line every session — not
-                    // hidden behind a menu / About sheet.
+                    // hidden behind a menu / About sheet. Compiled out of the
+                    // Mac App Store build (App Review Guideline 3.1.1 —
+                    // donations must use In-App Purchase there).
+                    #if !APP_STORE
                     Button {
                         NSWorkspace.shared.open(AppLinks.buyMeACoffee)
                     } label: {
@@ -40,6 +43,7 @@ struct BrandHeader: View {
                     }
                     .buttonStyle(.plain)
                     .help("Opens buymeacoffee.com/joergsflow in your browser.")
+                    #endif
                 }
             }
             .frame(width: 260, height: 44, alignment: .leading)

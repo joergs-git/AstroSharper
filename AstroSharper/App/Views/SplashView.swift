@@ -112,6 +112,7 @@ struct SplashView: View {
             }
             .buttonStyle(.link)
 
+            #if !APP_STORE
             Button {
                 NSWorkspace.shared.open(AppLinks.buyMeACoffee)
             } label: {
@@ -120,6 +121,7 @@ struct SplashView: View {
             }
             .buttonStyle(.link)
             .help("Opens buymeacoffee.com/joergsflow in your browser.")
+            #endif
 
             Spacer()
         }

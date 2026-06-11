@@ -28,7 +28,9 @@ struct AboutView: View {
             VStack(spacing: 8) {
                 LinkButton(label: "GitHub Repo", systemImage: "chevron.left.forwardslash.chevron.right", url: AppLinks.github)
                 LinkButton(label: "Rate on App Store", systemImage: "star.fill", url: AppLinks.appStoreReview)
+                #if !APP_STORE
                 LinkButton(label: "Buy me a coffee ☕️", systemImage: "cup.and.saucer.fill", url: AppLinks.buyMeACoffee)
+                #endif
             }
 
             Divider()

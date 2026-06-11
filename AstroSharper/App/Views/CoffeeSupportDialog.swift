@@ -68,6 +68,13 @@ enum CoffeeSupportDialog {
 
     @MainActor
     private static func present() {
+        #if APP_STORE
+        // No donation mechanism in the Mac App Store build: developer
+        // donations must go through In-App Purchase (App Review Guideline
+        // 3.1.1), so the buymeacoffee prompt is compiled out entirely.
+        // The Developer-ID / GitHub build (no APP_STORE flag) keeps it.
+        return
+        #else
         // Hold a strong reference to the window via the OpenWindows
         // namespace — released only when the user closes it. Without
         // this the window deallocs as soon as the static returns.
@@ -103,6 +110,7 @@ enum CoffeeSupportDialog {
         NSApp.activate(ignoringOtherApps: true)
 
         OpenWindows.coffee = window
+        #endif
     }
 
     // MARK: - State helpers

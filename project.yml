@@ -60,7 +60,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.joergsflow.AstroSharper
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: AstroSharper/Info.plist
-        CURRENT_PROJECT_VERSION: 3
+        CURRENT_PROJECT_VERSION: 4
         MARKETING_VERSION: "0.5.0"
         PRODUCT_NAME: AstroSharper
         PRODUCT_MODULE_NAME: AstroSharper
@@ -104,7 +104,7 @@ targets:
         PRODUCT_MODULE_NAME: SerQuickLookThumbnail
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: SerQuickLook/Info-Thumbnail.plist
-        CURRENT_PROJECT_VERSION: 3
+        CURRENT_PROJECT_VERSION: 4
         MARKETING_VERSION: "0.5.0"
         ENABLE_APP_SANDBOX: YES
         ENABLE_HARDENED_RUNTIME: YES
@@ -130,7 +130,7 @@ targets:
         PRODUCT_MODULE_NAME: SerQuickLookPreview
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: SerQuickLook/Info-Preview.plist
-        CURRENT_PROJECT_VERSION: 3
+        CURRENT_PROJECT_VERSION: 4
         MARKETING_VERSION: "0.5.0"
         ENABLE_APP_SANDBOX: YES
         ENABLE_HARDENED_RUNTIME: YES
@@ -154,7 +154,7 @@ targets:
         PRODUCT_MODULE_NAME: AviQuickLookThumbnail
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: AviQuickLook/Info-Thumbnail.plist
-        CURRENT_PROJECT_VERSION: 3
+        CURRENT_PROJECT_VERSION: 4
         MARKETING_VERSION: "0.5.0"
         ENABLE_APP_SANDBOX: YES
         ENABLE_HARDENED_RUNTIME: YES
