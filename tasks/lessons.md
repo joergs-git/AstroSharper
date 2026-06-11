@@ -2,6 +2,15 @@
 
 Patterns and gotchas captured from this project. Read at session start; append after every correction.
 
+## [2026-06-11] — App Store review: no external donation link in the MAS build (ever), and never strip "New Window" without a reopen path
+- **Mistake:** First Mac App Store submission (0.5.0/3) was rejected on two counts. (1) Guideline 3.1.1 — the "Buy me a coffee" buymeacoffee.com links count as an external payment for a digital service; Apple requires In-App Purchase. (2) Guideline 4 — `CommandGroup(replacing: .newItem)` removed the default File ▸ New Window, so closing the single main window left no menu item to reopen it.
+- **Root cause:** Copied AstroBlink's pattern, which ships the coffee popup *ungated* and slipped past review — a review slip is NOT a compliant pattern to rely on. And `replacing:` silently deletes the system command it replaces.
+- **Rules:**
+  1. In the App Store build, an external donation/tip link is non-compliant **regardless of trigger timing** (immediate, after-N-launches, hidden in a menu — all rejected). Compile it out with `#if !APP_STORE`. The only compliant way to receive tips via the App Store is an **IAP tip jar** (StoreKit consumables). A rating prompt (requestReview) IS allowed.
+  2. Never `CommandGroup(replacing: .newItem)` on a single-window app without giving the window a reopen path. Either keep New Window, add a Window-menu reopen item, or set `applicationShouldTerminateAfterLastWindowClosed = true` (Apple's endorsed single-window behaviour — what we did).
+  3. A prior app "getting away with it" (AstroBlink) is not precedent once your own submission has the issue on record — the reviewer's notes persist across resubmissions.
+- **Applies to:** `CoffeeSupportDialog` + every coffee CTA (BrandHeader/SplashView/AboutView/menu) gated by `#if !APP_STORE`; `AppDelegate.applicationShouldTerminateAfterLastWindowClosed`; planned v0.5.1 IAP tip jar.
+
 ## [2026-05-22] — Reproduce the actual file before claiming an alignment fix; a low-contrast capture is data-limited
 - **Mistake / process win:** Shipped two "drift ghost" fixes (chronological outlier reject, then robust line fit) WITHOUT reproducing the user's file — both were no-ops because the real shift distribution was scattered (AutoAP logged `σ_shift=17.96 px`), not a clean line with outliers. Only after getting the file and stacking it headless did the truth surface: `median=0.258, white=0.463` → the planet is ~1.7× brighter than a bright sky, disc detection fails (`no-disc`). Disc-centroid alignment (the proper tool) applied real ~23 px drift shifts but the output disc spread (19.5) and the stretched image were INDISTINGUISHABLE from baseline — the capture is data-limited, no aligner rescues it.
 - **Rules:**
