@@ -208,7 +208,10 @@ struct AstroSharperApp: App {
                 Button("Buy me a coffee ☕️")    { CoffeeSupportDialog.presentNow() }
                 #endif
                 // App Store build: the compliant StoreKit tip jar instead.
-                #if APP_STORE
+                // Also reachable in DEBUG so the jar can be tested in Xcode
+                // with the bundled .storekit configuration (for the IAP
+                // review screenshot) without an App Store build.
+                #if APP_STORE || DEBUG
                 Button("Support AstroSharper ☕️") { TipJarPresenter.present() }
                 #endif
             }

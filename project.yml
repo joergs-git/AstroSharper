@@ -14,6 +14,10 @@ schemes:
         AstroSharper: all
     run:
       config: Debug
+      # Local StoreKit testing — purchases are simulated against this file,
+      # so the tip jar shows real-looking tiers/prices for the IAP review
+      # screenshot without needing the live App Store products.
+      storeKitConfiguration: AstroSharper/AstroSharper.storekit
   AstroSharperCLI:
     build:
       targets:
@@ -63,8 +67,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.joergsflow.AstroSharper
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: AstroSharper/Info.plist
-        CURRENT_PROJECT_VERSION: 4
-        MARKETING_VERSION: "0.5.0"
+        CURRENT_PROJECT_VERSION: 5
+        MARKETING_VERSION: "0.5.1"
         PRODUCT_NAME: AstroSharper
         PRODUCT_MODULE_NAME: AstroSharper
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -107,8 +111,8 @@ targets:
         PRODUCT_MODULE_NAME: SerQuickLookThumbnail
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: SerQuickLook/Info-Thumbnail.plist
-        CURRENT_PROJECT_VERSION: 4
-        MARKETING_VERSION: "0.5.0"
+        CURRENT_PROJECT_VERSION: 5
+        MARKETING_VERSION: "0.5.1"
         ENABLE_APP_SANDBOX: YES
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: SerQuickLook/SerQuickLook.entitlements
@@ -133,8 +137,8 @@ targets:
         PRODUCT_MODULE_NAME: SerQuickLookPreview
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: SerQuickLook/Info-Preview.plist
-        CURRENT_PROJECT_VERSION: 4
-        MARKETING_VERSION: "0.5.0"
+        CURRENT_PROJECT_VERSION: 5
+        MARKETING_VERSION: "0.5.1"
         ENABLE_APP_SANDBOX: YES
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: SerQuickLook/SerQuickLook.entitlements
@@ -157,8 +161,8 @@ targets:
         PRODUCT_MODULE_NAME: AviQuickLookThumbnail
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: AviQuickLook/Info-Thumbnail.plist
-        CURRENT_PROJECT_VERSION: 4
-        MARKETING_VERSION: "0.5.0"
+        CURRENT_PROJECT_VERSION: 5
+        MARKETING_VERSION: "0.5.1"
         ENABLE_APP_SANDBOX: YES
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: AviQuickLook/AviQuickLook.entitlements
