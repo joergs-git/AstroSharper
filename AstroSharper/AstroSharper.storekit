@@ -8,7 +8,7 @@
       "internalID" : "TIP000001",
       "localizations" : [
         {
-          "description" : "A small thank-you for AstroSharper.",
+          "description" : "I like coffee. :-) Helps me staying awake developing.",
           "displayName" : "Small Coffee",
           "locale" : "en_US"
         }
@@ -23,7 +23,7 @@
       "internalID" : "TIP000002",
       "localizations" : [
         {
-          "description" : "A generous thank-you for AstroSharper.",
+          "description" : "I like more coffee. 😃 Help's me keeping things going.",
           "displayName" : "Medium Coffee",
           "locale" : "en_US"
         }
@@ -38,7 +38,7 @@
       "internalID" : "TIP000003",
       "localizations" : [
         {
-          "description" : "A big thank-you that keeps features shipping.",
+          "description" : "I am a coffee addict :-) Like developing on steroids.",
           "displayName" : "Big Coffee",
           "locale" : "en_US"
         }
