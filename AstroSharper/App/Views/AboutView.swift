@@ -35,6 +35,10 @@ struct AboutView: View {
 
             Divider()
 
+            OtherAppsSection()
+
+            Divider()
+
             Text("© 2026 joergsflow · Built with Metal + SwiftUI")
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)

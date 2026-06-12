@@ -43,6 +43,42 @@ enum AppLinks {
     static let appStoreReview = URL(string: "macappstore://apps.apple.com/app/id6778564449?action=write-review")!
 }
 
+/// One app in the joergsflow astro toolkit, used by the cross-promotion
+/// section in the splash + About. Each app in the family links to its
+/// siblings so a user of one discovers the others. AstroSharper itself is
+/// omitted from `AppFamily.others` — an app never links to itself.
+struct SiblingApp: Identifiable {
+    let id = UUID()
+    let name: String
+    let platform: String
+    let tagline: String
+    let appStore: URL
+    let github: URL?
+}
+
+enum AppFamily {
+    /// Sibling apps to surface from inside AstroSharper. Region-agnostic
+    /// `apps.apple.com/app/id…` links localise to the visitor's storefront.
+    /// Linking to other App Store apps is allowed in every build (it is not
+    /// an external-payment link), so this is NOT gated by `#if APP_STORE`.
+    static let others: [SiblingApp] = [
+        SiblingApp(
+            name: "AstroBlink",
+            platform: "macOS",
+            tagline: "Blink, cull & stack your capture frames",
+            appStore: URL(string: "https://apps.apple.com/app/id6760241266")!,
+            github: URL(string: "https://github.com/joergs-git/AstroBlinkV2")!
+        ),
+        SiblingApp(
+            name: "AstroFileViewer",
+            platform: "iPhone & iPad",
+            tagline: "View FITS / SER / TIFF captures on iOS",
+            appStore: URL(string: "https://apps.apple.com/app/id6760240080")!,
+            github: URL(string: "https://github.com/joergs-git/AstroBlinkV2")!
+        ),
+    ]
+}
+
 /// User's choice in the coffee / rating prompt. Drives suppression
 /// state: "yes" suppresses for the longest, "no" for a moderate
 /// stretch, "later" not at all (re-fires next eligible launch).

@@ -25,6 +25,8 @@ struct SplashView: View {
             featureList
             Divider()
             footer
+            Divider()
+            OtherAppsSection()
             actionRow
             creditLine
         }
