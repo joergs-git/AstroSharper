@@ -31,6 +31,29 @@ struct AboutView: View {
                 #if !APP_STORE
                 LinkButton(label: "Buy me a coffee ☕️", systemImage: "cup.and.saucer.fill", url: AppLinks.buyMeACoffee)
                 #endif
+                // App Store build: open the compliant StoreKit tip jar.
+                #if APP_STORE
+                Button {
+                    onClose()
+                    TipJarPresenter.present()
+                } label: {
+                    HStack {
+                        Image(systemName: "cup.and.saucer.fill")
+                            .frame(width: 18)
+                        Text("Support AstroSharper ☕️")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.secondary.opacity(0.10))
+                    )
+                }
+                .buttonStyle(.plain)
+                #endif
             }
 
             Divider()

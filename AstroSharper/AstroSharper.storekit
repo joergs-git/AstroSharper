@@ -1,0 +1,60 @@
+{
+  "identifier" : "ASTROSHARPER_TIPS",
+  "nonRenewingSubscriptions" : [],
+  "products" : [
+    {
+      "displayPrice" : "1.99",
+      "familyShareable" : false,
+      "internalID" : "TIP000001",
+      "localizations" : [
+        {
+          "description" : "A small thank-you for AstroSharper.",
+          "displayName" : "Small Coffee",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.joergsflow.AstroSharper.tip.small",
+      "referenceName" : "Small Coffee",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "4.99",
+      "familyShareable" : false,
+      "internalID" : "TIP000002",
+      "localizations" : [
+        {
+          "description" : "A generous thank-you for AstroSharper.",
+          "displayName" : "Medium Coffee",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.joergsflow.AstroSharper.tip.medium",
+      "referenceName" : "Medium Coffee",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "9.99",
+      "familyShareable" : false,
+      "internalID" : "TIP000003",
+      "localizations" : [
+        {
+          "description" : "A big thank-you that keeps features shipping.",
+          "displayName" : "Big Coffee",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.joergsflow.AstroSharper.tip.large",
+      "referenceName" : "Big Coffee",
+      "type" : "Consumable"
+    }
+  ],
+  "settings" : {
+    "_failTransactionsEnabled" : false,
+    "_storeKitErrors" : []
+  },
+  "subscriptionGroups" : [],
+  "version" : {
+    "major" : 3,
+    "minor" : 0
+  }
+}

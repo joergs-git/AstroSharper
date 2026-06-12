@@ -49,6 +49,9 @@ targets:
       - path: AstroSharper
         excludes:
           - "**/.DS_Store"
+          # Local StoreKit testing config — referenced by the scheme for
+          # Xcode's in-IDE purchase testing, never bundled into the app.
+          - "**/*.storekit"
     # Embed the three QuickLook app-extensions inside Contents/PlugIns/.
     # macOS auto-discovers them at first launch; no manual install step.
     dependencies:

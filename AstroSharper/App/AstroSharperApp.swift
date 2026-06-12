@@ -207,6 +207,10 @@ struct AstroSharperApp: App {
                 #if !APP_STORE
                 Button("Buy me a coffee ☕️")    { CoffeeSupportDialog.presentNow() }
                 #endif
+                // App Store build: the compliant StoreKit tip jar instead.
+                #if APP_STORE
+                Button("Support AstroSharper ☕️") { TipJarPresenter.present() }
+                #endif
             }
         }
     }
@@ -296,6 +300,9 @@ private struct RootContent: View {
     @ObservedObject var appModel: AppModel
     @ObservedObject var launchTracker: LaunchTracker
     let openWindow: OpenWindowAction
+    // Native App Store review request — used at the rating milestone in
+    // the App Store build (App Review prefers this over a web link).
+    @Environment(\.requestReview) private var requestReview
 
     @Binding var showingAbout: Bool
     @Binding var showingSplash: Bool
@@ -318,6 +325,17 @@ private struct RootContent: View {
                 showSplashIfNeeded()
                 checkRatingPromptOnLaunch()
                 runUpdateCheck()
+                #if APP_STORE
+                // App Store build: surface the StoreKit tip jar once the
+                // user has launched enough to know they like it. Snooze far
+                // out on dismissal; a successful tip silences it for good.
+                if TipJar.shouldAutoPrompt(currentLaunchCount: launchTracker.launchCount) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        TipJarPresenter.present()
+                        TipJar.snooze(byLaunches: 25)
+                    }
+                }
+                #endif
             }
             .onReceive(NotificationCenter.default.publisher(for: .openCommunityFeed)) { _ in
                 openWindow(id: "community-feed")
@@ -380,7 +398,11 @@ private struct RootContent: View {
     @ViewBuilder
     private var ratingPromptButtons: some View {
         Button("Rate on App Store") {
+            #if APP_STORE
+            requestReview()
+            #else
             NSWorkspace.shared.open(AppLinks.appStoreReview)
+            #endif
             launchTracker.recordRatingResponse(.yes)
         }
         Button("Not now") { launchTracker.recordRatingResponse(.no) }
