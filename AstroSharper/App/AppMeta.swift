@@ -37,7 +37,10 @@ enum AppLinks {
     /// imaging output. Surfaced in the splash + About so visitors
     /// land on real example images.
     static let astrobinProfile = URL(string: "https://app.astrobin.com/u/joergsflow")!
-    static let appStoreReview = URL(string: "macappstore://itunes.apple.com/app/idPLACEHOLDER?action=write-review")!
+    /// Mac App Store product page — live since 2026-06-11 (app id 6778564449).
+    static let appStorePage = URL(string: "https://apps.apple.com/app/id6778564449")!
+    /// Deep link straight to the "Write a Review" sheet on the Mac App Store.
+    static let appStoreReview = URL(string: "macappstore://apps.apple.com/app/id6778564449?action=write-review")!
 }
 
 /// User's choice in the coffee / rating prompt. Drives suppression

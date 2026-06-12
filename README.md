@@ -8,6 +8,9 @@ A native, GPU-accelerated lucky-imaging companion for solar, lunar and planetary
 > So, here it comes finally and you are welcome to give it a try.
 > Feedback welcome too.
 
+**📥 Now available — free — on the [Mac App Store](https://apps.apple.com/de/app/astrosharper/id6778564449?mt=12).**
+
+[![Mac App Store](https://img.shields.io/badge/Mac%20App%20Store-Download-0D96F6?logo=apple&logoColor=white)](https://apps.apple.com/de/app/astrosharper/id6778564449?mt=12)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-blue)](https://www.apple.com/macos/)
 [![Swift](https://img.shields.io/badge/Swift-5.9-orange)](https://swift.org)
 [![Metal](https://img.shields.io/badge/Metal-3-black)](https://developer.apple.com/metal/)
