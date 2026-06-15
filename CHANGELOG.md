@@ -5,6 +5,23 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-06-15
+
+### Added
+- **Coverage-map crop for jumpy / tightly-framed captures** — replaces the old
+  `2×max-shift` common-area crop (where a single jumpy frame shrank the whole
+  output) with a coverage-aware pipeline on the standard stacking path. Each output
+  pixel is normalised by how many frames actually covered it (correct exposure at
+  the drift border instead of a smeared clamp), then cropped by a coverage
+  threshold. On a tight 312×296 Jupiter this preserved ~44% more of the disc. New
+  Lucky Stack toggles **Reject jump frames** and **Coverage crop (keep field)**
+  with a "Field kept" slider; CLI `--no-reject-jumps`, `--no-coverage`,
+  `--coverage-threshold N`. Default ON; output is byte-identical on well-tracked
+  captures. AutoNuke forces both on.
+- **Jump-outlier rejection** — drops frames whose alignment shift is a statistical
+  (median + MAD) outlier before stacking, so a seeing jump / gust / tracking jerk
+  can't corrupt the stack. Steady drift preserved; capped at 15% of frames.
+
 ## [0.5.0] - 2026-06-01
 
 ### Added
