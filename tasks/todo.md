@@ -40,9 +40,14 @@ Plan (the "optimal optimum" the user asked for):
   commit, not bundled with this feature.
 - **Gates:** 336/336 unit tests pass; CLI + app both build; coverage behaviour verified by
   direct old-vs-new image diff (not via the stale baselines).
-- **Not done (optional follow-up):** GUI toggles for coverage threshold / disable + a
-  "keep full field" switch (defaults-on means GUI users already get the benefit).
-  NOT committed/pushed yet — awaiting user go (Apple-archive-on-push policy).
+- **GUI toggles SHIPPED:** "Reject jump frames" + "Coverage crop (keep field)" + "Field kept"
+  slider in the Lucky Stack manual block (AutoNuke forces them on).
+- **RELEASED v0.5.2 (build 6) 2026-06-15:** everything pushed to main; DMG notarized +
+  stapled; GitHub release v0.5.2; latest-release.json live; App Store Connect upload
+  accepted (delivery 21ae40fa…). Apple release flow now AUTOMATED — `scripts/release.sh`
+  + notarytool keychain profile "AstroSharper"; credentials in
+  memory/project_release_workflow.md. The 2026-06-15 blocker (missing ASC issuer on this
+  Mac) is permanently fixed: profile stored + issuer in ~/.appstoreconnect/issuer_id.txt.
 
 ## Suggested next-session focus
 
