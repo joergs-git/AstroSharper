@@ -115,6 +115,11 @@ enum Stack {
         var scopeBarlowMagnification: Double = 1.0
         // F.2 common-area auto-crop. Default ON for AS!4 parity.
         var cropToCommonArea = true
+        // Jumpy-recording fix (2026-06-14). Both default ON in the engine;
+        // these flags turn them off / tune the crop threshold for testing.
+        var rejectShiftOutliers = true
+        var coverageNormalize = true
+        var coverageCropThreshold: Double = 0.20
         // D.1 pre-stack calibration. Master frames provided as paths to
         // already-built TIFFs (typical PixInsight / ASTAP workflow output).
         var masterDarkURL: URL? = nil
@@ -476,6 +481,27 @@ enum Stack {
                 // caveat. Default crops to the fully-covered region.
                 cropToCommonArea = false
                 i += 1
+            case "--no-reject-jumps":
+                // Disable jump-outlier rejection (keep all kept frames even
+                // if some are alignment outliers). Default ON.
+                rejectShiftOutliers = false
+                i += 1
+            case "--no-coverage":
+                // Disable coverage-map normalisation; fall back to the old
+                // global-weight normalize + max-shift crop. Default ON.
+                coverageNormalize = false
+                i += 1
+            case "--coverage-threshold":
+                // Coverage-threshold crop fraction in [0, 0.95]. Keep pixels
+                // covered by ≥ N × the centre coverage. 0 = full union.
+                guard i + 1 < args.count, let v = Double(args[i + 1]),
+                      v.isFinite, v >= 0, v <= 0.95
+                else {
+                    cliStderr("stack: --coverage-threshold requires a number in [0, 0.95] (default 0.20, 0 = full union)")
+                    return 64
+                }
+                coverageCropThreshold = v
+                i += 2
             case "--adaptive-ap-reject":
                 // B.3: drop the bottom fraction of AP cells by mean LAPD
                 // score in the two-stage path. 0 = disabled, 0.20 default,
@@ -755,6 +781,9 @@ enum Stack {
             options.rffOuterFraction = rffOuterFraction
             options.adaptiveAPRejectFraction = adaptiveAPRejectFraction
             options.cropToCommonArea = cropToCommonArea
+            options.rejectShiftOutliers = rejectShiftOutliers
+            options.coverageNormalize = coverageNormalize
+            options.coverageCropThreshold = coverageCropThreshold
             options.masterDarkURL = masterDarkURL
             options.masterFlatURL = masterFlatURL
             options.useAutoKeepPercent = useAutoKeep && !keepWasExplicit

@@ -1728,6 +1728,10 @@ kernel void extract_luma_downsample(
 // updated separately. After all frames have been added, a final normalize
 // kernel divides by total weight.
 
+struct LuckyDivideParams {
+    float weightFloor;   // tiny epsilon to avoid /0 on never-written pixels
+};
+
 struct LuckyAccumParams {
     float weight;
     float2 shift;        // sub-pixel shift to apply during sample
@@ -1759,6 +1763,54 @@ kernel void lucky_normalize(
     if (gid.x >= accum.get_width() || gid.y >= accum.get_height()) return;
     float4 a = accum.read(gid);
     accum.write(float4(clamp(a.rgb * p.invTotalWeight, 0.0, 1.0), 1.0), gid);
+}
+
+// MARK: - Coverage-aware accumulate + self-normalize (jumpy-recording fix)
+//
+// `lucky_accumulate` samples with clamp_to_edge, so a shifted frame whose
+// sample falls OUTSIDE the real frame still contributes a smeared edge
+// value — every output pixel ends up "covered" by every frame, which is
+// why the old max-shift crop has to throw the drift border away.
+//
+// This variant instead contributes NOTHING where the back-projected
+// sample leaves [0,1] (the frame genuinely had no data there) and tracks
+// the per-pixel sum of contributing weights in the ALPHA channel. The
+// disc (always covered) ends at full weight; the drift border ends at a
+// fraction of it. `lucky_normalize_self` then divides RGB by that
+// per-pixel weight, so every covered pixel is correctly exposed
+// regardless of how many frames hit it — no clamp-smear, no forced crop.
+// The alpha (coverage) is read back on the CPU to pick a coverage-
+// threshold crop before this normalize overwrites it.
+kernel void lucky_accumulate_cov(
+    texture2d<float, access::sample>     frame  [[texture(0)]],
+    texture2d<float, access::read_write> accum  [[texture(1)]],
+    constant LuckyAccumParams&           p      [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= accum.get_width() || gid.y >= accum.get_height()) return;
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float2 uv = (float2(gid) + 0.5 - p.shift) / float2(accum.get_width(), accum.get_height());
+    // In-bounds = the back-projected sample lands inside the real frame.
+    float inB = all(uv >= 0.0) && all(uv <= 1.0) ? 1.0 : 0.0;
+    float4 v = frame.sample(s, uv);
+    float  w = p.weight * inB;
+    float4 a = accum.read(gid);
+    // rgb: weighted colour sum; a: per-pixel coverage weight sum.
+    accum.write(float4(a.rgb + v.rgb * w, a.a + w), gid);
+}
+
+// Per-pixel normalize for the coverage path: divide the colour sum by the
+// per-pixel coverage weight held in alpha. weightFloor guards the fully
+// uncovered corners (coverage 0) against divide-by-zero — they stay black.
+kernel void lucky_normalize_self(
+    texture2d<float, access::read_write> accum [[texture(0)]],
+    constant LuckyDivideParams& p [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= accum.get_width() || gid.y >= accum.get_height()) return;
+    float4 a = accum.read(gid);
+    float w = max(a.a, p.weightFloor);
+    accum.write(float4(clamp(a.rgb / w, 0.0, 1.0), 1.0), gid);
 }
 
 // MARK: - Lucky Region accumulator (AS!4-style per-tile frame selection)
@@ -2415,10 +2467,6 @@ kernel void lucky_accumulate_clipped(
     accum.write(accum.read(gid) + contribution, gid);
     wtTex.write(wtTex.read(gid) + weightAdd, gid);
 }
-
-struct LuckyDivideParams {
-    float weightFloor;   // tiny epsilon to avoid /0 on never-written pixels
-};
 
 kernel void lucky_normalize_per_pixel(
     texture2d<float, access::read_write> accum [[texture(0)]],

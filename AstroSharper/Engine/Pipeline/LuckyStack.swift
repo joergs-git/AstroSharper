@@ -210,6 +210,42 @@ struct LuckyStackOptions {
     /// reduced-coverage caveat.
     var cropToCommonArea: Bool = true
 
+    /// Jump-outlier rejection (2026-06-14). Before accumulation, drop
+    /// frames whose alignment shift is a statistical outlier (a seeing
+    /// "jump", a wind gust, a tracking jerk) using a median + MAD test.
+    /// This both keeps those corrupted frames OUT of the stack and stops
+    /// a single big jump from dictating the crop window. Steady drift
+    /// (shifts spread smoothly) is preserved — only random outliers are
+    /// cut. Capped at `shiftOutlierMaxDropFraction` so a genuinely jumpy
+    /// run (where "jump" is the norm) isn't decimated; the coverage map
+    /// handles whatever drift survives. Default ON.
+    var rejectShiftOutliers: Bool = true
+    /// MAD multiplier for the outlier test (|shift − median| > k·MAD).
+    /// 4.0 ≈ very conservative (only clear outliers).
+    var shiftOutlierMADFactor: Double = 4.0
+    /// Absolute per-axis floor (px): never reject a frame whose shift is
+    /// within this distance of the median, even if MAD is tiny. Protects
+    /// well-tracked tight captures from over-rejection on sub-pixel jitter.
+    var shiftOutlierFloorPx: Double = 1.5
+    /// Safety cap: never drop more than this fraction of kept frames.
+    var shiftOutlierMaxDropFraction: Double = 0.15
+
+    /// Coverage-map normalisation (2026-06-14) for the standard (single-AP,
+    /// non-region) accumulate path. Tracks per-pixel coverage weight and
+    /// normalises each output pixel by it, so the drift border is correctly
+    /// exposed instead of clamp-edge-smeared. Replaces the global-weight
+    /// normalize + max-shift crop with a per-pixel normalize + coverage-
+    /// threshold crop on this path. Other paths (region / multi-AP / two-
+    /// stage / drizzle / sigma) keep their existing handling. Default ON.
+    var coverageNormalize: Bool = true
+    /// Coverage-threshold crop: keep the bounding box of pixels whose
+    /// coverage ≥ this fraction of the maximum (centre) coverage. 0.20
+    /// keeps a generous field and trims only the thin, sparsely-covered
+    /// fringe. 0.0 keeps the full union; raise toward 1.0 for AS!4-style
+    /// fully-covered-only output. Only used on the coverage path with
+    /// `cropToCommonArea` ON.
+    var coverageCropThreshold: Double = 0.20
+
     /// Pre-stack calibration (Block D.1). Master dark / master flat
     /// frames applied per-pixel before the quality grade + accumulator,
     /// using `apply_calibration` Metal kernel. Both URLs are optional;
@@ -1202,6 +1238,14 @@ private final class LuckyRunner {
     lazy var welfordPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_welford_step")
     lazy var clippedAccumPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_accumulate_clipped")
     lazy var perPixelNormPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_normalize_per_pixel")
+    // Coverage-map path (jumpy-recording fix): coverage-aware accumulate
+    // (per-pixel weight into alpha, zero outside the real frame) + self
+    // normalize (rgb / alpha). See Shaders.metal for the rationale.
+    lazy var accumCovPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_accumulate_cov")
+    lazy var normalizeSelfPSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_normalize_self")
+    /// Set by `accumulateAligned` when it applied the coverage-threshold
+    /// crop itself, so the outer common-area crop site skips re-cropping.
+    private var coverageCropHandled = false
     // B.6 drizzle splat — only built when options.drizzleScale > 1.
     lazy var drizzlePSO: MTLComputePipelineState = Self.makePSO(library: library, device: device, fn: "lucky_drizzle_splat")
 
@@ -1615,7 +1659,7 @@ private final class LuckyRunner {
         // `keepCount` (absolute frame count) overrides `keepPercent` so the
         // user can request fixed-N stacks (e.g. "best 100 frames") for
         // direct comparison across SERs of different lengths.
-        let kept: [Int]
+        var kept: [Int]
         if let count = options.keepCount, count > 0 {
             kept = topNIndices(scores: scores, count: count)
         } else {
@@ -1653,6 +1697,30 @@ private final class LuckyRunner {
             let refTex = try await loadAndUnpack(frameIndex: referenceIndex, into: nil)
             referenceShifts = try await alignAgainstReference(referenceTex: refTex, indices: kept)
             referenceTex = refTex
+        }
+
+        // Jump-outlier rejection (2026-06-14). Drop kept frames whose
+        // alignment shift is a statistical outlier (random seeing jump /
+        // gust / tracking jerk), using a robust median + MAD test on each
+        // axis. These frames both corrupt the stack (wrong-position
+        // contribution → ghosting) and, left in, blow up the crop window.
+        // Steady drift is preserved: its shifts vary smoothly so they stay
+        // within k·MAD of the running median; only true outliers fall out.
+        // The drop is capped so a genuinely jumpy run isn't decimated — the
+        // coverage map handles whatever drift survives.
+        if options.rejectShiftOutliers, kept.count >= 20 {
+            let dropped = Self.shiftOutlierIndices(
+                kept: kept,
+                shifts: referenceShifts,
+                madFactor: options.shiftOutlierMADFactor,
+                floorPx: Float(options.shiftOutlierFloorPx),
+                maxDropFraction: options.shiftOutlierMaxDropFraction
+            )
+            if !dropped.isEmpty {
+                kept.removeAll { dropped.contains($0) }
+                NSLog("Jump-reject: dropped %d of %d kept frames (shift outliers)",
+                      dropped.count, dropped.count + kept.count)
+            }
         }
 
         // Drift validation (Block B.4) on the global per-frame shifts.
@@ -1757,7 +1825,10 @@ private final class LuckyRunner {
         // / partially-blank values to the saved TIF. Cropping by ⌈max⌉
         // px on each axis yields a fully-covered output. AS!4's
         // "buffering and analysis" phase does the equivalent.
-        if options.cropToCommonArea && !referenceShifts.isEmpty {
+        // The coverage path (accumulateAligned) already applied a coverage-
+        // threshold crop using per-pixel coverage — don't re-crop with the
+        // cruder max-shift rule.
+        if options.cropToCommonArea && !referenceShifts.isEmpty && !coverageCropHandled {
             return Self.cropToCommonArea(input: stacked, shifts: referenceShifts, device: device)
         }
         return stacked
@@ -1808,6 +1879,123 @@ private final class LuckyRunner {
         cmd.waitUntilCompleted()
         NSLog("Common-area crop: %dx%d → %dx%d (margin %d,%d px)",
               input.width, input.height, newW, newH, maxDx, maxDy)
+        return output
+    }
+
+    /// Robust per-axis outlier detection on the kept frames' alignment
+    /// shifts (median + MAD). Returns the frame indices to drop. A frame
+    /// is an outlier if its shift deviates from the median by more than
+    /// `madFactor · MAD` on EITHER axis, with an absolute floor so tight,
+    /// well-tracked captures (tiny MAD) don't lose frames to sub-pixel
+    /// jitter. The total drop is capped at `maxDropFraction` of the kept
+    /// set — if more than that flag as outliers the run is genuinely jumpy
+    /// (no clean majority), so we keep them all and let the coverage map
+    /// cope. Pure CPU, O(n log n); negligible next to the GPU stack.
+    static func shiftOutlierIndices(
+        kept: [Int],
+        shifts: [Int: SIMD2<Float>],
+        madFactor: Double,
+        floorPx: Float,
+        maxDropFraction: Double
+    ) -> Set<Int> {
+        guard kept.count >= 20 else { return [] }
+        let xs = kept.map { shifts[$0]?.x ?? 0 }
+        let ys = kept.map { shifts[$0]?.y ?? 0 }
+        func median(_ a: [Float]) -> Float {
+            let s = a.sorted()
+            let n = s.count
+            return n % 2 == 1 ? s[n / 2] : 0.5 * (s[n / 2 - 1] + s[n / 2])
+        }
+        let medX = median(xs), medY = median(ys)
+        // MAD scaled by 1.4826 → a consistent estimator of σ for normal data.
+        let madX = 1.4826 * median(xs.map { abs($0 - medX) })
+        let madY = 1.4826 * median(ys.map { abs($0 - medY) })
+        let thrX = max(Float(madFactor) * madX, floorPx)
+        let thrY = max(Float(madFactor) * madY, floorPx)
+        var drop = Set<Int>()
+        for idx in kept {
+            let s = shifts[idx] ?? .zero
+            if abs(s.x - medX) > thrX || abs(s.y - medY) > thrY { drop.insert(idx) }
+        }
+        // Safety cap — don't decimate a genuinely jumpy run.
+        if Double(drop.count) > maxDropFraction * Double(kept.count) { return [] }
+        return drop
+    }
+
+    /// Read the per-pixel coverage weight (alpha channel of the coverage
+    /// accumulator) back to the CPU and compute the bounding box of pixels
+    /// whose coverage ≥ `threshold · maxCoverage`. Returns nil when the
+    /// whole frame qualifies (no crop needed) or on readback failure.
+    /// `threshold` 0 keeps the full union; higher trims more fringe.
+    static func coverageCropRect(
+        accum: MTLTexture,
+        threshold: Double,
+        device: MTLDevice
+    ) -> MTLRegion? {
+        let w = accum.width, h = accum.height
+        // Blit private → shared so the CPU can read it.
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: accum.pixelFormat, width: w, height: h, mipmapped: false
+        )
+        desc.storageMode = .shared
+        desc.usage = [.shaderRead, .shaderWrite]
+        guard let shared = device.makeTexture(descriptor: desc),
+              let cmd = MetalDevice.shared.commandQueue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else { return nil }
+        blit.copy(from: accum, sourceSlice: 0, sourceLevel: 0,
+                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                  sourceSize: MTLSize(width: w, height: h, depth: 1),
+                  to: shared, destinationSlice: 0, destinationLevel: 0,
+                  destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blit.endEncoding(); cmd.commit(); cmd.waitUntilCompleted()
+
+        // rgba32Float → 16 bytes/px; alpha is component 3.
+        let bytesPerRow = w * 16
+        var px = [Float](repeating: 0, count: w * h * 4)
+        px.withUnsafeMutableBytes { buf in
+            shared.getBytes(buf.baseAddress!, bytesPerRow: bytesPerRow,
+                            from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                            size: MTLSize(width: w, height: h, depth: 1)),
+                            mipmapLevel: 0)
+        }
+        var maxCov: Float = 0
+        for i in 0..<(w * h) { maxCov = max(maxCov, px[i * 4 + 3]) }
+        guard maxCov > 0 else { return nil }
+        let cut = Float(threshold) * maxCov
+        var minX = w, minY = h, maxX = -1, maxY = -1
+        for y in 0..<h {
+            let row = y * w
+            for x in 0..<w where px[(row + x) * 4 + 3] >= cut {
+                if x < minX { minX = x }; if x > maxX { maxX = x }
+                if y < minY { minY = y }; if y > maxY { maxY = y }
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        // Full frame qualifies → no crop.
+        if minX == 0 && minY == 0 && maxX == w - 1 && maxY == h - 1 { return nil }
+        return MTLRegion(origin: MTLOrigin(x: minX, y: minY, z: 0),
+                         size: MTLSize(width: maxX - minX + 1, height: maxY - minY + 1, depth: 1))
+    }
+
+    /// Blit-crop `input` to `rect`. Pixel format preserved; private storage.
+    static func cropToRect(input: MTLTexture, rect: MTLRegion, device: MTLDevice) -> MTLTexture {
+        let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: input.pixelFormat,
+            width: rect.size.width, height: rect.size.height, mipmapped: false
+        )
+        outDesc.storageMode = .private
+        outDesc.usage = [.shaderRead, .shaderWrite]
+        guard let output = device.makeTexture(descriptor: outDesc),
+              let cmd = MetalDevice.shared.commandQueue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else { return input }
+        blit.copy(from: input, sourceSlice: 0, sourceLevel: 0,
+                  sourceOrigin: rect.origin, sourceSize: rect.size,
+                  to: output, destinationSlice: 0, destinationLevel: 0,
+                  destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blit.endEncoding(); cmd.commit(); cmd.waitUntilCompleted()
+        NSLog("Coverage crop: %dx%d → %dx%d (origin %d,%d)",
+              input.width, input.height, rect.size.width, rect.size.height,
+              rect.origin.x, rect.origin.y)
         return output
     }
 
@@ -2223,6 +2411,10 @@ private final class LuckyRunner {
         let useMultiAP = options.useMultiAP && options.mode == .scientific && referenceTex != nil
         let useRegion = options.mode == .region
         let gridSize = options.multiAPGrid
+        // Coverage map applies only to the plain single-AP path (the
+        // region / multi-AP paths have their own per-pixel weighting).
+        let useCoverage = options.coverageNormalize && !useRegion && !useMultiAP
+        coverageCropHandled = false
 
         // Lucky Region: precompute per-tile frame selections once, upload
         // to GPU buffers reused across all kept-frame dispatches. The
@@ -2414,12 +2606,16 @@ private final class LuckyRunner {
                     enc.endEncoding()
                 }
             } else if let enc = cmd.makeComputeCommandEncoder() {
-                enc.setComputePipelineState(accumPSO)
+                // Coverage path uses the coverage-aware kernel (per-pixel
+                // weight into alpha, zero outside the real frame); plain
+                // path keeps the original global-weight accumulate.
+                let pso = useCoverage ? accumCovPSO : accumPSO
+                enc.setComputePipelineState(pso)
                 enc.setTexture(frameTex, index: 0)
                 enc.setTexture(accum, index: 1)
                 var p = LuckyAccumParams(weight: weight, shift: shift)
                 enc.setBytes(&p, length: MemoryLayout<LuckyAccumParams>.stride, index: 0)
-                let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: accumPSO)
+                let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: pso)
                 enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
                 enc.endEncoding()
             }
@@ -2438,6 +2634,36 @@ private final class LuckyRunner {
         // left the semaphore unbalanced and crashed libdispatch when the
         // runner deallocated it.
         try Task.checkCancellation()
+
+        // Coverage path: the per-pixel coverage weight now lives in the
+        // accumulator's alpha. Read it back to pick the coverage-threshold
+        // crop (BEFORE self-normalize overwrites alpha), then divide each
+        // pixel by its own coverage so the drift border is correctly
+        // exposed instead of clamp-smeared, then crop.
+        if useCoverage {
+            var cropRect: MTLRegion? = nil
+            if options.cropToCommonArea {
+                cropRect = Self.coverageCropRect(
+                    accum: accum, threshold: options.coverageCropThreshold, device: device
+                )
+            }
+            if let cmd = queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(normalizeSelfPSO)
+                enc.setTexture(accum, index: 0)
+                var p = LuckyDivideParamsCPU(weightFloor: 1e-6)
+                enc.setBytes(&p, length: MemoryLayout<LuckyDivideParamsCPU>.stride, index: 0)
+                let (tgC, tgS) = dispatchThreadgroups(for: accum, pso: normalizeSelfPSO)
+                enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
+                enc.endEncoding()
+                cmd.commit()
+                cmd.waitUntilCompleted()
+            }
+            if let rect = cropRect {
+                coverageCropHandled = true
+                return Self.cropToRect(input: accum, rect: rect, device: device)
+            }
+            return accum
+        }
 
         // Region mode produces a properly-averaged output via per-pixel
         // weights summing to 1.0 (bilinear tile blend × 1/K-per-tile

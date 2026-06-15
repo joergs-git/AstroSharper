@@ -2,6 +2,48 @@
 
 A running record of where we are, what's done, and what's next. Update at the end of every session.
 
+## ACTIVE [2026-06-14] — Coverage-map crop for jumpy recordings (branch feature/coverage-map-crop)
+
+Problem: `cropToCommonArea` crops by `2 × max(|shift|)` symmetrically → ONE jump frame
+shrinks the whole output (user hit this on a tight 312×296 Jupiter ROI). AutoStakkert
+keeps the planet centred and the field via coverage, not strict intersection.
+
+Plan (the "optimal optimum" the user asked for):
+- [x] Option 3 — jump-outlier rejection: MAD-based drop of statistical shift outliers
+      from `kept` before accumulate (keeps steady drift, removes random jumps). Default on,
+      capped at ≤15% dropped, absolute floor (1.5px) so tight captures lose nothing.
+      `LuckyStack.shiftOutlierIndices`.
+- [x] Option 2 — coverage map (standard accumulate path only): new `lucky_accumulate_cov`
+      (zero contribution outside [0,1] uv, per-pixel weight into alpha) + `lucky_normalize_self`
+      (rgb/alpha). Border pixels normalised correctly instead of clamp-edge-smeared.
+- [x] New crop = coverage-threshold bbox (`coverageCropRect` + `cropToRect`, keep pixels
+      covered ≥ 0.20·maxCoverage) replacing the max-shift crop for the coverage path. Other
+      paths (region / multi-AP / two-stage / drizzle / sigma) untouched (gated by `useCoverage`).
+- [x] CLI flags: `--no-reject-jumps`, `--no-coverage`, `--coverage-threshold N`.
+- [x] Verified — see Results.
+
+## Results [2026-06-14] — Coverage-map crop SHIPPED on branch feature/coverage-map-crop
+- **Jumpy 03-01 (312×296 tight ROI):** 3 jump frames rejected; crop 312→312×294 (vs old
+  272×254 from a single 20px-shift frame). Final output 248×230 vs 208×190 — **~44% more
+  Jupiter preserved**, disc no longer cut to a tight square. Recovered border is clean
+  (correctly normalised sky, no clamp-smear). Perf +0.15s (1.01 vs 0.86s).
+- **Well-tracked 02-06:** byte-for-byte identical region (max 1 LSB rounding, mean diff
+  3.5e-6) — coverage crop is a no-op when drift is small (falls through to common-area crop).
+- **Isolated verification (same binary, default vs `--no-coverage --no-reject-jumps`):**
+  mars / saturn / well-tracked fixtures = byte-identical (≤1 LSB, <0.2% metric); only
+  jumpy/drift fixtures change. So the feature is surgical.
+- **Regression baselines NOTE:** the committed baselines are independently STALE (predate
+  several prior pipeline changes — e.g. mars sharpness off ~35% vs current code, unrelated
+  to this feature). Regenerating them would sweep that unrelated drift into this diff, so I
+  REVERTED the baseline regen and kept the working tree to code+docs only. Baselines need a
+  separate housekeeping regen (`scripts/regression.sh --update-baseline`) — do it as its own
+  commit, not bundled with this feature.
+- **Gates:** 336/336 unit tests pass; CLI + app both build; coverage behaviour verified by
+  direct old-vs-new image diff (not via the stale baselines).
+- **Not done (optional follow-up):** GUI toggles for coverage threshold / disable + a
+  "keep full field" switch (defaults-on means GUI users already get the benefit).
+  NOT committed/pushed yet — awaiting user go (Apple-archive-on-push policy).
+
 ## Suggested next-session focus
 
 **End-of-2026-05-21:** LSW 6.21.1 parity wave shipped on `feature/v1-foundation` — five features matching LuckyStackWorker's User Manual against AstroSharper's gap matrix, all gated by the "Quality + Speed + minimal user-action" filter:
