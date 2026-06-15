@@ -472,6 +472,45 @@ struct LuckyStackSection: View {
                 }
                 .help("Enable when a long capture's planet slowly drifted across the frame and the stack shows a ghost / double contour. Fits a robust drift trajectory through the per-frame shifts and snaps outlier frames (where alignment failed) back onto it. Default OFF — on well-tracked captures it can perturb the result, so only turn it on for a capture you can see ghosting.")
 
+                // Jumpy-recording handling (2026-06-14): reject jump
+                // outliers + coverage-map crop. Grouped in one VStack so
+                // it stays a single sibling (ViewBuilder budget).
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Reject jump frames", isOn: $app.luckyStack.rejectShiftOutliers)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .help("Drop frames whose alignment shift is a statistical outlier (a seeing jump, a gust, a tracking jerk) before stacking, so one bad jump can't corrupt the stack or shrink the crop. Steady drift is kept; capped at 15% of frames. Default ON — no effect on well-tracked captures.")
+
+                    Toggle("Coverage crop (keep field)", isOn: $app.luckyStack.coverageCrop)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .help("Normalise each output pixel by how many frames actually covered it, then crop by a coverage threshold instead of the crude 2×max-shift rule. Keeps far more field on jumpy / tightly-framed captures (the planet isn't cut to a square), with a correctly-exposed border instead of a smeared one. Default ON; identical output on well-tracked captures. Off = old max-shift crop.")
+
+                    if app.luckyStack.coverageCrop {
+                        HStack {
+                            Text("Field kept").font(.caption)
+                            Spacer()
+                            Text(app.luckyStack.coverageCropThreshold <= 0.001
+                                 ? "full"
+                                 : String(format: "%.0f%% cov", app.luckyStack.coverageCropThreshold * 100))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        // Slider runs high→low so dragging RIGHT keeps MORE
+                        // field (0 = full union). Stored value is the
+                        // coverage threshold the engine crops at.
+                        Slider(
+                            value: Binding(
+                                get: { 0.5 - app.luckyStack.coverageCropThreshold },
+                                set: { app.luckyStack.coverageCropThreshold = max(0, min(0.5, 0.5 - $0)) }
+                            ),
+                            in: 0...0.5, step: 0.05
+                        )
+                        .controlSize(.small)
+                        .help("How much of the partially-covered drift border to keep. Right = keep the full field (some edge frames noisier); left = trim to the fully-covered region. 20% coverage (default) keeps a generous field and trims only the thin sparse fringe.")
+                    }
+                }
+
                 // Auto-PSF post-pass (Block C.1 v0).
                 HStack(spacing: 4) {
                     Toggle("Auto-PSF + Wiener", isOn: $app.luckyStack.autoPSF)

@@ -1910,6 +1910,12 @@ final class AppModel: ObservableObject {
         // auto-ROI is opt-in until the bracket validates per-subject.
         perItemOpts.useAutoPSFAutoROI = sharpen.enabled && (luckyStack.autoNuke ? false : luckyStack.autoPSFAutoROI)
         perItemOpts.validateDrift = luckyStack.validateDrift
+        // Jumpy-recording handling (2026-06-14). AutoNuke forces both ON
+        // (the "do everything safely" preset); otherwise honour the GUI
+        // toggles. coverageCropThreshold passes through regardless.
+        perItemOpts.rejectShiftOutliers = luckyStack.autoNuke ? true : luckyStack.rejectShiftOutliers
+        perItemOpts.coverageNormalize = luckyStack.autoNuke ? true : luckyStack.coverageCrop
+        perItemOpts.coverageCropThreshold = luckyStack.coverageCropThreshold
         // RFF user setting → per-run options. Auto = pass nil so the
         // engine's σ-aware formula computes the fractions per disc
         // geometry. Manual = pass the user's slider values. Off = pass
@@ -3011,6 +3017,24 @@ struct LuckyStackUIState {
     /// robust drift line so a slowly-drifting planet doesn't ghost the
     /// stack. Default OFF — perturbs well-tracked captures.
     var validateDrift: Bool = false
+
+    /// Jump-outlier rejection (2026-06-14). Drop frames whose alignment
+    /// shift is a statistical outlier (a seeing jump / gust / tracking
+    /// jerk) before stacking, so one jump doesn't corrupt the stack or
+    /// shrink the crop. Default ON; no-op on well-tracked captures.
+    var rejectShiftOutliers: Bool = true
+
+    /// Coverage-map crop (2026-06-14). Normalises every output pixel by
+    /// its own per-frame coverage so the drift border is correctly
+    /// exposed (not clamp-smeared), then crops by a coverage threshold
+    /// instead of the crude `2×max-shift` rule — keeps far more field on
+    /// jumpy / tightly-framed captures. Default ON; identical output on
+    /// well-tracked captures. Off falls back to the max-shift crop.
+    var coverageCrop: Bool = true
+    /// Coverage-threshold crop fraction. Keep pixels covered ≥ this
+    /// fraction of the maximum (centre) coverage. 0 = keep the full
+    /// field (union); 0.20 default trims only the thin sparse fringe.
+    var coverageCropThreshold: Double = 0.20
 
     /// Radial Fade Filter (RFF) settings — Auto / Manual / Off. Default
     /// Auto uses the σ-aware formula. Manual exposes inner / outer
