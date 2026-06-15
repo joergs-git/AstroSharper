@@ -1,0 +1,17 @@
+{
+  "bytesPerFrame" : 2354176,
+  "captureDateUTC" : "2026-05-24T12:09:57Z",
+  "colorID" : "mono",
+  "colorIsBayer" : false,
+  "colorIsMono" : true,
+  "colorIsRGB" : false,
+  "filename" : "14_09_57_fulldisc.ser",
+  "frameCount" : 1000,
+  "imageHeight" : 1216,
+  "imageWidth" : 1936,
+  "instrument" : "ZWO ASI174MM",
+  "observer" : "Observer",
+  "pixelDepth" : 8,
+  "telescope" : "Telescope",
+  "totalBytes" : 2354176000
+}

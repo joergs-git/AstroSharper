@@ -1,14 +1,13 @@
 {
-  "inputFile" : "mond-00_06_53_.ser",
-  "keepPercents" : [
+  "inputFile": "mond-00_06_53_.ser",
+  "keepPercents": [
     {
-      "elapsedSeconds" : 6.2465469837188721,
-      "keepPercent" : 25,
-      "outputBytes" : 8489210,
-      "outputFFTHighFraction" : 0.0019591697431091994,
-      "outputFFTMidFraction" : 0.0029574073106146347,
-      "outputFile" : "biggsky__mond-00_06_53_.ser.tif",
-      "outputSharpness" : 1.045149201672757e-05
+      "keepPercent": 25,
+      "outputBytes": 9324322,
+      "outputFFTHighFraction": 0.0019463870413287427,
+      "outputFFTMidFraction": 0.0029119144358047337,
+      "outputFile": "biggsky__mond-00_06_53_.ser.stack.tif",
+      "outputSharpness": 1.010173491522437e-05
     }
   ]
 }

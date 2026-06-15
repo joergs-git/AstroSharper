@@ -1,0 +1,13 @@
+{
+  "inputFile": "14_03_21_prominence.ser",
+  "keepPercents": [
+    {
+      "keepPercent": 25,
+      "outputBytes": 1858186,
+      "outputFFTHighFraction": 0.005940555978214691,
+      "outputFFTMidFraction": 0.009926649458499488,
+      "outputFile": "sun__14_03_21_prominence.ser.stack.tif",
+      "outputSharpness": 0.0015160924522206187
+    }
+  ]
+}
