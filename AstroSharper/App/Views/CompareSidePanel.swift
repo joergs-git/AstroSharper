@@ -37,12 +37,25 @@ struct CompareSidePanel: View {
     /// In-progress drag delta — added to `pan` on gesture end.
     @GestureState private var dragDelta: CGSize = .zero
 
+    /// Dedicated higher-resolution images for the panel. The catalog's
+    /// row thumbnail is ~48 px — scaled to the default 2× zoom it looks
+    /// dramatically softer than the main preview, which the user reads
+    /// as "compare is blurry". Loading a 640 px image (sRGB, same loader
+    /// the preview colour-management now matches) fixes the sharpness
+    /// gap. Cached by file id / source URL so we don't reload per redraw.
+    @State private var hiResCurrent: (id: UUID, img: NSImage)? = nil
+    @State private var hiResSource: (url: URL, img: NSImage)? = nil
+    private static let hiResDimension: CGFloat = 640
+
     private static let defaultZoom: CGFloat = 2.0
     private static let minZoom: CGFloat = 0.5
     private static let maxZoom: CGFloat = 8.0
 
+    /// Prefer the dedicated high-res image; fall back to the catalog row
+    /// thumbnail while it loads so the panel is never empty.
     private var currentFileThumbnail: NSImage? {
         guard let id = app.previewFileID else { return nil }
+        if let hi = hiResCurrent, hi.id == id { return hi.img }
         return app.catalog.files.first(where: { $0.id == id })?.thumbnail
     }
 
@@ -58,9 +71,28 @@ struct CompareSidePanel: View {
     /// require a tracked `lastStackedSourceURL` — showing an
     /// unrelated file as the "source" would be misleading.
     private var sourceImage: NSImage? {
-        if let img = app.lastStackedSourceThumbnail { return img }
+        if let url = app.lastStackedSourceURL {
+            if let hi = hiResSource, hi.url == url { return hi.img }
+            return app.lastStackedSourceThumbnail
+        }
         if app.displayedSection == .inputs { return currentFileThumbnail }
         return nil
+    }
+
+    /// Background-load a 640 px sRGB image for the panel. Heavy decode
+    /// kept off the main thread; result committed on the main actor.
+    private func loadHiRes(url: URL, assignCurrent: UUID?) {
+        Task.detached(priority: .userInitiated) {
+            let img = ThumbnailLoader.load(url: url, maxDimension: Self.hiResDimension)
+            await MainActor.run {
+                guard let img else { return }
+                if let id = assignCurrent {
+                    self.hiResCurrent = (id, img)
+                } else {
+                    self.hiResSource = (url, img)
+                }
+            }
+        }
     }
 
     /// Context-aware label for the top thumbnail. Outputs is the most
@@ -133,6 +165,18 @@ struct CompareSidePanel: View {
         // moved here as `idealWidth` + sensible min / max bounds.
         .frame(minWidth: 140, idealWidth: 200, maxWidth: 600)
         .background(Color(NSColor.underPageBackgroundColor))
+        // Load the high-res panel images when the displayed file or the
+        // tracked source SER changes. `task(id:)` cancels + restarts on
+        // change, so fast file-switching never piles up stale decodes.
+        .task(id: app.previewFileID) {
+            guard let id = app.previewFileID,
+                  let entry = app.catalog.files.first(where: { $0.id == id }) else { return }
+            if hiResCurrent?.id != id { loadHiRes(url: entry.url, assignCurrent: id) }
+        }
+        .task(id: app.lastStackedSourceURL) {
+            guard let url = app.lastStackedSourceURL else { return }
+            if hiResSource?.url != url { loadHiRes(url: url, assignCurrent: nil) }
+        }
     }
 
     @ViewBuilder
