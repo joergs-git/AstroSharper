@@ -2,7 +2,7 @@
 
 A running record of where we are, what's done, and what's next. Update at the end of every session.
 
-## ACTIVE [2026-06-14] — Coverage-map crop for jumpy recordings (branch feature/coverage-map-crop)
+## DONE [2026-06-14] — Coverage-map crop for jumpy recordings (shipped in v0.5.2)
 
 Problem: `cropToCommonArea` crops by `2 × max(|shift|)` symmetrically → ONE jump frame
 shrinks the whole output (user hit this on a tight 312×296 Jupiter ROI). AutoStakkert
@@ -193,18 +193,20 @@ Plan (the "optimal optimum" the user asked for):
 
 ## Pending — roadmap (v1.0 single-shot completion)
 
+> **Status note (2026-06-16):** this is the historical v1-foundation plan. Most F/A/B/C/D/E blocks landed before v0.5 — many `[ ]` here are stale checkboxes, not real backlog. Genuinely open: F5 float-TIFF, A.3 Strehl supplement, C.9 Saturn ROI, D.2 calib-skip, F.1 MPSGraph FFT, F.3 timing, G.1/G.2 derotation, H.2–H.5/H.7/H.9/H.10, PrivacyInfo.xcprivacy, anchored-zoom drift, upper-half over-exposure. See CHANGELOG for what actually shipped.
+
 **Single-milestone v1.0 plan, locked 2026-04-27.** No interim shipping. Locked principles: Quality + Speed are the only filter; automate over expose; UI scaffolding stays. Full strategy: `~/.claude/plans/check-if-this-project-drifting-pnueli.md`. Reference data: `TESTIMAGES/biggsky/` (3 Jupiter SERs ~11 GB + 1 AS!3 reference PNG).
 
 ### Foundation (must land first — unblocks everything)
-- [ ] **F1 Headless CLI target** (`AstroSharperCLI`) — `astrosharper stack file.ser --keep auto --metric lapd --align lapd-multilevel --sigma 2.5 --drizzle 1.5 --decon blind --out outdir/ --metrics-json out/metrics.json`. Subcommands: stack, align, decon, analyze, validate. New target in `project.yml`. **Required so every algorithm is verifiable without GUI.**
-- [ ] **F2 Test target** (`AstroSharperTests`) — Swift Testing or XCTest. Cover every Engine/Pipeline algorithm with synthetic-input unit tests + GPU-vs-CPU-reference asserts. Tests for: phase corr (<0.1 px shift recovery), LAPD/VL ranking parity, sigma-clip outlier %, drizzle MTF, Welford accumulator, Bayer demosaic, blind deconv (PSF FWHM <10% off, image PSNR >30 dB).
+- [x] **F1 Headless CLI target** (`AstroSharperCLI`) — `astrosharper stack file.ser --keep auto --metric lapd --align lapd-multilevel --sigma 2.5 --drizzle 1.5 --decon blind --out outdir/ --metrics-json out/metrics.json`. Subcommands: stack, align, decon, analyze, validate. New target in `project.yml`. **Required so every algorithm is verifiable without GUI.**
+- [x] **F2 Test target** (`AstroSharperTests`) — Swift Testing or XCTest. Cover every Engine/Pipeline algorithm with synthetic-input unit tests + GPU-vs-CPU-reference asserts. Tests for: phase corr (<0.1 px shift recovery), LAPD/VL ranking parity, sigma-clip outlier %, drizzle MTF, Welford accumulator, Bayer demosaic, blind deconv (PSF FWHM <10% off, image PSNR >30 dB).
 - [x] **F3 Regression harness** — `astrosharper validate <dir>` (v1 `f87cf6e` 2026-05-01, v1.1 sharpness `292444c`, v1.2 FFT band fractions `d73ea85`). Walks `.ser` files, runs analyze + stack on each, diffs metrics against committed baselines. Per-key tolerance: ±2 % `outputBytes`, ±5 % quality bucket (`outputSharpness` + `outputFFTMidFraction` + `outputFFTHighFraction`). Volatile fields stripped (timing, absolute paths). `--regenerate` rewrites baselines after intentional calibration changes; `--filter` narrows; `--quiet` for CI. 14 baselines for 7 SERs, all green. Spatial sharpness + frequency-domain bands are complementary axes (sharpness conflates edges with noise; FFT separates medium structure from fine detail). **Open work for F3 v1.3**: per-pixel RMSE vs the AS!3 reference output `TESTIMAGES/biggsky/2026-03-05-0055_5-MPO_Jupiter__lapl6_ap126.png`. Adds visual-identity axis on top of the existing two quality axes.
 - [~] **F4 SourceReader protocol** — Audited 2026-05-01, partially advanced same day. Protocol shape good (~64 lines). `SerReader` + `AviReader` + new `FitsFrameReader` (Fits.swift wrapper class, commit `cb97123`) all conform. `SourceReader.open(url:)` factory dispatches by extension. **Remaining gap is now narrower than the audit suggested**: the 3 `SerReader(url:)` sites in `LuckyStack.swift:649` / `QualityProbe.swift:296` / `OscDefaults.swift:31` all sit inside SER-only code paths *by design* (raw byte access, header-specific introspection). The actual remaining work to enable AVI / FITS lucky-stack is to refactor `LuckyRunner` to abstract over byte / RGB / Float32 frame inputs — that's a multi-day effort, not a quick swap. Promote to its own roadmap item if it becomes a v1 blocker.
 - [ ] **F5 32-bit float TIFF output + render modes** — extend `Engine/Exporter.swift` for 32-bit float (deconv peaks routinely > 65535). Render modes (Clip / AutoRange / Manual Min Max) in display path; doesn't affect file content.
 
 ### Block A — Quality intelligence
 - [x] **A.1 LAPD as primary metric** — `quality_partials` and `compute_lapd_field` shaders both use `laplacian_at` (Diagonal Laplacian, 8-neighbour, cardinal weight 1.0 + diagonal 0.5). Active across `LuckyStack` quality grading + `SharpnessProbe` HUD. Pure-Swift `LAPDProbeTests` suite verifies the math. Already shipped.
-- [ ] **A.2 Two-stage quality** — global LAPD + per-AP local contrast in `LuckyStack.swift`. Each AP picks its own top-N% subset (PSS approach).
+- [x] **A.2 Two-stage quality** — global LAPD + per-AP local contrast in `LuckyStack.swift`. Each AP picks its own top-N% subset (PSS approach).
 - [ ] **A.3 Strehl-ratio supplement** — for high-frame-count regime. 2D Moffat fit on brightest disc/feature.
 - [x] **A.4 Lucky keep-% formula** — `QualityProbe.computeKeepRecommendation` clamps to BiggSky empirical [0.20, 0.75] band (was [0.05, 0.50]). Knee detection at p where score(p) ≤ 0.5 × p90; jitter tightening applied BEFORE clamp so it stays visible across the band; frame-count floors (50 absolute, 100 typical) preserved. Wired through `--auto-keep` CLI flag + `LuckyStack.run` resolves at quality-grade time. Tests updated to 0.20 floor / 0.75 cap. CLI output annotates `(auto-keep)` so the resolved value is explained alongside `plan.percent`. Tuning data: all real BiggSky reference SERs (Saturn / Jupiter ×3 / Mars / Moon) hit the 75% cap with our LAPD scoring; synthetic wide distributions correctly drop to 20% floor (verified via `LuckyKeepRecommendationTests`). Manual AP placement skipped after empirical regression test on Saturn (auto 6×6 grid achieves 1.13× LAPD sharpness vs 28 manual APs).
 - [~] **A.5 Median HFR + XY-shift sparkline (v0 — HFR readout only)** — `HalfFluxRadius.compute` was already implemented + unit-tested; this session wired it. `SharpnessDistribution` gained `medianHFR`; `SerQualityScanner` reads luminance via `AutoPSF.readLuminance` and computes HFR per sample (~3 ms each on 1280×720, negligible on the 64-sample once-per-SER budget). HUD renders the median beneath the jitter row. **Open work for v1**: XY-shift sparkline — needs Stabilizer.Result API extension to expose per-frame shifts to AppModel.
@@ -213,7 +215,7 @@ Plan (the "optimal optimum" the user asked for):
 ### Block B — Alignment & stacking
 - [x] **B.1 Sigma-clipped stacking** — engine path was already implemented as `LuckyStack.accumulateAlignedSigmaClipped` (Welford pass + clipped re-mean). 2026-04-29 surfaced the `--sigma N` CLI flag to the GUI: toggle + threshold slider (default 2.5σ matching AS!4 / RegiStax, range 1.5–4.0) appears inside the Multi-AP block of LuckyStackSection because both are Scientific-mode features. Wired via `LuckyStackUIState.sigmaClipEnabled` + `sigmaClipThreshold` → `perItemOpts.sigmaThreshold`.
 - [x] **B.2 Feathered AP blending** — `lucky_accumulate_per_ap_keep` now uses raised-cosine per-axis weights `0.5·(1±cos(π·d))` instead of bilinear `1-d / d`. Continuous derivatives at AP centres + neighbour centres eliminate the bilinear tent's grid quilting. Sum-to-1 invariant preserved via `cos(π·(1-d)) = -cos(π·d)`. CPU reference: `APFeather.cosineWeight`. 2 new APFeatherTests verifying partition-of-unity sum-to-1 across `[0,1]²`.
-- [ ] **B.3 Adaptive AP placement / auto-rejection** — new `Engine/Pipeline/APPlanner.swift`. Per-cell local contrast + luminance; drop bottom 20%. Sparse-AP mask honored by accumulator.
+- [x] **B.3 Adaptive AP placement / auto-rejection** — new `Engine/Pipeline/APPlanner.swift`. Per-cell local contrast + luminance; drop bottom 20%. Sparse-AP mask honored by accumulator.
 - [x] **B.4 Cumulative drift tracking** — `DriftCache.validateChronologically` (pure-Swift, fully testable) replays per-frame phase-corr shifts in chronological order, replacing outliers (>10 px from linear-extrapolated prediction) with the prediction. `Stabilizer.run` invokes it after the alignment loop; outlier replacements logged via os_log. Reference frame anchored at `(0,0)` so predictions across it stay continuous. 4 new DriftCacheTests covering clean drift, single outlier, ref-in-middle, empty input.
 - [x] **B.5 MultiLevelCorrelation** — Proper PSS cascade shipped 2026-05-01 (commit `f1f300f`). Coarse 256² runs first, peak gets mapped to fine-grid coords, fine FFT correlation runs but its peak-find is *constrained* to a search window (radius 8 fine-grid px) around the coarse-derived centre. Peaks outside the window are unreachable by construction — the noise-basin failure mode is structurally prevented, not just post-validated. `fft2dPhaseCorrelation` gains optional `searchCenter` + `searchRadius` (default args preserve global-scan behaviour for the LuckyStack hot path). SER regression suite 7/7 still green at unchanged baselines (constrained search picks the same peaks unconstrained did on clean inputs). **Future polish**: dedicated unit tests exercising the cascade vs the global-fallback path on synthetic peak-locking inputs.
 - [x] **B.6 Drizzle 1.5×/2× with anti-aliasing pre-filter** — Closed 2026-05-01. Splatting feature-complete (CPU + GPU + 8 unit tests). GUI shipped (Off/2×/3× picker + pixfrac slider in the Scientific block, commit `9b99578`). AA pre-filter shipped via MPSImageGaussianBlur (default σ=0.7 input-pixels, matches pixfrac so the blur radius ≈ drop size; commit `a74acb2`). CLI `--drizzle-aa-sigma <X>` (0=off); GUI AA σ slider revealed when scale>1. **Future polish (not v1 blockers)**: auto-engagement trigger (FWHM/2.4 undersampling), float scale factors (1.5× — engine is integer-only today).
@@ -236,7 +238,7 @@ Plan (the "optimal optimum" the user asked for):
 - [~] **D.4 Per-channel atmospheric dispersion correction (Path B)** — `Engine/Pipeline/LuckyStackPerChannel.swift`. Each Bayer channel extracted at half-res (true measured pixels, no demosaic interpolation), independently phase-correlated + accumulated against a SHARED reference frame (LAPD-graded on green), then recombined with a Bayer-pattern-aware bilinear upsample. CLI `--per-channel`. Geometry verified correct on three Jupiter SERs in TESTIMAGES/biggsky/. **Bare-stack output is near-identical to baseline** — the per-channel dispersion correction is sub-pixel and not visible until aggressive post-stack sharpen / deconv lands. Marked as architecturally complete but NOT yet demonstrating a visual win; full validation depends on Block C blind deconv / dual-stage denoise. v0 still lightspeed-only — multi-AP / sigma-clip / drizzle / two-stage are NOT wired into the per-channel path.
 
 ### Block E — IO & interop
-- [ ] **E.1 AVI lucky-stack** via SourceReader (depends on F4).
+- [x] **E.1 AVI lucky-stack** via SourceReader (depends on F4).
 - [x] **E.2 FITS input + output** — Both directions shipped 2026-05-01 (import `cb97123`, export `762c750`). Import: `FitsFrameReader` class conforms to `SourceReader`; FITS recognised by `FileCatalog`; preview / thumbnails / `ImageTexture.load` route through the FITS reader; CLI `analyze` dispatches by extension and emits FITS-specific text + JSON (BITPIX, NAXIS, DATE-OBS via four format fallbacks). Export: `ImageTexture.write` dispatches `.fits` / `.fit` extensions through a new `writeFITS(...)` helper that renders linearSRGB Float32 RGBA into a CPU buffer, collapses to mono via Rec. 709 luma, and serialises through `FitsWriter.write` with CREATOR + OBJECT metadata. Verified end-to-end: SER → stack `--smart-auto` → `.fits` reads clean in both astropy and our own `analyze` CLI. **Remaining (separate item)**: lucky-stacking FITS *input* frames depends on the `LuckyRunner` refactor under F4 — that abstracts byte / RGB / Float32 frame inputs and unblocks AVI lucky-stack at the same time.
 - [~] **E.3 Auto target detection from filename** — `Engine/Presets/Preset.swift::PresetAutoDetect.detect` matches keywords for sun (sun/solar/sonne/halpha/h-alpha/ha_/lunt), moon (moon/mond/lunar/luna), jupiter (jup/jupiter), saturn (sat/saturn), mars (mars). `AppModel.autoApplyDefaultPreset` fires on file import (`autoDetectPresetOnOpen = true` by default), pre-applies the matching built-in preset (sets keepPercent / mode / multiAP / etc.). Smart auto button correctly layers RFF on top of the auto-applied preset. **Open work for v1+**: file-row target chip (cosmetic, click to override), `_oiii`/`_sii` narrowband-filter tags (ambiguous — could be solar OR deep-sky), CLI-side auto-detect when no `--keep` etc. are passed.
 - [x] **E.4 SER capture-side header validator** — `Engine/IO/CaptureValidator.swift` parses SharpCap / FireCapture's `key=value` pairs out of the SER `observer` / `instrument` / `telescope` strings (regex `([A-Za-z_]+)=(-?[0-9]+(?:\.[0-9]+)?)`) and runs them against rules: bit-depth on lunar/solar, frame count < 100, frame size < 200 px (tile floor), missing UTC timestamp, exposure > 15 ms (planetary), fps < 30 (planetary), capture window > 3 min on Jupiter/Saturn. `PreviewStats.captureWarnings` populated when a SER loads (target inferred via `PresetAutoDetect` on filename + folder); HUD renders each as a yellow ⚠ chip with optional remediation suggestion. Non-modal — purely informational, no pipeline gating. Tests in `CaptureValidatorTests`. Histogram-peak rule deferred (needs a frame analysis pass; not a header check).
@@ -251,14 +253,14 @@ Plan (the "optimal optimum" the user asked for):
 - [ ] **G.2 Auto-engage** when capture window > 3 min on Jupiter/Saturn; off otherwise. UI takes UT capture-time at *middle* of window.
 
 ### Block H — Automation layer (no extra clicks)
-- [ ] **H.1 Auto-target-detection wired to preset** (depends on E.3).
+- [x] **H.1 Auto-target-detection wired to preset** (depends on E.3).
 - [ ] **H.2 Auto-place ROI for PSF** (depends on C.2).
 - [ ] **H.3 Auto-tune dual denoise from frame-noise estimate**.
 - [ ] **H.4 Auto-detect undersampling → propose drizzle on** (depends on B.6).
 - [ ] **H.5 Auto-skip calibration for short-exposure bright targets** (depends on D.2).
-- [ ] **H.6 Auto-keep-% from frame-count + distribution** (depends on A.4).
+- [x] **H.6 Auto-keep-% from frame-count + distribution** (depends on A.4).
 - [ ] **H.7 Auto-compute deconv tile size from SER header** (depends on C.4).
-- [ ] **H.8 Auto white balance on OSC import** (depends on D.3).
+- [x] **H.8 Auto white balance on OSC import** (depends on D.3).
 - [ ] **H.9 Auto-engage derotation when capture window long** (depends on G.2).
 - [ ] **H.10 `Apply ALL Stuff (⇧⌘A)` becomes the BiggSky "Do It All" equivalent** — calibration → align → quality grade → multi-AP → stack → deconvolve → tone → export with H.1–H.9 automated. Manual overrides still available in section panels.
 
@@ -312,16 +314,16 @@ Plan (the "optimal optimum" the user asked for):
 - Starnet++ integration → defer (DSO domain).
 - Mosaic stitching → defer (Microsoft ICE handles it).
 
-### App Store path (deferred — pick up when user says "set up MAS submission")
-- [ ] Register app in App Store Connect (https://appstoreconnect.apple.com/apps)
-- [ ] Create `Mac App Distribution` certificate (one-shot CSR via Keychain Assistant)
-- [ ] Create `Mac Installer Distribution` certificate (same CSR)
-- [ ] Create `AstroSharper Mac App Store` provisioning profile
-- [ ] Add MAS export-options.plist + Release-MAS scheme/config
-- [ ] Replace `idPLACEHOLDER` in `AppLinks.appStoreReview` with real App Store ID (after first MAS submission)
+### App Store path (LIVE — app shipped to the Mac App Store, id 6778564449)
+- [x] Register app in App Store Connect (https://appstoreconnect.apple.com/apps)
+- [x] Create `Mac App Distribution` certificate (one-shot CSR via Keychain Assistant)
+- [x] Create `Mac Installer Distribution` certificate (same CSR)
+- [x] Create `AstroSharper Mac App Store` provisioning profile
+- [x] Add MAS export-options.plist + Release-MAS scheme/config
+- [x] Replace `idPLACEHOLDER` in `AppLinks.appStoreReview` with real App Store ID (after first MAS submission)
 - [ ] Privacy manifest (`PrivacyInfo.xcprivacy`)
-- [ ] App Store screenshots (required: 1280×800, 1440×900, 2560×1600, 2880×1800)
-- [ ] App Store description, keywords, support URL, age rating
+- [x] App Store screenshots (required: 1280×800, 1440×900, 2560×1600, 2880×1800)
+- [x] App Store description, keywords, support URL, age rating
 - [ ] Pricing tier decision
 
 ### Documentation
