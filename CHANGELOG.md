@@ -5,6 +5,15 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-06-17
+
+### Fixed
+- **Preview/frame de-sync during playback** — pausing now loads the exact
+  frame at the current index (was reprocessing a stale / cached-neighbour
+  frame, so the paused image could differ from the frame counter), and a
+  jump-while-playing falls back to the dense scrub proxy (nearest entry a
+  few frames away) instead of the on-demand cache's possibly-distant nearest.
+
 ## [0.5.3] - 2026-06-17
 
 ### Added
