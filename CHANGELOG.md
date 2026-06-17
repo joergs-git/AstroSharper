@@ -5,6 +5,8 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-06-17
+
 ### Added
 - **Instant scrubbing for big SERs (opt-in scrub proxy)** — a ⚡ button on the
   SER scrub bar builds a cached low-res proxy of the whole capture so scrubbing
