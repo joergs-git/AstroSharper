@@ -636,12 +636,14 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                     }
                     return
                 }
-                // Playback STOP — settle the landed frame with the
-                // full pipeline.
-                guard self.beforeTex != nil else { return }
-                self.refreshDisplayAutoRange()
-                self.view?.needsDisplay = true
-                self.reprocess()
+                // Playback STOP — playback paints cached-neighbour / stale
+                // frames on misses (and never the heavy pipeline), so on
+                // pause the on-screen frame can be a DIFFERENT frame than
+                // the counter / current index. Load the EXACT landed frame
+                // full-res first, then settle (auto-range + pipeline) so the
+                // paused image always matches the frame the user stopped on.
+                self.loadCurrentSerFrame()
+                self.serScrubSettleSubject.send(())
             }
             .store(in: &cancellables)
         // Playback: when the current playback frame index changes, swap the
@@ -1278,10 +1280,14 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             return
         }
 
-        // Tier 2: low-res fallback. Paint the thumb at idx if cached,
-        // else the nearest cached thumb. This keeps motion visible
-        // while the full-res decoder catches up.
-        let lowRes = serScrubCache.cachedThumb(at: idx)
+        // Tier 2: low-res fallback. Prefer the proxy atlas — it has dense
+        // coverage so its nearest entry is at most stride/2 frames from
+        // `idx` (vs the on-demand cache's nearest, which after a jump can
+        // be hundreds of frames away → the out-of-sync look). Falls back to
+        // the on-demand cache when no proxy is built. Full-res upgrades it
+        // when the prefetcher catches up.
+        let lowRes = serProxyAtlas.nearestTexture(toFrame: idx)
+            ?? serScrubCache.cachedThumb(at: idx)
             ?? serScrubCache.nearestCachedThumb(to: idx)?.texture
         if let lowRes {
             paintScrubLowRes(lowRes, flipped: entry.meridianFlipped, frameIndex: idx)
