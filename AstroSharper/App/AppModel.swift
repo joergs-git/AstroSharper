@@ -138,6 +138,76 @@ final class AppModel: ObservableObject {
     /// Count of files auto-stacked since the current watch session started.
     @Published var folderWatchStackedCount: Int = 0
 
+    // MARK: - Scrub proxy atlas (instant scrubbing for big SERs)
+
+    /// Shared low-res proxy atlas. The opt-in build (`buildScrubProxy`)
+    /// writes a cached proxy file; PreviewView's scrub path reads
+    /// decode-free thumbnails from this same instance. READ-ONLY preview
+    /// accelerator — never feeds export / stacking, scrub index stays the
+    /// true SER frame index, so trim markers + exports are unaffected.
+    let scrubProxyAtlas = ScrubProxyAtlas(device: MetalDevice.shared.device)
+    /// True while a proxy build is running (drives the button spinner).
+    @Published var scrubProxyBuilding = false
+    /// 0…1 build progress.
+    @Published var scrubProxyProgress: Double = 0
+    /// True when a cached proxy exists for the current preview SER
+    /// (instant-scrub active). Refreshed on file open + build completion.
+    @Published var scrubProxyAvailable = false
+    private var scrubProxyCancel = false
+
+    /// Refresh `scrubProxyAvailable` for the current preview SER and bind
+    /// the atlas for reading if a cached proxy exists. Cheap (a stat +
+    /// mmap); call on file open.
+    func refreshScrubProxyState() {
+        guard let id = previewFileID,
+              let entry = catalog.files.first(where: { $0.id == id }), entry.isSER else {
+            scrubProxyAvailable = false; return
+        }
+        let url = entry.url
+        let exists = ScrubProxyAtlas.cachedAtlasExists(for: url)
+        scrubProxyAvailable = exists
+        if exists {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                self?.scrubProxyAtlas.open(serURL: url)
+            }
+        }
+    }
+
+    /// Opt-in: build a scrub proxy for the current preview SER in the
+    /// background. Idempotent (no-op if already building / already cached).
+    func buildScrubProxy() {
+        guard !scrubProxyBuilding,
+              let id = previewFileID,
+              let entry = catalog.files.first(where: { $0.id == id }), entry.isSER else { return }
+        let url = entry.url
+        if ScrubProxyAtlas.cachedAtlasExists(for: url) {
+            scrubProxyAvailable = true
+            refreshScrubProxyState()
+            return
+        }
+        scrubProxyBuilding = true
+        scrubProxyProgress = 0
+        scrubProxyCancel = false
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let ok = self.scrubProxyAtlas.build(
+                serURL: url,
+                progress: { p in
+                    DispatchQueue.main.async { self.scrubProxyProgress = p }
+                },
+                isCancelled: { self.scrubProxyCancel }
+            )
+            // Bind the freshly-built proxy for immediate reading.
+            if ok { self.scrubProxyAtlas.open(serURL: url) }
+            DispatchQueue.main.async {
+                self.scrubProxyBuilding = false
+                self.scrubProxyAvailable = ok || ScrubProxyAtlas.cachedAtlasExists(for: url)
+            }
+        }
+    }
+
+    func cancelScrubProxyBuild() { scrubProxyCancel = true }
+
     var folderWatcher: FolderWatcher?
     /// Poll timer: promotes size-stable files to the ready queue + drives
     /// the one-at-a-time auto-stack pump. Runs the whole time watching is

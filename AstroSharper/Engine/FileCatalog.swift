@@ -299,7 +299,10 @@ enum ThumbnailLoader {
         // raw sample values (e.g. >1.0) and display saturated; rendering
         // into an 8-bit context implicitly clamps to [0,1].
         let w = cg.width, h = cg.height
-        let cs = CGColorSpaceCreateDeviceRGB()
+        // sRGB (not DeviceRGB) so SwiftUI colour-manages these thumbnails
+        // the same way the main preview's CAMetalLayer (sRGB) does —
+        // otherwise the Compare panel's colours drift from the live view.
+        let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         let info = CGImageAlphaInfo.premultipliedLast.rawValue
         if let ctx = CGContext(
             data: nil, width: w, height: h,
@@ -391,7 +394,8 @@ enum ThumbnailLoader {
                 }
             }
         }
-        let cs = CGColorSpaceCreateDeviceRGB()
+        // sRGB to match the Metal preview's colour management (see load()).
+        let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
         guard let provider = CGDataProvider(data: Data(rgba) as CFData),
               let cg = CGImage(width: dstW, height: dstH, bitsPerComponent: 8, bitsPerPixel: 32,
