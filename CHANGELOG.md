@@ -5,6 +5,20 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+### Added
+- **Instant scrubbing for big SERs (opt-in scrub proxy)** — a ⚡ button on the
+  SER scrub bar builds a cached low-res proxy of the whole capture so scrubbing
+  8-20 GB files is instant instead of laggy. Covers ~1500 frames (vs the old
+  32-frame sparse cache), reads decode-free from a memory-mapped cache file
+  instead of cold random reads into the giant SER. One-time background build,
+  reused on later opens. Read-only preview accelerator — trim markers + exports
+  are unaffected.
+
+### Fixed
+- **Compare panel colour + sharpness** now track the main preview: thumbnails
+  render in sRGB (was DeviceRGB) and the panel loads 640px images (was the
+  ~48px catalog row thumbnail scaled up).
+
 ## [0.5.2] - 2026-06-15
 
 ### Added
