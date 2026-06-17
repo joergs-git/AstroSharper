@@ -414,6 +414,12 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     /// the full-res prefetcher / main load. Drives drag-preview on
     /// 4 GB+ SERs where full-res decodes are too slow per scrub step.
     private let serScrubCache = SerScrubLowResCache(device: MetalDevice.shared.device)
+    /// Persistent low-res proxy atlas (opt-in, cached on disk). Owned by
+    /// AppModel so the opt-in BUILD (AppModel.buildScrubProxy) and this
+    /// read path share one instance — after a build, AppModel re-opens it
+    /// and scrubbing immediately hits decode-free thumbnails. READ-ONLY
+    /// preview accelerator: never touches markers / export.
+    private var serProxyAtlas: ScrubProxyAtlas { app.scrubProxyAtlas }
 
     /// Texture pixel dimensions of the currently-shown preview, exposed so
     /// the ZoomableMTKView can compute fit-scale for anchored zooming.
@@ -886,6 +892,10 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                 serPrefetcher.setURL(url)
                 serScrubCache.setURL(url)
                 serScrubCache.prefillSparse(totalFrames: realCount)
+                // Refresh proxy availability + bind a cached proxy for
+                // this SER (opens it off-main). Scrub then hits decode-free
+                // thumbnails. Building itself is opt-in (buildScrubProxy).
+                app.refreshScrubProxyState()
                 stats.totalFrames = realCount
                 stats.dimensions = (h.imageWidth, h.imageHeight)
                 stats.bitDepth = h.pixelDepthPerPlane
@@ -1339,6 +1349,14 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
         // 300-500 ms. Request the EXACT frame's thumb in the background
         // (lands on the next drag pulse) and show nearest-cached now.
         if app.isSerScrubbing {
+            // Instant path: a pre-built proxy atlas covers the whole SER
+            // with decode-free thumbnails (no cold reads into the 8-20 GB
+            // file). Nearest covered frame is at most stride/2 away.
+            if let proxyTex = serProxyAtlas.nearestTexture(toFrame: frameIndex) {
+                paintScrubLowRes(proxyTex, flipped: entry.meridianFlipped, frameIndex: frameIndex)
+                return
+            }
+            // Fallback (no proxy built for this SER): on-demand low-res cache.
             serScrubCache.requestThumb(at: frameIndex)
             let lowRes = serScrubCache.cachedThumb(at: frameIndex)
                 ?? serScrubCache.nearestCachedThumb(to: frameIndex)?.texture

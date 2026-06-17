@@ -170,6 +170,35 @@ struct SerScrubBar: View {
             .disabled(!usable)
             .help("Save the currently-displayed frame as a 16-bit TIFF in the outputs folder. Use this when stacking softens a feature you want to preserve crisply — scrub to the sharpest single frame and click to keep it. Filename: <ser_basename>_frame_<NNNN>.tif (no-overwrite numbered).")
 
+            // Instant-scrub proxy (opt-in). Builds a cached low-res proxy
+            // of the whole SER so scrubbing big (8-20 GB) files is instant
+            // instead of laggy. READ-ONLY — never affects trim / export.
+            if app.scrubProxyBuilding {
+                HStack(spacing: 4) {
+                    ProgressView().controlSize(.small).scaleEffect(0.7)
+                    Text("\(Int(app.scrubProxyProgress * 100))%")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                .frame(width: 64)
+                .help("Building the scrub proxy… scrubbing will be instant once done. Cached for next time.")
+            } else if app.scrubProxyAvailable {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 12))
+                    .foregroundColor(.purple)
+                    .help("Instant scrub active — a cached low-res proxy covers this SER. Scrubbing reads from it (no lag), full-res frame loads on release.")
+            } else {
+                Button {
+                    app.buildScrubProxy()
+                } label: {
+                    Image(systemName: "bolt")
+                        .font(.system(size: 13))
+                }
+                .buttonStyle(.plain)
+                .disabled(!usable)
+                .help("Build a cached low-res scrub proxy for this SER — makes scrubbing big files instant. Runs once in the background; reused on later opens. Doesn't touch trim markers or export.")
+            }
+
             // Playback speed picker — multiplies the base blink rate.
             // Live: changing while playing re-arms the timer at the new
             // interval, no need to stop / restart.
