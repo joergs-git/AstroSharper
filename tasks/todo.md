@@ -2,7 +2,33 @@
 
 A running record of where we are, what's done, and what's next. Update at the end of every session.
 
-## FIXED [2026-06-23] — OSC Bayer SER: blue cast on VIDEO (mp4) export
+## FIXED [2026-06-23] (round 2, v0.5.6) — OSC export WB + scrub colour chaos
+
+The v0.5.5 BT.709 tagging was real but NOT the OSC root cause. Two deeper OSC-only bugs found:
+
+1. **Export dropped the white balance.** `BakeInExporter.Context.init` stripped autoWB +
+   channelNormalize (+ chromaticAlignment + purpleFringe) to avoid per-frame strobing on
+   multi-frame export. That silently discarded the gray-world WB the preview applies → OSC
+   exports kept the raw blue background. Mono was fine (gray-world = identity on 1 channel),
+   which is exactly the asymmetry the user reported.
+   - Fix: `Pipeline.process` gained `fixedWB` / `fixedChannelNormalize` overrides.
+     `BakeInExporter` measures the correction ONCE from the first frame
+     (`Pipeline.referenceAutoWB` / `referenceChannelNormalize`) and applies it to every frame —
+     frame-stable AND matches the preview. Purple-fringe (per-pixel) no longer stripped.
+     ACDC stays off (per-frame geometry; off in the user's settings anyway).
+2. **Scrub = colour chaos on OSC.** `ScrubProxyAtlas` sampled 16-bit Bayer with 8-bit byte
+   indexing (`ptr[idx]`) — the `mono16` flag excluded Bayer. 16-bit OSC captures (the common
+   case) read misaligned bytes → corrupt mosaic. Fix: `is16 = bytesPerPlane==2 && !isRGB`
+   covers mono AND bayer; proxy format version 1→2 invalidates stale corrupt caches.
+
+- [x] Both fixes build green; 339/339 Swift-Testing tests pass.
+- [x] Scrub fix needed BOTH caches: `ScrubProxyAtlas` AND `SerScrubLowResCache` (the latter is
+      the on-demand path used during an active drag — the real "chaos while moving" culprit).
+- [x] User-eye verified 2026-06-24: export background neutral (export ≈ preview) AND scrubbing
+      clean (no colour chaos while moving). Both confirmed fine by user.
+- [ ] Release v0.5.6 (pending user go-ahead).
+
+## SUPERSEDED [2026-06-23] — v0.5.5 BT.709 tagging (partial)
 
 Reported with screenshot (v0.5.4). For OSC Bayer Moon footage the in-window preview was correct
 (neutral grey Moon, black background, Sharpen + Tone/Colour applied) but the exported **video**

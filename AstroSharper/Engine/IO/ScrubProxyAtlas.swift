@@ -43,7 +43,10 @@ final class ScrubProxyAtlas {
     private let texCapacity = 96
 
     private static let magic: [UInt8] = [0x41, 0x53, 0x4C, 0x52]  // "ASLR"
-    private static let version: UInt32 = 1
+    // v2: 16-bit Bayer sampling fix (v1 proxies of 16-bit OSC SERs hold
+    // colour-chaos thumbnails). Bumping the version rejects + rebuilds
+    // those stale caches instead of showing the corrupt frames.
+    private static let version: UInt32 = 2
     private static let headerSize = 28
 
     init(device: MTLDevice) { self.device = device }
@@ -118,7 +121,13 @@ final class ScrubProxyAtlas {
         let realCount = (total + strideVal - 1) / strideVal   // ceil(total/stride)
 
         let isBayer = h.colorID.isBayer
-        let mono16 = !isBayer && h.bytesPerPlane == 2 && !h.colorID.isRGB
+        // 16-bit sample handling must cover BOTH mono and Bayer sources.
+        // The earlier `mono16` flag excluded Bayer, so a 16-bit OSC SER
+        // fell through to 8-bit byte indexing (`ptr[idx]`) — reading
+        // misaligned bytes of the 16-bit buffer and producing colour
+        // chaos while scrubbing. RGB (already-interleaved) sources keep
+        // the byte path (handled in the non-Bayer branch below).
+        let is16 = h.bytesPerPlane == 2 && !h.colorID.isRGB
         let bayerOffsets: (rx: Int, ry: Int) = {
             switch h.colorID {
             case .bayerRGGB: return (0, 0)
@@ -151,7 +160,7 @@ final class ScrubProxyAtlas {
                     func sample8(_ x: Int, _ y: Int) -> UInt8 {
                         let xi = min(srcW - 1, max(0, x)), yi = min(srcH - 1, max(0, y))
                         let idx = yi * srcW + xi
-                        if mono16 {
+                        if is16 {
                             let p16 = ptr.advanced(by: idx * 2).withMemoryRebound(to: UInt16.self, capacity: 1) { $0.pointee }
                             return UInt8(min(UInt32(p16) >> 8, 255))
                         }

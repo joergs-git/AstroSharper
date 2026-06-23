@@ -172,6 +172,16 @@ final class Pipeline {
         toneCurveLUT: MTLTexture? = nil,
         coloring: ColoringSettings = ColoringSettings(),
         preview: Bool = false,
+        // Frame-stable colour overrides for multi-frame export (video /
+        // GIF). When non-nil AND the matching toggle is on, the pipeline
+        // applies this fixed correction instead of measuring the current
+        // frame's statistics. The exporter computes them ONCE from a
+        // reference frame so every output frame gets the SAME gray-world
+        // / channel-normalize correction — no per-frame strobing — while
+        // still matching the WB the live preview shows. nil (the default)
+        // preserves the live preview's per-frame behaviour.
+        fixedWB: WhiteBalanceCorrection? = nil,
+        fixedChannelNormalize: WhiteBalanceCorrection? = nil,
         onStageChange: ((PreviewStage?) -> Void)? = nil
     ) -> MTLTexture {
         let w = input.width
@@ -227,7 +237,7 @@ final class Pipeline {
         // correction collapses to identity (all three channels share the
         // same statistics) so this is a no-op there.
         if toneCurve.autoWB {
-            let wb = computeAutoWB(input: current)
+            let wb = fixedWB ?? computeAutoWB(input: current)
             if wb != .identity {
                 let result = borrow(width: w, height: h, format: input.pixelFormat)
                 borrowed.append(result)
@@ -256,7 +266,7 @@ final class Pipeline {
         // computeChannelNormalize bails to identity when the
         // per-channel p99 spread is already ≤ 30%.
         if toneCurve.channelNormalize {
-            let cn = computeChannelNormalize(input: current)
+            let cn = fixedChannelNormalize ?? computeChannelNormalize(input: current)
             if cn != .identity {
                 let result = borrow(width: w, height: h, format: input.pixelFormat)
                 borrowed.append(result)
@@ -895,6 +905,20 @@ final class Pipeline {
     /// math. Cost is dominated by the sync GPU→CPU readback (~1 ms on the
     /// downsampled buffer); cheap enough to do on every Pipeline.process
     /// call, which the live preview triggers on every frame change.
+    /// Public reference-frame WB measurement for multi-frame export.
+    /// Returns the gray-world correction the live preview would compute
+    /// for this frame, so the exporter can freeze it and apply the SAME
+    /// correction to every output frame (frame-stable, no strobe).
+    func referenceAutoWB(for input: MTLTexture) -> WhiteBalanceCorrection {
+        computeAutoWB(input: input)
+    }
+
+    /// Public reference-frame channel-normalize measurement — same
+    /// freeze-once intent as `referenceAutoWB`.
+    func referenceChannelNormalize(for input: MTLTexture) -> WhiteBalanceCorrection {
+        computeChannelNormalize(input: input)
+    }
+
     private func computeAutoWB(input: MTLTexture) -> WhiteBalanceCorrection {
         guard let planes = readDownsampledRGBPlanes(input: input) else { return .identity }
         return WhiteBalance.computeGrayWorld(

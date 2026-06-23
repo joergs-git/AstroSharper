@@ -5,6 +5,25 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-06-23
+
+### Fixed
+- **OSC colour settings ignored on video export** — bake-in stripped the
+  per-frame auto-colour steps (Auto White Balance, channel-normalize) to
+  avoid strobing across frames, which silently dropped the white balance
+  the live preview applies. OSC exports came out with the raw blue cast
+  (mono was unaffected because gray-world collapses to identity on a single
+  channel). The corrections are now **measured once from a reference frame
+  and frozen across the whole clip** — frame-stable *and* faithful to the
+  preview. Purple-fringe (per-pixel, frame-stable) is no longer stripped.
+- **Colour chaos when scrubbing OSC captures** — both low-res scrub
+  decoders (the on-demand `SerScrubLowResCache` used during an active drag
+  and the opt-in `ScrubProxyAtlas`) sampled 16-bit Bayer data with 8-bit
+  byte indexing, reading misaligned bytes and rendering a corrupt mosaic
+  while moving (it only resolved once the drag stopped and the full GPU
+  loader redrew). Both now sample 16-bit OSC frames correctly; the proxy
+  format version bumped so stale (corrupt) caches rebuild.
+
 ## [0.5.5] - 2026-06-23
 
 ### Fixed

@@ -154,7 +154,12 @@ final class SerScrubLowResCache {
         // preview, the user gets the full-res frame on release).
         var rgba = [UInt8](repeating: 0, count: dstW * dstH * 4)
         let isBayer = h.colorID.isBayer
-        let mono16 = !isBayer && h.bytesPerPlane == 2 && !h.colorID.isRGB
+        // 16-bit sampling must cover BOTH mono and Bayer. The old `mono16`
+        // flag excluded Bayer, so a 16-bit OSC SER (the common case) read
+        // its 16-bit buffer with 8-bit byte indexing while actively
+        // scrubbing → undebayered colour chaos that only resolved once
+        // the drag stopped and the full GPU loader redrew the frame.
+        let is16 = h.bytesPerPlane == 2 && !h.colorID.isRGB
 
         let bayerOffsets: (rx: Int, ry: Int) = {
             switch h.colorID {
@@ -171,7 +176,7 @@ final class SerScrubLowResCache {
                 let xi = min(srcW - 1, max(0, x))
                 let yi = min(srcH - 1, max(0, y))
                 let idx = yi * srcW + xi
-                if mono16 {
+                if is16 {
                     let p16 = ptr.advanced(by: idx * 2).withMemoryRebound(to: UInt16.self, capacity: 1) { $0.pointee }
                     return UInt8(min(UInt32(p16) >> 8, 255))
                 }

@@ -71,29 +71,34 @@ enum BakeInExporter {
         private let lut: MTLTexture?
         private let device: MTLDevice
 
+        /// Frozen colour corrections measured ONCE from the first frame
+        /// processed (see `processedFrame`). nil until then. Applied to
+        /// every subsequent frame so the whole video shares one WB /
+        /// channel-normalize correction — the thing the live preview
+        /// shows — without the per-frame strobing that measuring each
+        /// frame independently would cause.
+        private var frozenWB: WhiteBalanceCorrection?
+        private var frozenChannelNormalize: WhiteBalanceCorrection?
+        private var colourFrozen = false
+
         init(options: Options) {
-            // Strip per-frame auto-color decisions for video bake-in.
+            // Auto-WB and channel-normalize stay ENABLED for bake-in, but
+            // are frozen to a single reference-frame measurement (see
+            // `frozenWB` / `processedFrame`). Earlier this code stripped
+            // them outright to avoid per-frame strobing on multi-frame
+            // GIF / MP4 export — but that dropped the white balance the
+            // user sees in the live preview, so OSC exports came out with
+            // the raw blue cast (mono was unaffected because gray-world
+            // collapses to identity on a single channel). Freezing the
+            // correction keeps it frame-stable AND faithful to the preview.
             //
-            // auto-WB, channel-normalize, chromatic alignment and
-            // purple-fringe all compute their corrections from the
-            // CURRENT frame's statistics. On a single still image
-            // that's what the user wants. On a 60-frame GIF the
-            // per-frame measurements drift across frames (noise,
-            // seeing, drifting subject geometry), so every frame
-            // gets a slightly different correction → output strobes
-            // as the playback walks through them. The user just
-            // reported exactly this on an OSC GIF (autoWB +
-            // channelNormalize default-ON via OscDefaults).
-            //
-            // Manual Coloring curves stay live — those are pure per-
-            // pixel LUTs, frame-stable by construction. The user's
-            // Tone curve + B/C + Sat also stay live for the same
-            // reason.
+            // Chromatic alignment is left OFF: it's a per-frame phase-
+            // correlation geometry shift, so freezing it is a separate
+            // change and it's near-identity on lunar/planetary subjects.
+            // Manual Coloring curves, Tone curve, B/C, Sat and purple-
+            // fringe are all per-pixel (frame-stable) and stay live.
             var stableTone = options.toneCurve
-            stableTone.autoWB = false
-            stableTone.channelNormalize = false
             stableTone.chromaticAlignment = false
-            stableTone.reducePurpleFringe = false
             self.options = Options(
                 sharpen: options.sharpen,
                 toneCurve: stableTone,
@@ -132,14 +137,32 @@ enum BakeInExporter {
             let inputTex = try SerFrameLoader.loadFrame(
                 url: sourceURL, frameIndex: frameIndex, device: device
             )
-            // 2) Run the live Sharpen + Tone + Coloring pipeline.
+            // 1b) Freeze the colour corrections on the FIRST frame we
+            //     process and reuse them for every later frame. This is
+            //     what keeps the whole video on one white balance (the
+            //     preview's) instead of either strobing per-frame or
+            //     dropping WB entirely. Measured on the raw demosaiced
+            //     frame, exactly where the pipeline would measure it.
+            if !colourFrozen {
+                if options.toneCurve.autoWB {
+                    frozenWB = pipeline.referenceAutoWB(for: inputTex)
+                }
+                if options.toneCurve.channelNormalize {
+                    frozenChannelNormalize = pipeline.referenceChannelNormalize(for: inputTex)
+                }
+                colourFrozen = true
+            }
+            // 2) Run the live Sharpen + Tone + Coloring pipeline with the
+            //    frozen (frame-stable) colour corrections.
             let outTex = pipeline.process(
                 input: inputTex,
                 sharpen: options.sharpen,
                 toneCurve: options.toneCurve,
                 toneCurveLUT: lut,
                 coloring: options.coloring,
-                preview: false
+                preview: false,
+                fixedWB: frozenWB,
+                fixedChannelNormalize: frozenChannelNormalize
             )
             // 3) Determine crop window (source pixels). The processed
             //    texture has the same width × height as the source.
