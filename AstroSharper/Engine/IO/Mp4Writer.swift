@@ -144,10 +144,26 @@ enum Mp4Writer {
         // for noisy planetary content; floor at 2 Mbps so tiny crops
         // don't end up macroblocky.
         let bitrate = max(2_000_000, outW * outH * 8)
+        // Colour tagging — MUST be set, otherwise the H.264 stream is
+        // written with UNSPECIFIED primaries / transfer / matrix. An
+        // untagged stream forces every player (AVPlayer included) to
+        // guess: it assumes a YCbCr matrix and video-range that don't
+        // match what the encoder actually used, which lifts + tints the
+        // near-black floor. For OSC Bayer Moon footage that surfaced as
+        // a strong blue cast on the (correctly black) background even
+        // though the baked pixels were right. Tagging the stream BT.709
+        // (identical primaries to the sRGB preview, D65) makes the
+        // encode/decode matrix agree, so black stays black and the file
+        // matches the in-window preview.
         let outputSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: outW,
             AVVideoHeightKey: outH,
+            AVVideoColorPropertiesKey: [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+            ],
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: bitrate,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,

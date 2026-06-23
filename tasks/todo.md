@@ -2,6 +2,28 @@
 
 A running record of where we are, what's done, and what's next. Update at the end of every session.
 
+## FIXED [2026-06-23] — OSC Bayer SER: blue cast on VIDEO (mp4) export
+
+Reported with screenshot (v0.5.4). For OSC Bayer Moon footage the in-window preview was correct
+(neutral grey Moon, black background, Sharpen + Tone/Colour applied) but the exported **video**
+showed a strong **blue cast** on the should-be-black background — looked like settings weren't
+applied.
+
+Root cause was NOT the pipeline: `Mp4Writer` bakes in the identical `Pipeline.process()` the
+preview uses, so the pixel values were already correct. The bug was that the H.264 stream was
+written with **no colour tags** — `outputSettings` had no `AVVideoColorPropertiesKey`. An
+untagged stream forces AVPlayer (and every player) to guess the YCbCr matrix + range, which
+lifts and tints the near-black floor → blue cast. The app's Export Preview window plays the mp4
+via `AVPlayerView`, so the cast was visible right there.
+
+- [x] Diverging point found: `Mp4Writer.write` outputSettings missing colour tags
+      (`AstroSharper/Engine/IO/Mp4Writer.swift:147`).
+- [x] Tag the stream BT.709 (primaries / transfer / matrix) — same primaries as the sRGB
+      preview (D65), so encode/decode matrix agrees and black stays black.
+- [x] Build green (xcodebuild arm64, BUILD SUCCEEDED).
+- [ ] User-eye verify: re-export the reported OSC Moon SER → mp4, confirm black background,
+      Export Preview == in-window preview. (Pending a real export run.)
+
 ## DONE [2026-06-14] — Coverage-map crop for jumpy recordings (shipped in v0.5.2)
 
 Problem: `cropToCommonArea` crops by `2 × max(|shift|)` symmetrically → ONE jump frame

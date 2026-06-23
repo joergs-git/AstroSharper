@@ -5,6 +5,18 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-06-23
+
+### Fixed
+- **Blue cast on exported video** — MP4/H.264 export wrote the stream with
+  no colour tags, so players had to guess the YCbCr matrix and range. The
+  mismatch lifted and tinted the near-black floor, producing a strong blue
+  cast on the should-be-black background (most visible on OSC Bayer Moon
+  footage) even though the baked pixels were already correct. The stream is
+  now tagged BT.709 (primaries / transfer / matrix) — identical primaries
+  and D65 white point to the sRGB preview — so the exported video matches
+  the in-window look and black stays black.
+
 ## [0.5.4] - 2026-06-17
 
 ### Fixed
