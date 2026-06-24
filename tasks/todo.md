@@ -2,6 +2,13 @@
 
 A running record of where we are, what's done, and what's next. Update at the end of every session.
 
+## TODO [next session] — `P` key = pause/play toggle for video playback
+
+Add a keyboard shortcut: pressing **`P`** toggles pause/play during video (mp4/mov)
+playback. Wire it into the transport / playback controls (TransportBar / Mp4PlayerView /
+preview playback). Low-effort UX win — check the existing key-event handling
+(`ZoomableMTKView` / preview key handlers) for where to hook it.
+
 ## FIXED [2026-06-23] (round 2, v0.5.6) — OSC export WB + scrub colour chaos
 
 The v0.5.5 BT.709 tagging was real but NOT the OSC root cause. Two deeper OSC-only bugs found:
