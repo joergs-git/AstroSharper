@@ -48,6 +48,7 @@ struct SerScrubBar: View {
             .buttonStyle(.plain)
             .disabled(!usable || app.previewSerFrameIndex <= 0)
             .keyboardShortcut(.leftArrow, modifiers: [])
+            .help("Step exactly one frame back (Left Arrow)")
 
             // Custom drag-gesture scrubber instead of SwiftUI `Slider`.
             // A SwiftUI Slider wraps NSSlider, whose drag runs a modal

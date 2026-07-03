@@ -38,12 +38,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
+
+    /// Finder "Open With… → AstroSharper", double-click on an associated
+    /// file, or a drag onto the Dock icon all land here. Handling the open
+    /// at the delegate level is deliberate and fixes two bugs at once:
+    ///
+    ///  1. **Cold launch ignored the file.** With no open handler at all,
+    ///     right-click → Open in AstroSharper launched the app but never
+    ///     read the file — the user saw an empty catalog.
+    ///  2. **Warm launch spawned a phantom second window.** With the app
+    ///     already running, the `WindowGroup` reacted to the incoming URL
+    ///     by opening a *new* window bound to the SAME `AppModel.shared`.
+    ///     Both windows' scrub bars then moved together, and closing one
+    ///     tore down the shared Metal preview state twice — a hard crash.
+    ///
+    /// Consuming the event here (rather than via `.onOpenURL`) claims it
+    /// before AppKit's default "make a new scene window" behaviour runs,
+    /// so exactly one window ever exists and it always receives the file.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        // Route everything into the single running model. `openMixed`
+        // already expands folders, filters to supported types, sets the
+        // preview + selection and wires the output folder — the same path
+        // the in-app Open panel uses, so opened files behave identically.
+        AppModel.shared.openMixed(urls: urls)
+
+        // Bring the existing main window forward (the app may have been in
+        // the background or hidden when the file was opened). Prefer a real
+        // document window over an auxiliary tool window (Howto / Community /
+        // Export) so we never surface a helper panel by mistake.
+        if let main = NSApp.windows.first(where: { $0.canBecomeMain && $0.isVisible })
+                    ?? NSApp.windows.first(where: { $0.canBecomeMain }) {
+            main.makeKeyAndOrderFront(nil)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
 }
 
 @main
 struct AstroSharperApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var appModel = AppModel()
+    // Bind to the single process-wide model so the AppDelegate's
+    // file-open handler and this scene operate on the SAME instance.
+    @StateObject private var appModel = AppModel.shared
     @StateObject private var launchTracker = LaunchTracker.shared
     @State private var showingAbout = false
     @State private var showingSplash = false
@@ -60,7 +96,15 @@ struct AstroSharperApp: App {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        WindowGroup {
+        // A single, unique `Window` — NOT a `WindowGroup`. AstroSharper is a
+        // one-main-window utility, and `WindowGroup` is inherently
+        // multi-window: a Finder "Open With…" file event makes it spawn a
+        // *second* window bound to the same `AppModel.shared`, so both
+        // windows' scrub bars moved in lock-step and closing one tore down
+        // the shared Metal preview twice → crash. `Window` can never
+        // duplicate, so exactly one main window ever exists; the incoming
+        // file is loaded into it by `AppDelegate.application(_:open:)`.
+        Window("AstroSharper", id: "main") {
             // Wrapped in a dedicated View so each modifier chain
             // (sheets, alerts, observers) gets its own type-check
             // budget. Inlining everything in this WindowGroup body

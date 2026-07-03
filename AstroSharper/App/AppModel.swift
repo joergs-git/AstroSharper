@@ -23,6 +23,15 @@ struct CatalogSectionState {
 
 @MainActor
 final class AppModel: ObservableObject {
+    /// The single, process-wide model. AstroSharper is a one-main-window
+    /// utility: every window shares this instance. It exists so the
+    /// `AppDelegate` can route Finder "Open With…" file opens into the
+    /// already-running model (see `application(_:open:)`) instead of the
+    /// `WindowGroup` spawning a *second* window bound to the same model —
+    /// which made both windows' scrub bars move together and crashed on
+    /// close when the shared Metal preview state was torn down twice.
+    static let shared = AppModel()
+
     // Live mirror — always reflects the currently displayed section. The
     // inactive section's state is parked in `stash`. switchToSection() swaps
     // them. This keeps the existing view bindings (`$app.catalog`, etc.)
