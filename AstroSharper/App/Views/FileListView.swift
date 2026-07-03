@@ -197,6 +197,16 @@ struct FileListView: View {
                             .font(.system(size: 10))
                             .help("Still uploading / writing to disk. Wait for the size to stop growing before stacking.")
                     }
+                    // Transit badge — a detected, moving ISS / aircraft
+                    // crossing was measured in this SER. Purple to match the
+                    // trim / export accents; the tooltip surfaces the frame
+                    // range + separation so the user can triage at a glance.
+                    if file.hasDetectedTransit, let t = file.transit {
+                        Image(systemName: "airplane")
+                            .foregroundColor(.purple)
+                            .font(.system(size: 10))
+                            .help(transitTooltip(t))
+                    }
                     Text(file.name).font(.system(size: 12))
                         .foregroundColor(file.isUploading ? .secondary : .primary)
                 }
@@ -396,6 +406,27 @@ struct FileListView: View {
         case .error(let msg):
             Label(msg, systemImage: "exclamationmark.triangle.fill").foregroundColor(.red)
         }
+    }
+
+    /// Human tooltip for the transit badge: frame range, speed, separation and
+    /// (Sun/Moon) the angular separation when a plate scale was available.
+    private func transitTooltip(_ t: TransitResult) -> String {
+        guard let e = t.transits.first(where: { $0.moving }) ?? t.transits.first else {
+            return "Transit detected."
+        }
+        var parts: [String] = []
+        let n = t.transits.filter { $0.moving }.count
+        parts.append(n > 1 ? "\(n) transits detected" : "Transit detected")
+        if e.activeFrames.count >= 2 {
+            parts.append("frames \(e.activeFrames[0])–\(e.activeFrames[1])")
+        }
+        if let s = e.speedPxPerFrame { parts.append("\(s) px/frame") }
+        if let deg = e.separationDeg {
+            parts.append(String(format: "%.3f° from centre", deg))
+        } else {
+            parts.append("\(e.separationPx) px from target")
+        }
+        return parts.joined(separator: " · ") + ". Export marks set to the transit."
     }
 
     private static func sizeString(_ bytes: Int64) -> String {

@@ -51,6 +51,16 @@ struct FileEntry: Identifiable, Hashable {
     var pixelWidth: Int? = nil
     var pixelHeight: Int? = nil
 
+    /// Cached transit-detector verdict (ISS / aircraft crossing). nil until a
+    /// detection scan runs (opt-in, expensive — reads the whole SER) or a
+    /// cache hit populates it in the background. Drives the transit icon in the
+    /// file list and the auto-set export trim marks. See [[TransitDetector]].
+    var transit: TransitResult? = nil
+
+    /// True when a measured, time-contiguous moving transit was found — the
+    /// gate for the filename icon and auto-trim.
+    var hasDetectedTransit: Bool { transit?.hasMovingTransit ?? false }
+
     /// Lower-cased file extension, exposed for table-column sorting so a
     /// mixed bag of .ser / .tif / .png groups by type when the user clicks
     /// the column header.

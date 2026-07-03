@@ -875,6 +875,12 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
                     let last = max(0, realCount - 1)
                     app.serTrimStart = pair.0.map { max(0, min(last, $0)) }
                     app.serTrimEnd = pair.1.map { max(0, min(last, $0)) }
+                } else if let range = app.transitTrimRange(for: url, lastFrame: realCount - 1) {
+                    // Auto-set export marks to a detected transit — but only
+                    // when the user hasn't already placed a manual trim on this
+                    // SER (no remembered pair above). Never clobbers manual.
+                    app.serTrimStart = range.0
+                    app.serTrimEnd = range.1
                 } else {
                     app.serTrimStart = nil
                     app.serTrimEnd = nil

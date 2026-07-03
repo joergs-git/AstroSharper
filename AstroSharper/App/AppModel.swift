@@ -478,6 +478,10 @@ final class AppModel: ObservableObject {
     /// file. The HUD swaps the button for a spinner when set.
     @Published var isCalculatingVideoQuality: Bool = false
 
+    /// True while a transit-detection scan is running for the active file.
+    /// Drives the spinner on the Detect-Transit button in the scrub bar.
+    @Published var isDetectingTransit: Bool = false
+
     /// True while the live-preview pipeline is processing the most recent
     /// slider / setting change. Drives the top-right ProgressView overlay
     /// on PreviewView so the user knows their change is being applied —
@@ -2774,6 +2778,17 @@ final class AppModel: ObservableObject {
                 // the user explicitly opts in via the
                 // "Calculate Video Quality" button (or a future static-
                 // image equivalent).
+                // Transit verdict — cache hits only, same opt-in contract as
+                // sharpness: a full detection reads the whole SER, so it never
+                // runs here. A cached result lights up the file-list icon
+                // automatically on re-open.
+                if let cachedTransit = await TransitCache.shared.lookup(url: url) {
+                    await MainActor.run {
+                        guard let self, let idx = self.catalog.index(of: id) else { return }
+                        self.catalog.files[idx].transit = cachedTransit
+                    }
+                }
+
                 guard !isFrameSeq else { return }
                 if let cached = await QualityCache.shared.lookup(url: url),
                    let s = cached.sharpness {
@@ -2792,6 +2807,54 @@ final class AppModel: ObservableObject {
     /// flow. Persists between calls so the previous scan can be cancelled
     /// before a new one starts.
     private let videoQualityScanner = SerQualityScanner()
+
+    // MARK: - Transit detection
+
+    /// Scanner for the opt-in transit detection (ISS / aircraft crossing).
+    private let transitScanner = SerTransitScanner()
+
+    /// The auto-trim frame range for a SER, if a moving transit was detected
+    /// for it (via a prior scan / cache hit). Returned clamped to the readable
+    /// range so PreviewView can set the export marks directly. nil when no
+    /// moving transit is known for the file. See [[TransitDetector]].
+    func transitTrimRange(for url: URL, lastFrame: Int) -> (Int, Int)? {
+        guard let entry = catalog.files.first(where: { $0.url == url }),
+              let range = entry.transit?.trimFrameRange else { return nil }
+        let hi = max(0, lastFrame)
+        return (max(0, min(hi, range.0)), max(0, min(hi, range.1)))
+    }
+
+    /// Run (or re-run) transit detection for the currently-previewed SER. This
+    /// is the opt-in entry point behind the scrub-bar button — a detection
+    /// reads the whole multi-GB file, so it never runs automatically. On a
+    /// re-detect the cached verdict is dropped first so a fresh scan runs.
+    /// When a moving transit is found it auto-sets the export trim marks to the
+    /// transit's frame range (explicit user action, so it applies even over an
+    /// existing trim — that's the "redo and detect" case the user asked for).
+    func detectTransitForCurrentFile(reDetect: Bool = false) {
+        guard let id = previewFileID,
+              let entry = catalog.files.first(where: { $0.id == id }),
+              entry.isSER else { return }
+        let url = entry.url
+        if reDetect { TransitCache.shared.clear(url: url) }
+        isDetectingTransit = true
+        transitScanner.scan(url: url) { [weak self] result in
+            guard let self else { return }
+            self.isDetectingTransit = false
+            guard let result else { return }
+            TransitCache.shared.store(url: url, result: result)
+            if let idx = self.catalog.index(of: id) {
+                self.catalog.files[idx].transit = result
+            }
+            // Apply the detected trim to the still-current preview file.
+            guard self.previewFileID == id,
+                  let range = result.trimFrameRange else { return }
+            let last = max(0, self.previewSerFrameCount - 1)
+            self.serTrimStart = max(0, min(last, range.0))
+            self.serTrimEnd = max(0, min(last, range.1))
+            self.rememberedSerTrimRanges[url] = (self.serTrimStart, self.serTrimEnd)
+        }
+    }
 
     /// Trigger a SER quality scan for the currently-previewed file. Result
     /// lands on `previewStats.distribution` and is persisted to disk so the

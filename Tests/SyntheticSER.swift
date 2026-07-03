@@ -84,6 +84,35 @@ enum SyntheticSER {
         try data.write(to: url)
         return url
     }
+
+    /// Build a mono8 SER from explicit per-frame pixel buffers (row-major,
+    /// `width*height` bytes each). Used by the transit-detector tests to inject
+    /// a moving blob / dark silhouette at exact positions.
+    static func writeMono8(width: Int, height: Int, frames: [[UInt8]]) throws -> URL {
+        var data = Data()
+        data.append("LUCAM-RECORDER".data(using: .ascii)!)   // 14 bytes
+        data.appendLE(Int32(0))                 // luID
+        data.appendLE(Int32(0))                 // colorID = mono
+        data.appendLE(Int32(0))                 // little-endian
+        data.appendLE(Int32(width))
+        data.appendLE(Int32(height))
+        data.appendLE(Int32(8))                 // 8-bit
+        data.appendLE(Int32(frames.count))
+        data.appendFixedAscii("", length: 40)   // observer
+        data.appendFixedAscii("", length: 40)   // instrument
+        data.appendFixedAscii("", length: 40)   // telescope
+        data.appendLE(Int64(0))                 // dateTime
+        data.appendLE(Int64(0))                 // dateTimeUTC
+        precondition(data.count == 178)
+        for f in frames {
+            precondition(f.count == width * height, "frame must be width*height bytes")
+            data.append(contentsOf: f)
+        }
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("astrosharper-transit-\(UUID().uuidString).ser")
+        try data.write(to: url)
+        return url
+    }
 }
 
 private extension Data {

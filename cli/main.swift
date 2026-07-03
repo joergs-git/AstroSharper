@@ -41,6 +41,9 @@ case "stack":
 case "validate":
     exitCode = await Validate.run(args: subargs)
 
+case "transit":
+    exitCode = Transit.run(args: subargs)
+
 case "version", "--version", "-v":
     print("astrosharper \(CLIInfo.version) — \(CLIInfo.gitDescription)")
     exitCode = 0
