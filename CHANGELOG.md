@@ -5,6 +5,30 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-03
+
+### Added
+- **"Other" target preset** — the *Other* chip now applies a neutral catch-all
+  preset (light sharpen, Lightspeed, no multi-AP) for star fields / ISS /
+  aircraft / comets. Previously clicking *Other* did nothing.
+
+### Changed
+- **Transit scan is much faster on the compute side** — the per-pixel median
+  and binning now run across all cores (a 20 s step dropped to ~4 s). Note: for
+  captures on a network (SMB/NAS) share, the scan time is dominated by reading
+  the multi-GB file over the network (~110 MB/s on gigabit), which no code can
+  speed up — work from a local copy or a faster link for the quickest scans.
+- **Non-moving transit detections are now shown** — a single-frame object (e.g.
+  a one-frame ISS flare) shows an orange flash badge (vs the purple airplane for
+  a moving track) and jumps the scrubber to its frame, instead of appearing as
+  "nothing detected". Detection also rejects long drift / limb-shimmer tracks
+  that aren't real transits.
+
+### Fixed
+- **Pinch / scroll zoom stays anchored to the cursor** at every zoom level. The
+  zoom math now matches the display shader's per-axis fit exactly, so the image
+  no longer slides out from under the pointer as you zoom in.
+
 ## [0.6.0] - 2026-07-03
 
 ### Added
