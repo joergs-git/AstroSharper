@@ -2,7 +2,7 @@
 
 A running record of where we are, what's done, and what's next. Update at the end of every session.
 
-## IN PROGRESS [2026-07-03] — SER Transit Detector (branch `feature/ser-transit-detector`)
+## SHIPPED [2026-07-03] — SER Transit Detector (v0.6.0, merged to main + notarized release)
 
 Native Swift port of the validated Python `ser_transit.py`. Detects ISS / aircraft
 transits in SharpCap .ser captures, measures them, shows an icon next to the
