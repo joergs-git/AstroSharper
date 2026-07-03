@@ -33,6 +33,7 @@ Already have stacked images (TIFF / PNG / JPEG)? Skip Lucky Stack entirely and u
 - **Folder watch + auto-stack** — point it at your SharpCap / FireCapture capture folder and walk away; each new SER is stacked the moment its capture finishes writing. NAS-safe (polling re-scan, size-stability gating).
 - **Stacking & alignment** — Lightspeed / Scientific modes, disc-centroid & ROI stabilization, per-channel stacking for OSC cameras, drizzle 1.5×/2×/3×, opt-in drift correction. → [Stabilization](https://github.com/joergs-git/AstroSharper/wiki/Stabilization)
 - **Quality intelligence** — per-frame sharpness HUD, one-click video-quality scan with a keep-% recommendation, on-disk quality cache. → [Preview HUD & Quality](https://github.com/joergs-git/AstroSharper/wiki/Preview-HUD-and-Quality)
+- **Transit detector** — one click scans a SER for a satellite / ISS / aircraft transit, decides if one really crossed, and measures it (frames, entry/exit, speed, straightness, separation — in degrees on the Sun/Moon). A badge marks the file and the export trim marks jump to the exact crossing. Star-field, Sun and Moon captures; handles two objects in one video. Opt-in per click, cached; also headless via `astrosharper transit`.
 
 ## Quick workflow
 

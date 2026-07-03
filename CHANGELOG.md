@@ -5,6 +5,30 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-03
+
+### Added
+- **SER transit detector** — a new one-click tool (airplane button in the SER
+  scrub bar) that scans a whole capture for a satellite / ISS / aircraft
+  transit, decides whether one actually occurred, and measures it (active
+  frame range, entry/exit point, speed, straight-line R², and separation from
+  the target — in degrees on the Sun/Moon). When a moving transit is found a
+  badge appears next to the filename and the export trim marks jump to the
+  exact frames, so you can save just the crossing. It handles star-field
+  captures (bright object crossing a star like Vega), Sun and Moon captures
+  (dark silhouette on the bright disc), the rare two-objects-in-one-video case,
+  and Barlow / partial-disc framings. Native Swift (Accelerate/vDSP) — no
+  Python, no OpenCV. Runs only when you click; results are cached so re-opening
+  a folder lights up known transits instantly without re-scanning. Also
+  available headless via `astrosharper transit <file.ser> --json`.
+
+### Fixed
+- **Right-click "Open in AstroSharper" now reads the file, and no longer
+  crashes on close** — opening a `.ser` from Finder while the app was already
+  running spawned a second window bound to the same document; scrubbing moved
+  both windows in lock-step and closing one could take the session down. The
+  app is now a single, unique window and routes opened files into it.
+
 ## [0.5.6] - 2026-06-23
 
 ### Fixed
