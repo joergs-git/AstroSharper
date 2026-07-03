@@ -57,14 +57,22 @@ enum TransitDetector {
         guard let reader = try? SerReader(url: url) else { throw TransitDetectorError.cannotOpen(url) }
         let b = config.bin ?? autoBin(width: reader.header.imageWidth)
 
+        let clock = Date()
+        func lap(_ label: String) {
+            guard config.debug else { return }
+            FileHandle.standardError.write("[transit] \(label): \(String(format: "%.1f", Date().timeIntervalSince(clock)))s\n".data(using: .utf8)!)
+        }
+
         // 1–2. Read + block-mean bin every frame into a float stack (F, H, W).
         let stk = try loadBinnedStack(reader: reader, bin: b)
         let F = stk.F, H = stk.H, W = stk.W, P = H * W
         guard F > 0, P > 0 else { throw TransitDetectorError.emptyStack }
+        lap("load+bin")
 
         // 3. Background = per-pixel temporal median (removes the tracked target,
         //    static stars/hot pixels; on the Sun it removes the disc itself).
         let bg = perPixelMedian(stack: stk.buf, F: F, P: P, samples: config.medianSamples)
+        lap("median")
 
         // 4. Mode detect from the background disc coverage.
         var bgMax: Float = 0
@@ -93,6 +101,7 @@ enum TransitDetector {
         let pstd = perPixelStd(stack: stk.buf, F: F, P: P)
         var inv = [Float](repeating: 0, count: P)
         for p in 0..<P where pstd[p] > 1e-3 { inv[p] = 1.0 / pstd[p] }
+        lap("std")
 
         // Target the separation is measured from.
         let target: (x: Double, y: Double)
@@ -191,42 +200,78 @@ enum TransitDetector {
         let littleEndian = h.isLittleEndian
 
         var buf = [Float](repeating: 0, count: F * P)
-        var frameF = [Float](repeating: 0, count: H0 * W0)   // one frame as Float
-        var rowAcc = [Float](repeating: 0, count: W)          // b summed rows
-        var divisor = Float(b * b)
+        let bpf = h.bytesPerFrame
+
+        // I/O dominates: reading the multi-GB frame region via SerReader's
+        // memory map (opened `.uncached`) faults 16 KB pages one at a time with
+        // no readahead — measured ~70 MB/s on the same drive that streams
+        // sequentially at ~460 MB/s. So read the frames SEQUENTIALLY through a
+        // FileHandle (OS readahead kicks in), a core-sized batch at a time, and
+        // bin that batch in PARALLEL — one frame per worker, each with its own
+        // scratch (no shared mutable state). This overlaps the block-mean
+        // compute with the next batch's read and turns a ~1-minute scan into
+        // seconds. Falls back to the mmap path if the handle can't open.
+        let cores = max(1, min(ProcessInfo.processInfo.activeProcessorCount, 8))
+        let handle = try? FileHandle(forReadingFrom: reader.url)
+        if let handle { try? handle.seek(toOffset: 178) }
+        defer { try? handle?.close() }
+
+        // Per-worker scratch as raw pointers, allocated once. Worker w always
+        // uses slot w and at most `cores` run at once, so the buffers never
+        // alias. Using an array of POINTERS (only read concurrently) rather
+        // than [[Float]] avoids a data race — concurrent
+        // `array[w].withUnsafeMutableBufferPointer` would invoke Array's modify
+        // accessor on the shared array from multiple threads.
+        let frameScratch = (0..<cores).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: H0 * W0) }
+        let rowScratch = (0..<cores).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: W) }
+        defer {
+            frameScratch.forEach { $0.deallocate() }
+            rowScratch.forEach { $0.deallocate() }
+        }
 
         buf.withUnsafeMutableBufferPointer { outAll in
-            frameF.withUnsafeMutableBufferPointer { fF in
-                rowAcc.withUnsafeMutableBufferPointer { rAcc in
-                    for t in 0..<F {
-                        guard reader.canReadFrame(at: t) else { continue }
-                        reader.withFrameBytes(at: t) { ptr, _ in
-                            // Convert the frame to Float luminance (W0×H0).
-                            convertToFloat(ptr: ptr, out: fF.baseAddress!, count: H0 * W0,
-                                           is16: is16, littleEndian: littleEndian,
-                                           planes: planes)
-                        }
-                        let outFrame = outAll.baseAddress! + t * P
-                        for by in 0..<hb {
-                            // Vertical: sum b rows into rowAcc (length W).
-                            let r0 = (by * b) * W0
-                            vDSP_vclr(rAcc.baseAddress!, 1, vDSP_Length(W))
-                            for dy in 0..<b {
-                                vDSP_vadd(rAcc.baseAddress!, 1,
-                                          fF.baseAddress! + r0 + dy * W0, 1,
-                                          rAcc.baseAddress!, 1, vDSP_Length(W))
-                            }
-                            // Horizontal: sum b strided columns into the output row.
-                            let outRow = outFrame + by * wb
-                            vDSP_vclr(outRow, 1, vDSP_Length(wb))
-                            for dx in 0..<b {
-                                vDSP_vadd(outRow, 1, rAcc.baseAddress! + dx, vDSP_Stride(b),
-                                          outRow, 1, vDSP_Length(wb))
-                            }
-                        }
-                        // Divide the whole binned frame by b*b → block mean.
-                        vDSP_vsdiv(outFrame, 1, &divisor, outFrame, 1, vDSP_Length(P))
+            let outBase = outAll.baseAddress!
+
+            // Bin one already-in-memory raw frame into buf[frameIndex].
+            func binFrame(rawFrame: UnsafePointer<UInt8>, frameIndex: Int, worker: Int) {
+                var divisor = Float(b * b)
+                let fF = frameScratch[worker]
+                let rAcc = rowScratch[worker]
+                convertToFloat(ptr: rawFrame, out: fF, count: H0 * W0,
+                               is16: is16, littleEndian: littleEndian, planes: planes)
+                let outFrame = outBase + frameIndex * P
+                for by in 0..<hb {
+                    let r0 = (by * b) * W0
+                    vDSP_vclr(rAcc, 1, vDSP_Length(W))
+                    for dy in 0..<b {
+                        vDSP_vadd(rAcc, 1, fF + r0 + dy * W0, 1, rAcc, 1, vDSP_Length(W))
                     }
+                    let outRow = outFrame + by * wb
+                    vDSP_vclr(outRow, 1, vDSP_Length(wb))
+                    for dx in 0..<b {
+                        vDSP_vadd(outRow, 1, rAcc + dx, vDSP_Stride(b), outRow, 1, vDSP_Length(wb))
+                    }
+                }
+                vDSP_vsdiv(outFrame, 1, &divisor, outFrame, 1, vDSP_Length(P))
+            }
+
+            if let handle {
+                var t = 0
+                while t < F {
+                    let n = min(cores, F - t)
+                    guard let raw = try? handle.read(upToCount: n * bpf), raw.count == n * bpf else { break }
+                    raw.withUnsafeBytes { (rb: UnsafeRawBufferPointer) in
+                        let base = rb.baseAddress!.assumingMemoryBound(to: UInt8.self)
+                        DispatchQueue.concurrentPerform(iterations: n) { k in
+                            binFrame(rawFrame: base + k * bpf, frameIndex: t + k, worker: k)
+                        }
+                    }
+                    t += n
+                }
+            } else {
+                // Fallback: mmap path (serial), if the FileHandle wouldn't open.
+                for t in 0..<F where reader.canReadFrame(at: t) {
+                    reader.withFrameBytes(at: t) { ptr, _ in binFrame(rawFrame: ptr, frameIndex: t, worker: 0) }
                 }
             }
         }
@@ -277,17 +322,31 @@ enum TransitDetector {
     // MARK: - Background + noise
 
     /// Per-pixel temporal median from ~`samples` evenly-spaced frames.
+    /// Parallelized across pixel ranges — a per-pixel 60-element sort over a
+    /// few million pixels is ~20 s single-threaded; each worker sorts into its
+    /// OWN scratch and writes a disjoint slice of `bg`, so it drops to a couple
+    /// of seconds.
     static func perPixelMedian(stack: [Float], F: Int, P: Int, samples: Int) -> [Float] {
         let n = min(samples, F)
         var idx = [Int](repeating: 0, count: n)
         for k in 0..<n { idx[k] = F == 1 ? 0 : Int((Double(k) * Double(F - 1) / Double(max(1, n - 1))).rounded()) }
         var bg = [Float](repeating: 0, count: P)
-        var tmp = [Float](repeating: 0, count: n)
+        let cores = max(1, min(ProcessInfo.processInfo.activeProcessorCount, 8))
         stack.withUnsafeBufferPointer { s in
-            for p in 0..<P {
-                for k in 0..<n { tmp[k] = s[idx[k] * P + p] }
-                tmp.sort()
-                bg[p] = n % 2 == 1 ? tmp[n/2] : 0.5 * (tmp[n/2 - 1] + tmp[n/2])
+            bg.withUnsafeMutableBufferPointer { bgp in
+                idx.withUnsafeBufferPointer { idxp in
+                    DispatchQueue.concurrentPerform(iterations: cores) { chunk in
+                        let lo = chunk * P / cores
+                        let hi = (chunk + 1) * P / cores
+                        guard lo < hi else { return }
+                        var tmp = [Float](repeating: 0, count: n)
+                        for p in lo..<hi {
+                            for k in 0..<n { tmp[k] = s[idxp[k] * P + p] }
+                            tmp.sort()
+                            bgp[p] = n % 2 == 1 ? tmp[n/2] : 0.5 * (tmp[n/2 - 1] + tmp[n/2])
+                        }
+                    }
+                }
             }
         }
         return bg

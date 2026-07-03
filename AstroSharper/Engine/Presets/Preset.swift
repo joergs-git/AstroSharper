@@ -221,7 +221,31 @@ enum BuiltInPresets {
             saturnStandard(),
             saturnRings(),
             marsStandard(),
+            otherGeneral(),
         ]
+    }
+
+    /// Neutral catch-all preset for the "Other" target — anything without a
+    /// planetary disc: star fields, ISS / aircraft transits, comets, DSOs.
+    /// Without this the "Other" chip had no preset to apply and clicking it was
+    /// a silent no-op. Light sharpen, no multi-AP (there's no disc to place
+    /// apertures on), generous keep-%.
+    private static func otherGeneral() -> Preset {
+        var s = SharpenSettings()
+        s.enabled = true
+        s.unsharpEnabled = true
+        s.radius = 1.5
+        s.amount = 0.6
+        s.adaptive = false
+        s.waveletEnabled = false
+        return Preset(
+            name: "Other — General",
+            target: .other, notes: "Neutral catch-all for star fields, ISS / aircraft passes, comets and anything without a planetary disc. Light sharpen, no multi-AP.",
+            isBuiltIn: true,
+            sharpen: s,
+            luckyMode: .lightspeed, luckyKeepPercent: 50,
+            luckyMultiAPGrid: 0, luckyMultiAPPatchHalf: 16
+        )
     }
 
     // MARK: Sun

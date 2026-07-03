@@ -197,13 +197,14 @@ struct FileListView: View {
                             .font(.system(size: 10))
                             .help("Still uploading / writing to disk. Wait for the size to stop growing before stacking.")
                     }
-                    // Transit badge — a detected, moving ISS / aircraft
-                    // crossing was measured in this SER. Purple to match the
-                    // trim / export accents; the tooltip surfaces the frame
-                    // range + separation so the user can triage at a glance.
+                    // Transit badge — the detector found something in this SER.
+                    // A measured MOVING track shows a purple airplane (its
+                    // export marks are set); a single-frame blob (e.g. a one-
+                    // frame ISS flare) shows an orange flash. The tooltip
+                    // surfaces the frame range + separation for triage.
                     if file.hasDetectedTransit, let t = file.transit {
-                        Image(systemName: "airplane")
-                            .foregroundColor(.purple)
+                        Image(systemName: t.hasMovingTransit ? "airplane" : "sparkle")
+                            .foregroundColor(t.hasMovingTransit ? .purple : .orange)
                             .font(.system(size: 10))
                             .help(transitTooltip(t))
                     }
@@ -413,6 +414,13 @@ struct FileListView: View {
     private func transitTooltip(_ t: TransitResult) -> String {
         guard let e = t.transits.first(where: { $0.moving }) ?? t.transits.first else {
             return "Transit detected."
+        }
+        // Single-frame blob (no moving track): a flash, not a crossing.
+        if !e.moving {
+            let frame = e.activeFrames.first ?? 0
+            let sep = e.separationDeg.map { String(format: "%.3f° from centre", $0) }
+                ?? "\(e.separationPx) px from target"
+            return "Single-frame object at frame \(frame) · \(sep). Not a moving track — no export marks set."
         }
         var parts: [String] = []
         let n = t.transits.filter { $0.moving }.count

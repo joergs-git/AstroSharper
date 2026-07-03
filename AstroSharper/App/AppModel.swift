@@ -2846,13 +2846,19 @@ final class AppModel: ObservableObject {
             if let idx = self.catalog.index(of: id) {
                 self.catalog.files[idx].transit = result
             }
-            // Apply the detected trim to the still-current preview file.
-            guard self.previewFileID == id,
-                  let range = result.trimFrameRange else { return }
+            guard self.previewFileID == id else { return }
             let last = max(0, self.previewSerFrameCount - 1)
-            self.serTrimStart = max(0, min(last, range.0))
-            self.serTrimEnd = max(0, min(last, range.1))
-            self.rememberedSerTrimRanges[url] = (self.serTrimStart, self.serTrimEnd)
+            if let range = result.trimFrameRange {
+                // Moving transit → set export marks to the crossing.
+                self.serTrimStart = max(0, min(last, range.0))
+                self.serTrimEnd = max(0, min(last, range.1))
+                self.rememberedSerTrimRanges[url] = (self.serTrimStart, self.serTrimEnd)
+            } else if let blobFrame = result.primary?.activeFrames.first, !(result.primary?.moving ?? true) {
+                // Single-frame blob → no range to trim, but jump the scrubber to
+                // the frame so the user SEES the detected object (the icon alone
+                // isn't obvious feedback for a one-frame flare).
+                self.previewSerFrameIndex = max(0, min(last, blobFrame))
+            }
         }
     }
 

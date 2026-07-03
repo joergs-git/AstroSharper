@@ -57,9 +57,14 @@ struct FileEntry: Identifiable, Hashable {
     /// file list and the auto-set export trim marks. See [[TransitDetector]].
     var transit: TransitResult? = nil
 
-    /// True when a measured, time-contiguous moving transit was found — the
-    /// gate for the filename icon and auto-trim.
-    var hasDetectedTransit: Bool { transit?.hasMovingTransit ?? false }
+    /// True when the detector found ANYTHING worth flagging — a moving track OR
+    /// a single-frame blob (a one-frame ISS flare still matters to the user).
+    /// Gates the file-list badge. Auto-trim uses the stricter moving-only path.
+    var hasDetectedTransit: Bool { transit?.detected ?? false }
+
+    /// True only for a measured, time-contiguous moving transit — the gate for
+    /// auto-trim (a single blob has no range to trim).
+    var hasMovingTransit: Bool { transit?.hasMovingTransit ?? false }
 
     /// Lower-cased file extension, exposed for table-column sorting so a
     /// mixed bag of .ser / .tif / .png groups by type when the user clicks

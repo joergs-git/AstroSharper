@@ -1843,13 +1843,24 @@ final class ZoomableMTKView: MTKView {
 
     /// Fit-scale = how much the texture is scaled up/down to fit the view
     /// at zoomScale = 1. Matches the display shader's implicit fit.
-    private func fitScale() -> CGFloat {
-        guard let c = coordinator,
-              let texSize = c.texturePixelSize else { return 0 }
+    /// Per-axis aspect-fit scale, IDENTICAL to the display fragment shader's
+    /// `fitScale` (Shaders.metal): the axis that limits the fit stays 1.0 and
+    /// the other is compressed by the aspect ratio. Anchored zoom MUST use this
+    /// per-axis form — a single isotropic `min(...)` scalar makes the anchored
+    /// point drift on any image/view aspect mismatch, and the drift grows with
+    /// zoom (the bug the user hit: the image slides out from under the cursor).
+    private func fitScaleXY() -> (x: CGFloat, y: CGFloat) {
+        guard let c = coordinator, let texSize = c.texturePixelSize else { return (1, 1) }
         let view = drawableSize
         guard view.width > 0, view.height > 0,
-              texSize.width > 0, texSize.height > 0 else { return 0 }
-        return min(view.width / texSize.width, view.height / texSize.height)
+              texSize.width > 0, texSize.height > 0 else { return (1, 1) }
+        let imgAspect = texSize.width / texSize.height
+        let viewAspect = view.width / view.height
+        if imgAspect > viewAspect {
+            return (1, viewAspect / imgAspect)
+        } else {
+            return (imgAspect / viewAspect, 1)
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -1961,26 +1972,32 @@ final class ZoomableMTKView: MTKView {
                               anchor: CGPoint,
                               fromScale oldScale: Float,
                               fromPan oldPan: SIMD2<Float>) {
-        guard let c = coordinator else { return }
-        let baseFit = fitScale()
-        guard baseFit > 0 else {
+        guard let c = coordinator, let texSize = c.texturePixelSize else {
+            coordinator?.zoomScale = newScale
+            needsDisplay = true
+            return
+        }
+        let viewW = drawableSize.width, viewH = drawableSize.height
+        guard viewW > 0, viewH > 0, oldScale > 0, newScale > 0 else {
             c.zoomScale = newScale
             needsDisplay = true
             return
         }
-        let oldEffective = baseFit * CGFloat(oldScale)
-        let newEffective = baseFit * CGFloat(newScale)
-
-        let viewW = drawableSize.width
-        let viewH = drawableSize.height
+        // The shader samples image-pixel-x under a view point as
+        //   imgX = texW·relX / (viewW·zoom·fitX) + ½texW + panPx.x   (see Shaders.metal)
+        // (and the same for Y with fitY). Holding imgX fixed under the anchor
+        // across a zoom change gives, exactly:
+        //   panNew.x = panOld.x + texW·relX/(viewW·fitX) · (1/oldZoom − 1/newZoom)
+        // This is the precise inverse of the fragment shader, so the anchored
+        // pixel stays put at every zoom level — no drift, no re-centering.
+        let fit = fitScaleXY()
         let relX = anchor.x - viewW / 2.0
         let relY = anchor.y - viewH / 2.0
-
-        let imgX = (relX + CGFloat(oldPan.x)) / oldEffective
-        let imgY = (relY + CGFloat(oldPan.y)) / oldEffective
-
-        c.panPx.x = Float(imgX * newEffective - relX)
-        c.panPx.y = Float(imgY * newEffective - relY)
+        let invDiff = CGFloat(1.0 / Double(oldScale) - 1.0 / Double(newScale))
+        let dx = (texSize.width * relX) / (viewW * fit.x) * invDiff
+        let dy = (texSize.height * relY) / (viewH * fit.y) * invDiff
+        c.panPx.x = oldPan.x + Float(dx)
+        c.panPx.y = oldPan.y + Float(dy)
         c.zoomScale = newScale
         needsDisplay = true
     }
