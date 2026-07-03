@@ -171,6 +171,35 @@ struct SerScrubBar: View {
             .disabled(!usable)
             .help("Save the currently-displayed frame as a 16-bit TIFF in the outputs folder. Use this when stacking softens a feature you want to preserve crisply — scrub to the sharpest single frame and click to keep it. Filename: <ser_basename>_frame_<NNNN>.tif (no-overwrite numbered).")
 
+            // Transit detection (opt-in). Scans the whole SER for an ISS /
+            // aircraft crossing; when found, a badge appears next to the
+            // filename and the export trim marks are auto-set to the exact
+            // transit frames. A full detection reads the multi-GB file, so it
+            // only runs on click; clicking again re-detects (drops the cache).
+            if app.isDetectingTransit {
+                HStack(spacing: 4) {
+                    ProgressView().controlSize(.small).scaleEffect(0.7)
+                    Text("scan…")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                .frame(width: 52)
+                .help("Detecting a transit — reading the whole SER for a moving ISS / aircraft.")
+            } else {
+                Button {
+                    app.detectTransitForCurrentFile(reDetect: currentFileHasTransit)
+                } label: {
+                    Image(systemName: currentFileHasTransit ? "airplane.circle.fill" : "airplane")
+                        .font(.system(size: 13))
+                        .foregroundColor(currentFileHasTransit ? .purple : .secondary)
+                }
+                .buttonStyle(.plain)
+                .disabled(!usable)
+                .help(currentFileHasTransit
+                      ? "A transit was detected in this SER — export marks are set to it. Click to re-detect (drops the cached result and scans again)."
+                      : "Detect a satellite / ISS / aircraft transit in this SER. Scans the whole file once; if one crossed, a badge appears by the filename and the export trim marks jump to the exact frames. Cached for next time.")
+            }
+
             // Instant-scrub proxy (opt-in). Builds a cached low-res proxy
             // of the whole SER so scrubbing big (8-20 GB) files is instant
             // instead of laggy. READ-ONLY — never affects trim / export.
@@ -240,6 +269,14 @@ struct SerScrubBar: View {
     /// fallback. Used by both the playback time and the trim label.
     var displayFPS: Double {
         app.previewSerCapturedFPS ?? 30.0
+    }
+
+    /// True when the currently-previewed SER already has a detected moving
+    /// transit — switches the button to its "re-detect" affordance.
+    private var currentFileHasTransit: Bool {
+        guard let id = app.previewFileID,
+              let entry = app.catalog.files.first(where: { $0.id == id }) else { return false }
+        return entry.hasDetectedTransit
     }
 
     /// Save the current trim pair into the per-URL memory so a

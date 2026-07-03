@@ -2,6 +2,45 @@
 
 A running record of where we are, what's done, and what's next. Update at the end of every session.
 
+## IN PROGRESS [2026-07-03] — SER Transit Detector (branch `feature/ser-transit-detector`)
+
+Native Swift port of the validated Python `ser_transit.py`. Detects ISS / aircraft
+transits in SharpCap .ser captures, measures them, shows an icon next to the
+filename, and auto-sets export trim marks to the transit moment.
+
+Decisions locked with user:
+- **finalsep = predicted ADS-B miss point** → needs external ADS-B data, not in the
+  SER. Detector reports geometric separation to disc centre (reference behaviour);
+  filename tagging is a clearly-marked STUB pending ADS-B input.
+- **Plate scale = disc-fit + optional focal-length cross-check**; disc-fit BAILS
+  gracefully when no clean full disc (Barlow full-frame, or partial/off-centre disc).
+- **Auto-trim = set on detect, never clobber a manual trim; plus a re-detect button.**
+- **Verify against all three real acceptance files** (paths pending).
+
+Steps: [x] branch · [x] TransitResult · [x] TransitDetector (vDSP port) ·
+[x] TransitProofImage · [x] CLI `transit` · [x] synthetic tests (5 green) ·
+[x] real-file verify (5/5 pass) · [x] FileEntry.transit + TransitCache ·
+[x] scanner + opt-in + auto-trim (no-clobber) · [x] FileListView airplane icon ·
+[x] filename-tag seam (deferred: finalsep = ADS-B point, not in SER).
+
+### Results (2026-07-03)
+All 5 real acceptance files on /Volumes/ASTRO pass:
+- iss1: blob f46 (768,288) ✓
+- iss2: moving 91→97, 278.6 px/frame, R²=1 ✓
+- sun: moving 1380→1539, 5.4 px/frame, 0.228° (1 event after `selectEvents`; raw
+  iterative RANSAC produced 8 fragments/noise) ✓
+- moon1: weak single blob (probempty → not moving, no icon) ✓
+- moon2: 2 objects (370-428 + 1109-1165) ✓
+5 hermetic synthetic unit tests green; full app + test suite build clean.
+Perf ~25-120 s/file (binning-bound — vDSP block-mean with small vector lengths;
+optimize later, correctness-first per plan). Two lessons logged (σ variance + √F,
+multi-track selection). Filename tagging left as a stub pending ADS-B input.
+
+### Follow-ups (not blocking)
+- Optimize binning throughput (reference did the 4.8 GB mono in ~8 s; we're ~25 s).
+- Wire filename tagging once the ADS-B miss-point source is available.
+- Consider a "Detect all in folder" batch (currently per-file opt-in).
+
 ## TODO [next session] — `P` key = pause/play toggle for video playback
 
 Add a keyboard shortcut: pressing **`P`** toggles pause/play during video (mp4/mov)
