@@ -40,6 +40,13 @@ enum Transit {
                 config.pixelSizeUM = v; i += 2
             case "--no-dual-polarity":
                 config.dualPolarity = false; i += 1
+            case "--frame-stride":
+                guard i + 1 < args.count, let v = Int(args[i+1]), v >= 1 else {
+                    cliStderr("transit: --frame-stride requires an integer ≥ 1"); return 64
+                }
+                config.frameStride = v; i += 2
+            case "--fast":
+                config.frameStride = 0; i += 1   // sentinel → auto stride below
             case "--debug":
                 config.debug = true; i += 1
             case let opt where opt.hasPrefix("--"):

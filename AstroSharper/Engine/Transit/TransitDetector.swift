@@ -30,6 +30,13 @@ struct TransitConfig {
     var zThreshold: Float = 6.0
     var medianSamples: Int = 60
     var maxEvents: Int = 4
+    /// Frame subsampling: read only every `frameStride`-th frame off the (NAS)
+    /// disk. nil → auto (targets ~500 sampled frames, capped so short tracks
+    /// survive). 1 = thorough (every frame — needed to catch a true one-frame
+    /// flash, at full I/O cost). A real moving transit spans many frames, so a
+    /// stride of a few still catches it while cutting the read time by that
+    /// factor.
+    var frameStride: Int? = nil
     /// Disc modes: also search for a bright transient OFF the disc (a plane/ISS
     /// passing beside the Sun/Moon). Off by nothing in the common single case.
     var dualPolarity: Bool = true
@@ -56,6 +63,19 @@ enum TransitDetector {
     static func detect(url: URL, config: TransitConfig = .init()) throws -> TransitResult {
         guard let reader = try? SerReader(url: url) else { throw TransitDetectorError.cannotOpen(url) }
         let b = config.bin ?? autoBin(width: reader.header.imageWidth)
+        // Frame subsampling. Default (nil) = read EVERY frame — correct + slow
+        // over the gigabit NAS. `frameStride == 0` = auto ("fast" mode): target
+        // ~500 sampled frames so big files read a fraction of their bytes; the
+        // duration gate in `selectEvents` keeps this honest by rejecting the
+        // long low-contrast drift tracks that subsampling would otherwise let
+        // outvote a genuine short transit. An explicit `frameStride >= 1` forces
+        // that stride.
+        let stride: Int
+        if let fs = config.frameStride {
+            stride = fs == 0 ? autoStride(frameCount: reader.readableFrameCount) : max(1, fs)
+        } else {
+            stride = 1
+        }
 
         let clock = Date()
         func lap(_ label: String) {
@@ -63,8 +83,9 @@ enum TransitDetector {
             FileHandle.standardError.write("[transit] \(label): \(String(format: "%.1f", Date().timeIntervalSince(clock)))s\n".data(using: .utf8)!)
         }
 
-        // 1–2. Read + block-mean bin every frame into a float stack (F, H, W).
-        let stk = try loadBinnedStack(reader: reader, bin: b)
+        // 1–2. Read (a stride-subsample of) the frames + block-mean bin each
+        //       into a float stack. Results come back in SAMPLED-frame space.
+        let stk = try loadBinnedStack(reader: reader, bin: b, stride: stride, debug: config.debug)
         let F = stk.F, H = stk.H, W = stk.W, P = H * W
         guard F > 0, P > 0 else { throw TransitDetectorError.emptyStack }
         lap("load+bin")
@@ -148,7 +169,7 @@ enum TransitDetector {
         }
 
         // Select the real events across all passes (fragment-merge + distinctness).
-        var events = selectEvents(passResults.flatMap { $0.tracks }, maxEvents: config.maxEvents)
+        var events = selectEvents(passResults.flatMap { $0.tracks }, maxEvents: config.maxEvents, totalFrames: F)
         // No track anywhere → fall back to the strongest single blob (a one-frame
         // ISS flare, say). Prefer the silhouette/star pass over the bright pass.
         if events.isEmpty,
@@ -156,7 +177,23 @@ enum TransitDetector {
             events = [blob]
         }
 
-        var result = TransitResult(mode: mode, frames: F, detected: !events.isEmpty, transits: events)
+        // Report the REAL frame count, not the sampled one.
+        var result = TransitResult(mode: mode, frames: reader.readableFrameCount,
+                                   detected: !events.isEmpty, transits: events)
+
+        // Map sampled-frame results back to REAL frame numbers: frame indices
+        // scale UP by the stride, and px/frame speeds scale DOWN (sampled frames
+        // are `stride` real frames apart). Positions, separations, direction and
+        // R² are geometric and unaffected. This keeps the reported frames — and
+        // therefore the export trim marks — correct.
+        if stride > 1 {
+            for i in result.transits.indices {
+                result.transits[i].activeFrames = result.transits[i].activeFrames.map { $0 * stride }
+                if let sp = result.transits[i].speedPxPerFrame {
+                    result.transits[i].speedPxPerFrame = (sp / Double(stride) * 10).rounded() / 10
+                }
+            }
+        }
 
         // Disc-mode plate scale (with graceful bail + optional focal-length path).
         if isDisc {
@@ -185,97 +222,142 @@ enum TransitDetector {
     /// solar sensor. Matches the reference's per-capture choice.
     static func autoBin(width: Int) -> Int { width >= 2500 ? 4 : 3 }
 
+    /// Frame subsampling stride: target ~500 sampled frames so big captures read
+    /// a fraction of their data off the NAS, capped at 8 so a track spanning
+    /// ≥~24 frames still yields ≥3 samples for the RANSAC fit. Small captures
+    /// (≤~500 frames) read every frame (stride 1) — they're already fast, and
+    /// this preserves short streaks and one-frame flashes.
+    static func autoStride(frameCount F: Int) -> Int {
+        max(1, min(8, Int((Double(F) / 500.0).rounded())))
+    }
+
     // MARK: - Load + bin
 
-    struct BinnedStack { var buf: [Float]; var F: Int; var H: Int; var W: Int; var b: Int }
+    struct BinnedStack { var buf: [Float]; var F: Int; var H: Int; var W: Int; var b: Int; var stride: Int }
 
-    static func loadBinnedStack(reader: SerReader, bin b: Int) throws -> BinnedStack {
+    /// Reads (a subsample of) the SER's frames and block-mean bins each into a
+    /// float stack.
+    ///
+    /// The captures live on an SMB NAS, so I/O is gigabit-bound (~110 MB/s) and
+    /// reading the whole multi-GB file is the entire cost — the binning itself
+    /// is <1 s. SMB is request/response: a `pread` transfers ONLY the bytes it
+    /// asks for, so reading every `stride`-th frame moves 1/stride of the data
+    /// off the wire (measured: 1/4 of the frames → 1/4 the time, cold). Because
+    /// a real transit spans many frames, subsampling in time still catches the
+    /// motion — the same reason a low-quality fast-scrub reveals it. Frames are
+    /// read with positional `pread` from many workers at once (concurrent SMB
+    /// requests hide per-request latency), each writing a disjoint stack slice.
+    ///
+    /// The returned stack is in SAMPLED-frame space; the caller multiplies frame
+    /// indices by `stride` (and divides px/frame speeds by `stride`) to report
+    /// real frame numbers.
+    static func loadBinnedStack(reader: SerReader, bin b: Int, stride: Int = 1, debug: Bool = false) throws -> BinnedStack {
         let h = reader.header
-        let F = reader.readableFrameCount
+        let realF = reader.readableFrameCount
+        let s = max(1, stride)
+        let Fp = (realF + s - 1) / s                 // number of sampled frames
         let W0 = h.imageWidth, H0 = h.imageHeight
-        let H = (H0 / b) * b, W = (W0 / b) * b     // crop to a multiple of b
+        let H = (H0 / b) * b, W = (W0 / b) * b        // crop to a multiple of b
         let hb = H / b, wb = W / b, P = hb * wb
         let planes = h.planesPerPixel
         let is16 = h.bytesPerPlane == 2
         let littleEndian = h.isLittleEndian
-
-        var buf = [Float](repeating: 0, count: F * P)
         let bpf = h.bytesPerFrame
 
-        // I/O dominates: reading the multi-GB frame region via SerReader's
-        // memory map (opened `.uncached`) faults 16 KB pages one at a time with
-        // no readahead — measured ~70 MB/s on the same drive that streams
-        // sequentially at ~460 MB/s. So read the frames SEQUENTIALLY through a
-        // FileHandle (OS readahead kicks in), a core-sized batch at a time, and
-        // bin that batch in PARALLEL — one frame per worker, each with its own
-        // scratch (no shared mutable state). This overlaps the block-mean
-        // compute with the next batch's read and turns a ~1-minute scan into
-        // seconds. Falls back to the mmap path if the handle can't open.
-        let cores = max(1, min(ProcessInfo.processInfo.activeProcessorCount, 8))
-        let handle = try? FileHandle(forReadingFrom: reader.url)
-        if let handle { try? handle.seek(toOffset: 178) }
-        defer { try? handle?.close() }
+        var buf = [Float](repeating: 0, count: Fp * P)
 
-        // Per-worker scratch as raw pointers, allocated once. Worker w always
-        // uses slot w and at most `cores` run at once, so the buffers never
-        // alias. Using an array of POINTERS (only read concurrently) rather
-        // than [[Float]] avoids a data race — concurrent
-        // `array[w].withUnsafeMutableBufferPointer` would invoke Array's modify
-        // accessor on the shared array from multiple threads.
+        // Raw file descriptor for thread-safe positional reads (pread doesn't
+        // touch a shared offset, so many workers read concurrently).
+        let fd = open(reader.url.path, O_RDONLY)
+        guard fd >= 0 else {
+            // Fallback: mmap path (serial) if the fd won't open.
+            var frameF = [Float](repeating: 0, count: H0 * W0)
+            var rowAcc = [Float](repeating: 0, count: W)
+            var divisor = Float(b * b)
+            buf.withUnsafeMutableBufferPointer { outAll in
+                frameF.withUnsafeMutableBufferPointer { fF in
+                    rowAcc.withUnsafeMutableBufferPointer { rAcc in
+                        for j in 0..<Fp {
+                            let rf = j * s
+                            guard reader.canReadFrame(at: rf) else { continue }
+                            reader.withFrameBytes(at: rf) { ptr, _ in
+                                convertToFloat(ptr: ptr, out: fF.baseAddress!, count: H0 * W0,
+                                               is16: is16, littleEndian: littleEndian, planes: planes)
+                            }
+                            binOneFrame(fF: fF.baseAddress!, rAcc: rAcc.baseAddress!, divisor: &divisor,
+                                        out: outAll.baseAddress! + j * P, b: b, hb: hb, wb: wb, W: W, W0: W0, P: P)
+                        }
+                    }
+                }
+            }
+            return BinnedStack(buf: buf, F: Fp, H: hb, W: wb, b: b, stride: s)
+        }
+        defer { close(fd) }
+
+        let cores = max(1, min(ProcessInfo.processInfo.activeProcessorCount, 8))
+        // Per-worker scratch (own frame-float buffer, row accumulator, and raw
+        // read buffer). Worker w always uses slot w and at most `cores` run at
+        // once, so buffers never alias.
         let frameScratch = (0..<cores).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: H0 * W0) }
         let rowScratch = (0..<cores).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: W) }
+        let rawScratch = (0..<cores).map { _ in UnsafeMutablePointer<UInt8>.allocate(capacity: bpf) }
         defer {
             frameScratch.forEach { $0.deallocate() }
             rowScratch.forEach { $0.deallocate() }
+            rawScratch.forEach { $0.deallocate() }
         }
 
+        let clock = Date()
         buf.withUnsafeMutableBufferPointer { outAll in
             let outBase = outAll.baseAddress!
-
-            // Bin one already-in-memory raw frame into buf[frameIndex].
-            func binFrame(rawFrame: UnsafePointer<UInt8>, frameIndex: Int, worker: Int) {
+            // Split the sampled frames into `cores` contiguous chunks; each
+            // worker pread+bins its chunk with its own scratch.
+            DispatchQueue.concurrentPerform(iterations: cores) { w in
+                let lo = w * Fp / cores
+                let hi = (w + 1) * Fp / cores
+                guard lo < hi else { return }
                 var divisor = Float(b * b)
-                let fF = frameScratch[worker]
-                let rAcc = rowScratch[worker]
-                convertToFloat(ptr: rawFrame, out: fF, count: H0 * W0,
-                               is16: is16, littleEndian: littleEndian, planes: planes)
-                let outFrame = outBase + frameIndex * P
-                for by in 0..<hb {
-                    let r0 = (by * b) * W0
-                    vDSP_vclr(rAcc, 1, vDSP_Length(W))
-                    for dy in 0..<b {
-                        vDSP_vadd(rAcc, 1, fF + r0 + dy * W0, 1, rAcc, 1, vDSP_Length(W))
+                let raw = rawScratch[w], fF = frameScratch[w], rAcc = rowScratch[w]
+                for j in lo..<hi {
+                    let offset = off_t(178) + off_t(j * s) * off_t(bpf)
+                    var got = 0
+                    while got < bpf {
+                        let r = pread(fd, raw + got, bpf - got, offset + off_t(got))
+                        if r <= 0 { break }
+                        got += r
                     }
-                    let outRow = outFrame + by * wb
-                    vDSP_vclr(outRow, 1, vDSP_Length(wb))
-                    for dx in 0..<b {
-                        vDSP_vadd(outRow, 1, rAcc + dx, vDSP_Stride(b), outRow, 1, vDSP_Length(wb))
-                    }
-                }
-                vDSP_vsdiv(outFrame, 1, &divisor, outFrame, 1, vDSP_Length(P))
-            }
-
-            if let handle {
-                var t = 0
-                while t < F {
-                    let n = min(cores, F - t)
-                    guard let raw = try? handle.read(upToCount: n * bpf), raw.count == n * bpf else { break }
-                    raw.withUnsafeBytes { (rb: UnsafeRawBufferPointer) in
-                        let base = rb.baseAddress!.assumingMemoryBound(to: UInt8.self)
-                        DispatchQueue.concurrentPerform(iterations: n) { k in
-                            binFrame(rawFrame: base + k * bpf, frameIndex: t + k, worker: k)
-                        }
-                    }
-                    t += n
-                }
-            } else {
-                // Fallback: mmap path (serial), if the FileHandle wouldn't open.
-                for t in 0..<F where reader.canReadFrame(at: t) {
-                    reader.withFrameBytes(at: t) { ptr, _ in binFrame(rawFrame: ptr, frameIndex: t, worker: 0) }
+                    guard got == bpf else { continue }
+                    convertToFloat(ptr: raw, out: fF, count: H0 * W0,
+                                   is16: is16, littleEndian: littleEndian, planes: planes)
+                    binOneFrame(fF: fF, rAcc: rAcc, divisor: &divisor,
+                                out: outBase + j * P, b: b, hb: hb, wb: wb, W: W, W0: W0, P: P)
                 }
             }
         }
-        return BinnedStack(buf: buf, F: F, H: hb, W: wb, b: b)
+        if debug {
+            let gb = Double(Fp * bpf) / 1e9
+            FileHandle.standardError.write("[transit] read+bin: \(String(format: "%.1f", Date().timeIntervalSince(clock)))s (\(Fp)/\(realF) frames, stride \(s), \(String(format: "%.1f", gb))GB)\n".data(using: .utf8)!)
+        }
+        return BinnedStack(buf: buf, F: Fp, H: hb, W: wb, b: b, stride: s)
+    }
+
+    /// Block-mean one already-converted Float frame (`fF`, W0-wide) into `out`.
+    private static func binOneFrame(fF: UnsafeMutablePointer<Float>, rAcc: UnsafeMutablePointer<Float>,
+                                    divisor: inout Float, out: UnsafeMutablePointer<Float>,
+                                    b: Int, hb: Int, wb: Int, W: Int, W0: Int, P: Int) {
+        for by in 0..<hb {
+            let r0 = (by * b) * W0
+            vDSP_vclr(rAcc, 1, vDSP_Length(W))
+            for dy in 0..<b {
+                vDSP_vadd(rAcc, 1, fF + r0 + dy * W0, 1, rAcc, 1, vDSP_Length(W))
+            }
+            let outRow = out + by * wb
+            vDSP_vclr(outRow, 1, vDSP_Length(wb))
+            for dx in 0..<b {
+                vDSP_vadd(outRow, 1, rAcc + dx, vDSP_Stride(b), outRow, 1, vDSP_Length(wb))
+            }
+        }
+        vDSP_vsdiv(out, 1, &divisor, out, 1, vDSP_Length(P))
     }
 
     /// Convert one raw SER frame to Float luminance of length `count` (= H0·W0).
@@ -522,12 +604,19 @@ enum TransitDetector {
     /// fragment of an already-kept track nor a duplicate from the other
     /// polarity pass. This collapses the fragmentation the raw iterative RANSAC
     /// produces (e.g. one plane split into several overlapping sub-tracks).
-    private static func selectEvents(_ rawTracks: [TransitEvent], maxEvents: Int) -> [TransitEvent] {
+    private static func selectEvents(_ rawTracks: [TransitEvent], maxEvents: Int, totalFrames: Int) -> [TransitEvent] {
         let sorted = rawTracks.sorted { $0.nActive > $1.nActive }
         var accepted: [TransitEvent] = []
         for e in sorted {
             let span = eventSpan(e)
             let density = Double(e.nActive) / Double(span)
+            // Duration gate: a real transit is a BRIEF event — an object crosses
+            // in seconds, i.e. a small fraction of a minutes-long capture. A
+            // track spanning >20% of a long capture is drift / limb shimmer / a
+            // tracking wander, not a transit. Only applied to realistically long
+            // captures (>200 frames) — in a tiny clip a transit legitimately
+            // fills much of it, and there's no room for a competing drift track.
+            if totalFrames > 200, Double(span) > 0.20 * Double(totalFrames) { continue }
             if accepted.isEmpty {
                 // Primary: reference gate (reject only if sparse AND few).
                 if density < 0.25 && e.nActive < 8 { continue }
