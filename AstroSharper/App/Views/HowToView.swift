@@ -32,7 +32,7 @@ struct HowToView: View {
                     StepCard(
                         number: 1,
                         title: "Open your captures",
-                        detail: "Press ⌘O or drag a folder onto the window. SharpCap / FireCapture .ser files plus 16-bit TIFF / PNG / JPEG are supported. The target picker chips at the top of the window light up for the auto-detected target (Sun / Moon / Jupiter / Saturn / Mars) — click any chip to override if the keyword detect missed."
+                        detail: "Press ⌘O or drag a folder onto the window. Lucky Stack accepts SharpCap / FireCapture .ser (mono, Bayer or packed RGB, 8- or 16-bit) as well as .avi, .mov, .mp4 and .m4v — so a video made with ffmpeg from an image sequence works without a SER conversion step. Already-stacked 16-bit TIFF / PNG / JPEG can go straight into the sharpening + tone pipeline. The target picker chips at the top of the window light up for the auto-detected target (Sun / Moon / Jupiter / Saturn / Mars) — click any chip to override if the keyword detect missed."
                     )
                     StepCard(
                         number: 2,
