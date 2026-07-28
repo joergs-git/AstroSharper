@@ -43,6 +43,14 @@ enum SerFrameLoader {
                    String(describing: h.colorID))
             throw Error.unsupportedColor
         }
+        // The unpack kernels read 16-bit samples in native little-endian
+        // order. A byte-swapped file would decode to noise that still looks
+        // like an image, so fail loudly instead.
+        guard reader.pixelDataIsLittleEndian else {
+            os_log("SerFrameLoader: %{public}@ has byte-swapped 16-bit samples — unsupported",
+                   log: log, type: .error, url.lastPathComponent)
+            throw Error.unsupportedColor
+        }
         guard frameIndex >= 0 && frameIndex < h.frameCount else {
             os_log("SerFrameLoader: frame index %d out of range [0, %d)", log: log, type: .error,
                    frameIndex, h.frameCount)

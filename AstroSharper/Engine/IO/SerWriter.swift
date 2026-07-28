@@ -164,6 +164,11 @@ enum SerWriter {
         // Bayer / RGB-8) to 16-bit RGB. Reason: the processing
         // pipeline outputs demosaiced RGB and tone-mapped values; we
         // preserve maximum dynamic range by writing 16-bit per channel.
+        // ColorID 100 is the spec's RGB code. Before v0.7.0 we wrote 16
+        // here, which the spec assigns to BAYER_CYYM — every conformant
+        // reader (Siril, PIPP, AutoStakkert) decoded our exports as a CMY
+        // mosaic. Files written by older builds still load in AstroSharper
+        // via SerReader's frame-size inference.
         if bakeIn != nil {
             writeInt32LE(&hdr, offset: colorOff, value: Int32(SerColorID.rgb.rawValue))
             writeInt32LE(&hdr, offset: depthOff, value: 16)

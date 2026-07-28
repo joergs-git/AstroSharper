@@ -17,7 +17,13 @@ enum SyntheticSER {
     ///   - height: imageHeight field
     ///   - depth: pixelDepthPerPlane (8 or 16)
     ///   - frameCount: number of frames (each width*height*bytesPerPlane)
-    ///   - colorID: SER ColorID (0 mono, 8 RGGB, 9 GRBG, 10 GBRG, 11 BGGR)
+    ///   - colorID: SER ColorID (0 mono, 8 RGGB, 9 GRBG, 10 GBRG, 11 BGGR,
+    ///              100 RGB, 101 BGR — the spec values)
+    ///   - planesPerPixelOverride: force the samples-per-pixel used to size
+    ///              the frame data, independent of `colorID`. Needed to build
+    ///              non-conformant files on purpose — e.g. a legacy
+    ///              AstroSharper export that stamped ColorID 16 onto packed
+    ///              RGB data, which the reader must resolve by byte math.
     ///   - fillByte: byte value written to every pixel of every frame
     ///   - dateTimeUTC: 0 to omit the timestamp; otherwise .NET ticks
     static func write(
@@ -26,6 +32,7 @@ enum SyntheticSER {
         depth: Int = 8,
         frameCount: Int = 3,
         colorID: Int32 = 0,
+        planesPerPixelOverride: Int? = nil,
         fillByte: UInt8 = 0xAA,
         dateTimeUTC: Int64 = 0,
         observer: String = "",
@@ -61,9 +68,13 @@ enum SyntheticSER {
         // Frames
         let bytesPerPlane = depth > 8 ? 2 : 1
         let planesPerPixel: Int
-        switch colorID {
-        case 16, 17: planesPerPixel = 3   // rgb / bgr
-        default:     planesPerPixel = 1
+        if let planesPerPixelOverride {
+            planesPerPixel = planesPerPixelOverride
+        } else {
+            switch colorID {
+            case 100, 101: planesPerPixel = 3   // rgb / bgr, per the SER v3 spec
+            default:       planesPerPixel = 1
+            }
         }
         let bytesPerFrame = width * height * bytesPerPlane * planesPerPixel
         data.append(Data(repeating: fillByte, count: bytesPerFrame * frameCount))
@@ -81,6 +92,42 @@ enum SyntheticSER {
 
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("astrosharper-test-\(UUID().uuidString).ser")
+        try data.write(to: url)
+        return url
+    }
+
+    /// Build a mono16 SER from explicit per-frame sample buffers (row-major,
+    /// `width*height` samples each). `byteSwapped` writes each sample in
+    /// big-endian order, producing the non-conformant files that
+    /// `SerReader.pixelDataIsLittleEndian` has to recognise.
+    static func writeMono16(
+        width: Int, height: Int, frames: [[UInt16]], byteSwapped: Bool = false
+    ) throws -> URL {
+        var data = Data()
+        data.append("LUCAM-RECORDER".data(using: .ascii)!)   // 14 bytes
+        data.appendLE(Int32(0))                 // luID
+        data.appendLE(Int32(0))                 // colorID = mono
+        data.appendLE(Int32(0))                 // little-endian flag (advisory)
+        data.appendLE(Int32(width))
+        data.appendLE(Int32(height))
+        data.appendLE(Int32(16))                // 16-bit
+        data.appendLE(Int32(frames.count))
+        data.appendFixedAscii("", length: 40)   // observer
+        data.appendFixedAscii("", length: 40)   // instrument
+        data.appendFixedAscii("", length: 40)   // telescope
+        data.appendLE(Int64(0))                 // dateTime
+        data.appendLE(Int64(0))                 // dateTimeUTC
+        precondition(data.count == 178)
+        for f in frames {
+            precondition(f.count == width * height, "frame must be width*height samples")
+            // `appendLE` emits the value's little-endian bytes; feeding it a
+            // pre-swapped sample therefore lays down big-endian bytes.
+            for sample in f {
+                data.appendLE(byteSwapped ? sample.byteSwapped : sample)
+            }
+        }
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("astrosharper-mono16-\(UUID().uuidString).ser")
         try data.write(to: url)
         return url
     }

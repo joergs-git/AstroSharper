@@ -261,7 +261,11 @@ enum TransitDetector {
         let hb = H / b, wb = W / b, P = hb * wb
         let planes = h.planesPerPixel
         let is16 = h.bytesPerPlane == 2
-        let littleEndian = h.isLittleEndian
+        // Byte order comes from the reader's data probe, not the header's
+        // advisory `LittleEndian` field. Using the field here made transit
+        // detection read different pixel values than the decode path did
+        // for the same file.
+        let littleEndian = reader.pixelDataIsLittleEndian
         let bpf = h.bytesPerFrame
 
         var buf = [Float](repeating: 0, count: Fp * P)
