@@ -2,6 +2,7 @@
   "bytesPerFrame" : 163840,
   "captureDateUTC" : "2023-10-10T13:17:53Z",
   "colorID" : "bayerRGGB",
+  "colorIDWasInferred" : false,
   "colorIsBayer" : true,
   "colorIsMono" : false,
   "colorIsRGB" : false,
@@ -10,8 +11,13 @@
   "imageHeight" : 320,
   "imageWidth" : 512,
   "instrument" : "PLAYERONE=Uranus-Ctemp=14.8",
+  "layoutWarnings" : [
+
+  ],
   "observer" : "",
+  "pixelDataIsLittleEndian" : true,
   "pixelDepth" : 8,
+  "rawColorID" : 8,
   "telescope" : "fps=51.02gain=410exp=20.00",
   "totalBytes" : 2938306560
 }

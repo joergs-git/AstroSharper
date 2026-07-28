@@ -1,13 +1,14 @@
 {
-  "inputFile": "mars-2022-12-10-0254_3.ser",
-  "keepPercents": [
+  "inputFile" : "mars-2022-12-10-0254_3.ser",
+  "keepPercents" : [
     {
-      "keepPercent": 25,
-      "outputBytes": 627450,
-      "outputFFTHighFraction": 4.5761946083438557e-07,
-      "outputFFTMidFraction": 5.641989440104988e-05,
-      "outputFile": "biggsky__mars-2022-12-10-0254_3.ser.stack.tif",
-      "outputSharpness": 2.307372778886929e-05
+      "elapsedSeconds" : 10.60494601726532,
+      "keepPercent" : 25,
+      "outputBytes" : 627450,
+      "outputFFTHighFraction" : 3.7706020834093402e-07,
+      "outputFFTMidFraction" : 7.2376941975890152e-05,
+      "outputFile" : "biggsky__mars-2022-12-10-0254_3.ser.tif",
+      "outputSharpness" : 3.5633438528748229e-05
     }
   ]
 }

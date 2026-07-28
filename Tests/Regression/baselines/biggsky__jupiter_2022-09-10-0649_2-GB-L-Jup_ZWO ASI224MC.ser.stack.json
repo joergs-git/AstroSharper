@@ -1,0 +1,15 @@
+{
+  "inputFile" : "jupiter_2022-09-10-0649_2-GB-L-Jup_ZWO ASI224MC.ser",
+  "keepPercents" : [
+    {
+      "elapsedSeconds" : 2.3183829784393311,
+      "keepPercent" : 25,
+      "outputBytes" : 1299690,
+      "outputFFTHighFraction" : 0.0026724781300604176,
+      "outputFFTMidFraction" : 0.0038461300028138773,
+      "outputFile" : "biggsky__jupiter_2022-09-10-0649_2-GB-L-Jup_ZWO ASI224MC.ser.tif",
+      "outputSharpness" : 5.7520906011632178e-06,
+      "referenceRMSE" : 0.1887552822261957
+    }
+  ]
+}

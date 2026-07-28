@@ -1,13 +1,15 @@
 {
-  "inputFile": "17_23_09_.ser",
-  "keepPercents": [
+  "inputFile" : "17_23_09_.ser",
+  "keepPercents" : [
     {
-      "keepPercent": 25,
-      "outputBytes": 1476018,
-      "outputFFTHighFraction": 0.00544508569149277,
-      "outputFFTMidFraction": 0.010638473327892814,
-      "outputFile": "sun__17_23_09_.ser.stack.tif",
-      "outputSharpness": 0.0012852391228079796
+      "elapsedSeconds" : 2.66075599193573,
+      "keepPercent" : 25,
+      "outputBytes" : 1476018,
+      "outputFFTHighFraction" : 0.0054450856914927698,
+      "outputFFTMidFraction" : 0.010638473327892814,
+      "outputFile" : "sun__17_23_09_.ser.tif",
+      "outputSharpness" : 0.0012852391228079796,
+      "referenceRMSE" : 0.13912261085377114
     }
   ]
 }
