@@ -2,6 +2,7 @@
   "bytesPerFrame" : 289440,
   "captureDateUTC" : "2026-03-05T01:03:08Z",
   "colorID" : "bayerRGGB",
+  "colorIDWasInferred" : false,
   "colorIsBayer" : true,
   "colorIsMono" : false,
   "colorIsRGB" : false,
@@ -10,8 +11,13 @@
   "imageHeight" : 540,
   "imageWidth" : 536,
   "instrument" : "ZWO ASI676MC",
+  "layoutWarnings" : [
+
+  ],
   "observer" : "Observer",
+  "pixelDataIsLittleEndian" : true,
   "pixelDepth" : 8,
+  "rawColorID" : 8,
   "telescope" : "Telescope",
   "totalBytes" : 3320745120
 }

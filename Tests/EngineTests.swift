@@ -118,6 +118,230 @@ struct SerHeaderTests {
     }
 }
 
+// MARK: - SER ColorID resolution (spec conformance)
+
+/// Regression cover for the 2026-07-28 report: a Siril-written RGB24 SER
+/// with the spec's ColorID 100 was being read as 8-bit mono, so every frame
+/// decoded as one third of the real data — flat, grey and striped.
+@Suite("SER ColorID — spec values and inference")
+struct SerColorIDTests {
+
+    @Test("ColorID 100 is RGB, not mono — 3 bytes per pixel")
+    func colorID100IsRGB() throws {
+        let url = try SyntheticSER.write(
+            width: 320, height: 240, depth: 8, frameCount: 4, colorID: 100
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SerReader(url: url)
+        #expect(reader.colorID == .rgb)
+        #expect(reader.colorID.isRGB)
+        #expect(!reader.colorID.isMono)
+        #expect(reader.header.rawColorID == 100)
+        #expect(!reader.header.colorIDWasInferred)
+        // The whole bug in one assertion: 3 bytes per pixel, not 1.
+        #expect(reader.header.bytesPerFrame == 320 * 240 * 3)
+    }
+
+    @Test("ColorID 101 is BGR")
+    func colorID101IsBGR() throws {
+        let url = try SyntheticSER.write(
+            width: 64, height: 48, depth: 8, frameCount: 2, colorID: 101
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SerReader(url: url)
+        #expect(reader.colorID == .bgr)
+        #expect(reader.colorID.isRGB)
+        #expect(reader.header.bytesPerFrame == 64 * 48 * 3)
+    }
+
+    @Test("16-bit RGB48 keeps 6 bytes per pixel")
+    func rgb48FrameSize() throws {
+        let url = try SyntheticSER.write(
+            width: 64, height: 48, depth: 16, frameCount: 2, colorID: 100
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SerReader(url: url)
+        #expect(reader.colorID == .rgb)
+        #expect(reader.pixelDepth == 16)
+        #expect(reader.header.bytesPerFrame == 64 * 48 * 3 * 2)
+    }
+
+    @Test("legacy ColorID 16 with RGB byte math resolves to RGB by inference")
+    func legacyColorID16InfersRGB() throws {
+        // AstroSharper's own bake-in exports wrote 16 for RGB before v0.7.0.
+        // The spec assigns 16 to BAYER_CYYM, so the value alone is wrong —
+        // but 6 bytes per pixel can only be RGB48.
+        let url = try SyntheticSER.write(
+            width: 64, height: 48, depth: 16, frameCount: 2,
+            colorID: 16, planesPerPixelOverride: 3
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SerReader(url: url)
+        #expect(reader.colorID == .rgb)
+        #expect(reader.header.rawColorID == 16)
+        #expect(reader.header.colorIDWasInferred)
+    }
+
+    @Test("a genuine CMY-Bayer file is rejected, not silently shown as mono")
+    func cmyBayerRejected() throws {
+        // 1 sample per pixel — byte math cannot distinguish CYYM from mono,
+        // so accepting the mono guess would render a mosaic as greyscale and
+        // report success. Fail loudly instead.
+        let url = try SyntheticSER.write(
+            width: 64, height: 48, depth: 8, frameCount: 2,
+            colorID: 16, planesPerPixelOverride: 1
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(throws: SerReaderError.self) {
+            _ = try SerReader(url: url)
+        }
+    }
+
+    @Test("an unknown ColorID with clean RGB byte math is inferred")
+    func unknownColorIDInferred() throws {
+        let url = try SyntheticSER.write(
+            width: 64, height: 48, depth: 8, frameCount: 2,
+            colorID: 77, planesPerPixelOverride: 3
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SerReader(url: url)
+        #expect(reader.colorID == .rgb)
+        #expect(reader.header.colorIDWasInferred)
+    }
+
+    @Test("spec raw values are exactly the SER v3 numbers")
+    func rawValuesMatchSpec() {
+        #expect(SerColorID.mono.rawValue == 0)
+        #expect(SerColorID.bayerRGGB.rawValue == 8)
+        #expect(SerColorID.bayerGRBG.rawValue == 9)
+        #expect(SerColorID.bayerGBRG.rawValue == 10)
+        #expect(SerColorID.bayerBGGR.rawValue == 11)
+        #expect(SerColorID.rgb.rawValue == 100)
+        #expect(SerColorID.bgr.rawValue == 101)
+        // 16 / 17 are BAYER_CYYM / BAYER_YCMY in the spec and must not map
+        // onto our RGB cases.
+        #expect(SerColorID(rawValue: 16) == nil)
+        #expect(SerColorID(rawValue: 17) == nil)
+    }
+}
+
+// MARK: - Frame-sequence container recognition
+
+/// The Lucky-Stack section and `runLuckyStackOnSelection` both gate on
+/// `isFrameSequence`. The engine has decoded the QuickTime family since the
+/// SourceReader migration, so the catalog must classify all four containers
+/// as stackable — otherwise the GUI refuses work the engine can do.
+@Suite("FileCatalog — frame-sequence containers")
+struct FrameSequenceRecognitionTests {
+
+    private func entry(_ name: String) -> FileEntry {
+        FileCatalog.makeEntry(url: URL(fileURLWithPath: "/tmp/\(name)"))
+    }
+
+    @Test("SER and every video container count as frame sequences")
+    func videoContainersAreFrameSequences() {
+        #expect(entry("capture.ser").isSER)
+        #expect(entry("capture.ser").isFrameSequence)
+        for ext in ["avi", "mov", "mp4", "m4v"] {
+            let e = entry("capture.\(ext)")
+            #expect(e.isAVI, "\(ext) should be recognised as a video container")
+            #expect(e.isFrameSequence, "\(ext) should be stackable")
+            #expect(!e.isSER)
+        }
+    }
+
+    @Test("uppercase extensions are recognised too")
+    func extensionMatchIsCaseInsensitive() {
+        #expect(entry("CAPTURE.MOV").isFrameSequence)
+        #expect(entry("CAPTURE.SER").isFrameSequence)
+    }
+
+    @Test("still images are not frame sequences")
+    func stillsAreNotFrameSequences() {
+        for ext in ["tif", "png", "jpg", "fits"] {
+            #expect(!entry("frame.\(ext)").isFrameSequence)
+        }
+    }
+
+    @Test("every video container is in the supported-extension set")
+    func videoContainersAreImportable() {
+        for ext in FileCatalog.videoExtensions {
+            #expect(FileCatalog.supportedExtensions.contains(ext))
+        }
+    }
+}
+
+// MARK: - SER pixel byte-order probe
+
+@Suite("SER byte order — probed from the pixels")
+struct SerByteOrderTests {
+
+    /// A smooth horizontal ramp: neighbouring samples differ by a small
+    /// amount, which is what makes the byte-swap signature detectable.
+    private static func rampFrame(width: Int, height: Int) -> [UInt16] {
+        var out = [UInt16](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                out[y * width + x] = UInt16(2000 + (x * 8) % 4000)
+            }
+        }
+        return out
+    }
+
+    @Test("little-endian samples are recognised as little-endian")
+    func detectsLittleEndian() throws {
+        let frame = Self.rampFrame(width: 256, height: 64)
+        let url = try SyntheticSER.writeMono16(
+            width: 256, height: 64, frames: [frame, frame]
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SerReader(url: url)
+        #expect(reader.pixelDataIsLittleEndian)
+    }
+
+    @Test("byte-swapped samples are recognised as big-endian")
+    func detectsBigEndian() throws {
+        let frame = Self.rampFrame(width: 256, height: 64)
+        let url = try SyntheticSER.writeMono16(
+            width: 256, height: 64, frames: [frame, frame], byteSwapped: true
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SerReader(url: url)
+        #expect(!reader.pixelDataIsLittleEndian)
+    }
+
+    @Test("8-bit sources are always little-endian (byte order is meaningless)")
+    func eightBitIsAlwaysLittle() throws {
+        let url = try SyntheticSER.write(depth: 8)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SerReader(url: url)
+        #expect(reader.pixelDataIsLittleEndian)
+    }
+
+    @Test("a flat frame keeps the little-endian default")
+    func flatFrameKeepsDefault() throws {
+        // Uniform data leaves both roughness sums at zero; the probe must
+        // not flip to big-endian on no evidence.
+        let flat = [UInt16](repeating: 4096, count: 128 * 32)
+        let url = try SyntheticSER.writeMono16(
+            width: 128, height: 32, frames: [flat, flat]
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SerReader(url: url)
+        #expect(reader.pixelDataIsLittleEndian)
+    }
+}
+
 // MARK: - OscDefaults (D.3)
 
 @Suite("OscDefaults — auto-WB on OSC sources")

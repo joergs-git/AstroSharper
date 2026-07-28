@@ -2,6 +2,17 @@
 
 Patterns and gotchas captured from this project. Read at session start; append after every correction.
 
+## [2026-07-28] — Read the format spec; a plausible "dialect" theory is not evidence
+- **Mistake:** `SerColorID` used 16 / 17 for RGB / BGR, and a `mapExtendedColorID` table folded ColorID 100 onto `.mono` under a "SharpCap writes 100 + standardColorID" theory. The SER v3 spec actually assigns **100 = RGB, 101 = BGR**, and 16–19 to the CMY Bayer layouts. Every conformant RGB24 SER (anything Siril writes) therefore decoded as 8-bit mono with a 3× undersized `bytesPerFrame` — flat, grey, striped. We also stamped 16 into our own exports, making them CMY-mosaic files for every other tool in the chain.
+- **Root cause:** An earlier user report of "ColorID 101" was explained by inventing a dialect instead of checking the spec. The invented table then survived because our own reader and writer agreed with each other — a closed loop that only breaks when a real third-party file arrives.
+- **Rule:** For an interchange format, the numeric constants come from the specification, cited in a comment, not from a pattern noticed across two files. When a value looks unknown, prefer deriving it from the data (bytes-per-pixel arithmetic) over guessing a mapping. And whenever reader and writer share an enum, a wrong value is invisible in round-trip testing — validate against a file produced by a *different* tool.
+- **Applies to:** `Engine/IO/SerReader.swift`, `Engine/IO/SerWriter.swift`. Same principle for FITS keywords, AVI FOURCC codes, and any future container.
+
+## [2026-07-28] — Prove a regression is pre-existing before absorbing it
+- **Mistake (avoided):** The F3 suite came back 8/11 red on the branch. The obvious read was "my change broke stacking", and the obvious reflex is `--regenerate`, which would have silently baselined whatever the truth was.
+- **Rule:** When the regression suite is red on a branch, do not regenerate and do not assume authorship. Stash, rebuild at the base commit, run the suite, capture the drift values, restore, re-run, and **diff the values**. Identical output is proof of zero contribution; only then is regeneration an honest act, and the pre-existing drift gets reported rather than buried. Here the baselines had been stale since the v0.6.x AutoAP / perf work, so the harness had been failing-open for weeks and catching nothing.
+- **Applies to:** `astrosharper validate TESTIMAGES/`. Corollary: a release that changes stack metrics must regenerate baselines in the same commit, or the suite stops being a gate.
+
 ## [2026-07-03] — "Slow scan" was the gigabit NAS, not the code — measure the layer before optimizing
 - **Mistake:** Assumed the transit scan's slowness was compute and/or an inefficient mmap read; tried sequential FileHandle reads, then parallel reads, then frame-subsampling — each guessing at the bottleneck.
 - **Root cause:** The captures live on an **SMB NAS**. Instrumenting read-vs-compute separately showed read = ~41s and bin = 0.7s for a 4.5 GB file; a plain `cat` took the same ~44s; and cold throughput was **104 MB/s single-stream AND 115 MB/s with 8 parallel streams** — i.e. gigabit-capped, unimprovable by parallelism. The scan time is the file-transfer time. (One real compute win did exist and was hiding: the per-pixel median was 20s single-threaded → 4s parallelized.)

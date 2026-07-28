@@ -5,6 +5,50 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-28
+
+### Fixed
+- **RGB .ser files read as grey, striped garbage** — AstroSharper used the
+  wrong SER ColorID values. The specification assigns **100** to RGB and
+  **101** to BGR; we used 16 and 17 (which the spec assigns to the CMY Bayer
+  layouts) and additionally folded 100 onto *mono*. A conformant RGB24 capture
+  — such as anything Siril writes — was therefore read as 8-bit monochrome, so
+  each frame decoded as one third of the real data: flat, grey and covered in
+  a fine line pattern. Now fixed for reading and writing.
+- **Exported .ser files were unreadable in other tools** — the bake-in export
+  stamped ColorID 16 into its header, which every spec-conformant reader
+  (Siril, PIPP, AutoStakkert) decodes as a CMY Bayer mosaic. Exports now carry
+  the correct RGB code. Files written by older builds still open in
+  AstroSharper: the reader falls back to identifying the layout by frame size.
+- **RGB .ser captures got no thumbnail and no auto white balance** — both were
+  consequences of the mis-detected colour layout and are fixed with it.
+- **Transit detection could disagree with the decoder about byte order** — it
+  was the only code reading the SER header's `LittleEndian` field, which
+  real-world capture tools set inconsistently. Byte order is now determined
+  once, from the pixel data, and shared by every consumer.
+
+### Added
+- **.mov / .mp4 / .m4v lucky stacking** — the engine has decoded the QuickTime
+  family since the SourceReader migration, but the interface still refused
+  anything that wasn't a `.ser` ("AVI lucky-stack support is coming"). All four
+  video containers are now importable and stackable, which makes a fully native
+  macOS route possible: turn an image sequence into a video with ffmpeg and
+  stack it directly, no SER conversion step.
+- **16-bit RGB .ser stacking** — previously rejected with "16-bit RGB SER not
+  yet supported". The 48-bit unpack path the preview already used is now wired
+  into the stack runner as well.
+- **`astrosharper analyze` reports layout diagnostics** — raw vs resolved
+  ColorID, how the layout was determined, the byte-order probe result, and an
+  explicit warning when the header's declared bytes-per-pixel disagrees with
+  the file on disk. This is the command that identifies a mislabelled capture
+  in one step.
+
+### Changed
+- Byte-swapped (big-endian) 16-bit SERs are now refused with a clear message
+  instead of being decoded into noise that still looks like an image.
+- Genuine CMY-Bayer captures (ColorID 16–19) are reported as unsupported
+  rather than silently shown as greyscale.
+
 ## [0.6.1] - 2026-07-03
 
 ### Added

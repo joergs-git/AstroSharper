@@ -1,13 +1,15 @@
 {
-  "inputFile": "jupiter-2022-10-25-0055_2.ser",
-  "keepPercents": [
+  "inputFile" : "jupiter-2022-10-25-0055_2.ser",
+  "keepPercents" : [
     {
-      "keepPercent": 25,
-      "outputBytes": 2255842,
-      "outputFFTHighFraction": 2.307260689465272e-06,
-      "outputFFTMidFraction": 8.492303231886113e-05,
-      "outputFile": "biggsky__jupiter-2022-10-25-0055_2.ser.stack.tif",
-      "outputSharpness": 9.872245755104814e-06
+      "elapsedSeconds" : 5.1249980926513672,
+      "keepPercent" : 25,
+      "outputBytes" : 2255842,
+      "outputFFTHighFraction" : 1.1148284581000232e-06,
+      "outputFFTMidFraction" : 0.0002656188527646142,
+      "outputFile" : "biggsky__jupiter-2022-10-25-0055_2.ser.tif",
+      "outputSharpness" : 3.274226764915511e-05,
+      "referenceRMSE" : 0.3091756407246733
     }
   ]
 }

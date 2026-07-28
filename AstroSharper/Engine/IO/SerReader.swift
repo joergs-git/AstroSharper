@@ -21,14 +21,32 @@
 // Reference: http://www.grischa-hahn.homepage.t-online.de/astro/ser/
 import Foundation
 
+/// SER `ColorID` values, exactly as defined by the SER v3 specification.
+///
+/// The values matter for interop and are easy to get wrong: RGB is **100**
+/// and BGR is **101**, NOT 16 / 17. Codes 16–19 are the CMY Bayer variants
+/// (`BAYER_CYYM`, `BAYER_YCMY`, `BAYER_YMCY`, `BAYER_MYYC`) from an era of
+/// complementary-colour sensors that no current planetary camera uses; we
+/// deliberately do not model them, so they fall through to the frame-size
+/// inference below and are rejected with a clear message if that can't
+/// resolve them either.
+///
+/// History (2026-07-28): this enum previously used 16 / 17 for RGB / BGR and
+/// carried a `mapExtendedColorID` table that folded 100 onto `.mono`. Both
+/// were wrong. The consequence was visible: a Siril-written RGB24 SER
+/// (ColorID 100) was read as 8-bit mono, so `bytesPerFrame` came out three
+/// times too small and every displayed frame was one third of a real frame
+/// interpreted as luminance — flat, grey, with a 3-pixel line pattern. On
+/// the write side we stamped 16 into our own bake-in exports, which every
+/// spec-conformant reader (Siril, PIPP, AutoStakkert) decodes as CMY Bayer.
 enum SerColorID: Int32 {
     case mono       = 0
     case bayerRGGB  = 8
     case bayerGRBG  = 9
     case bayerGBRG  = 10
     case bayerBGGR  = 11
-    case rgb        = 16
-    case bgr        = 17
+    case rgb        = 100
+    case bgr        = 101
 
     var isBayer: Bool {
         switch self {
@@ -56,6 +74,18 @@ struct SerHeader {
     let fileID: String          // "LUCAM-RECORDER"
     let luID: Int32
     let colorID: SerColorID
+    /// The ColorID exactly as written in the file, before any resolution.
+    /// Kept for diagnostics — `astrosharper analyze` prints it next to the
+    /// resolved value so a mismatch is immediately visible.
+    let rawColorID: Int32
+    /// True when `colorID` could not be taken from the header and had to be
+    /// derived from the frame-size arithmetic instead. A non-conformant
+    /// writer, worth reporting.
+    let colorIDWasInferred: Bool
+    /// The header's `LittleEndian` field. ADVISORY ONLY — real-world writers
+    /// disagree about its polarity, so nothing in the decode path reads it.
+    /// The authority for 16-bit sample order is
+    /// `SerReader.pixelDataIsLittleEndian`, which probes the actual data.
     let isLittleEndian: Bool
     let imageWidth: Int
     let imageHeight: Int
@@ -93,6 +123,18 @@ final class SerReader {
     let url: URL
     let header: SerHeader
 
+    /// Byte order of the 16-bit pixel samples, decided by looking at the
+    /// PIXELS rather than at the header's `LittleEndian` field.
+    ///
+    /// The header flag is unusable in practice: the spec and the installed
+    /// base of capture tools disagree about its polarity, so both `0` and
+    /// `1` occur on files whose samples are plainly little-endian. Every
+    /// real-world writer emits little-endian, which is also what Apple
+    /// Silicon reads natively, so that stays the default — this probe only
+    /// exists to CATCH the byte-swapped case rather than render it as noise.
+    /// Always `true` for 8-bit sources, where byte order is meaningless.
+    let pixelDataIsLittleEndian: Bool
+
     private let data: Data           // memory-mapped, kept alive
     private let frameDataOffset: Int = 178
 
@@ -109,6 +151,9 @@ final class SerReader {
         guard data.count >= 178 else { throw SerReaderError.tooSmall }
         self.header = try Self.parseHeader(data)
         guard header.bytesPerFrame > 0 else { throw SerReaderError.invalidHeader }
+        self.pixelDataIsLittleEndian = Self.probePixelByteOrder(
+            data: data, header: header, frameDataOffset: 178
+        )
 
         // Diagnostic: if the OS mapped fewer bytes than the file really
         // has, large-file frame access silently runs short — surfaces as
@@ -223,6 +268,71 @@ final class SerReader {
         }
     }
 
+    // MARK: - Byte-order probe
+
+    /// Decide the byte order of 16-bit samples from the data itself.
+    ///
+    /// Method: an image row is locally smooth — neighbouring samples differ
+    /// by a little. Swapping the two bytes of every sample turns the low
+    /// byte into the high byte, so neighbouring differences explode by
+    /// roughly two orders of magnitude. Comparing the mean absolute
+    /// neighbour difference under both interpretations therefore separates
+    /// the two cases by a wide margin, and we only overturn the
+    /// little-endian default when the margin is unmistakable (4×).
+    ///
+    /// Cost: one row of one frame — a few kilobytes paged in, so this is
+    /// safe to run at `init` even for the file-list's dimension probe over
+    /// a folder of multi-GB captures.
+    private static func probePixelByteOrder(
+        data: Data, header: SerHeader, frameDataOffset: Int
+    ) -> Bool {
+        // 8-bit samples have no byte order to get wrong.
+        guard header.bytesPerPlane == 2 else { return true }
+        guard header.imageHeight > 0, header.imageWidth > 0 else { return true }
+        // Frame 0 must be fully mapped before we read into it.
+        guard frameDataOffset + header.bytesPerFrame <= data.count else { return true }
+
+        let samplesPerRow = header.imageWidth * header.planesPerPixel
+        guard samplesPerRow >= 2 else { return true }
+        // Middle row — avoids the black borders and any leading padding a
+        // capture tool might leave at the top of the frame.
+        let row = header.imageHeight / 2
+        let rowStart = frameDataOffset + row * samplesPerRow * 2
+        let pairs = Swift.min(2048, samplesPerRow - 1)
+        guard rowStart + (pairs + 1) * 2 <= data.count else { return true }
+
+        var littleEnergy: Double = 0
+        var bigEnergy: Double = 0
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress else { return }
+            var previousLE = 0, previousBE = 0
+            for i in 0...pairs {
+                // Unaligned-safe byte-wise load; the row offset has no
+                // alignment guarantee.
+                let lo = Int(base.advanced(by: rowStart + i * 2).load(as: UInt8.self))
+                let hi = Int(base.advanced(by: rowStart + i * 2 + 1).load(as: UInt8.self))
+                let asLE = lo | (hi << 8)
+                let asBE = hi | (lo << 8)
+                if i > 0 {
+                    littleEnergy += Double(abs(asLE - previousLE))
+                    bigEnergy += Double(abs(asBE - previousBE))
+                }
+                previousLE = asLE
+                previousBE = asBE
+            }
+        }
+
+        // Only call it big-endian when the little-endian reading is
+        // dramatically rougher. A flat / black row leaves both at zero and
+        // keeps the default.
+        let isLittle = !(bigEnergy > 0 && littleEnergy > bigEnergy * 4)
+        if !isLittle {
+            NSLog("SerReader: 16-bit samples look byte-swapped (neighbour roughness LE %.0f vs BE %.0f) — file is not little-endian",
+                  littleEnergy, bigEnergy)
+        }
+        return isLittle
+    }
+
     // MARK: - Header parsing
 
     private static func parseHeader(_ data: Data) throws -> SerHeader {
@@ -249,38 +359,56 @@ final class SerReader {
             throw SerReaderError.invalidHeader
         }
 
-        // Resolve the colour ID. Spec values are 0/8/9/10/11/16/17. Capture
-        // tools in the wild (SharpCap variants, FireCapture custom builds)
-        // sometimes write non-standard values. Strategy:
-        //   1. Try the raw value against the standard enum.
-        //   2. If unknown, try the SharpCap-style "+100" extended forms.
-        //   3. As a last resort, infer from frame-size math (file size −
-        //      header / frame count / pixels = bytes per pixel; 1=mono,
-        //      3=RGB, 6=RGB16). Only commit to this when the math is
-        //      clean and unambiguous.
-        // This handles the real-world ColorID 101 case (an ASI662MC file
-        // captured by a tool that uses the +100 dialect for Bayer/RGB).
+        // Resolve the colour ID. Documented spec values are 0 (mono),
+        // 8/9/10/11 (RGB Bayer), 16..19 (CMY Bayer — unsupported), 100 (RGB)
+        // and 101 (BGR). Strategy:
+        //   1. Take the raw value if it is one of the layouts we model.
+        //   2. Otherwise infer from frame-size math (file size − header /
+        //      frame count / pixels = bytes per pixel; 1 = mono, 2 = mono16,
+        //      3 = RGB24, 6 = RGB48). Only commit when the math is clean and
+        //      unambiguous.
+        // Step 2 covers two real cases: capture tools that write a value
+        // outside the spec, and AstroSharper's own pre-0.7.0 bake-in exports,
+        // which stamped 16 (really BAYER_CYYM) for what is actually RGB.
+        //
+        // There is deliberately NO "+100 dialect" table here. An earlier
+        // version had one, which folded the spec's RGB code (100) onto mono
+        // and broke every RGB24 SER written by a conformant tool.
         let colorID: SerColorID
+        let wasInferred: Bool
         if let standard = SerColorID(rawValue: colorIDRaw) {
             colorID = standard
-        } else if let extended = mapExtendedColorID(colorIDRaw) {
-            colorID = extended
-        } else if let inferred = inferColorIDFromFrameSize(
-            totalBytes: data.count,
-            frameCount: frameCount,
-            pixels: imageWidth * imageHeight,
-            pixelDepth: pixelDepth
-        ) {
-            colorID = inferred
+            wasInferred = false
         } else {
-            throw SerReaderError.unsupportedFormat("ColorID \(colorIDRaw)")
+            let inferred = inferColorIDFromFrameSize(
+                totalBytes: data.count,
+                frameCount: frameCount,
+                pixels: imageWidth * imageHeight,
+                pixelDepth: pixelDepth
+            )
+            // The CMY Bayer codes are real spec values we can't demosaic. A
+            // CMY frame is one sample per pixel, so the byte math cannot
+            // tell it apart from mono — accepting the mono guess would show
+            // a mosaic as greyscale and call it success. Only let inference
+            // override these codes when it says packed RGB, which is the
+            // signature of our own pre-0.7.0 exports rather than a real CMY
+            // sensor.
+            let isCMYCode = (16...19).contains(colorIDRaw)
+            if let inferred, !isCMYCode || inferred.isRGB {
+                colorID = inferred
+                wasInferred = true
+            } else {
+                throw SerReaderError.unsupportedFormat(describeUnknownColorID(colorIDRaw))
+            }
         }
 
         return SerHeader(
             fileID: fileID,
             luID: luID,
             colorID: colorID,
-            isLittleEndian: endianRaw == 0,  // SER convention: 0 = LE
+            rawColorID: colorIDRaw,
+            colorIDWasInferred: wasInferred,
+            isLittleEndian: endianRaw == 0,  // advisory only — see field doc
             imageWidth: imageWidth,
             imageHeight: imageHeight,
             pixelDepthPerPlane: pixelDepth,
@@ -293,27 +421,23 @@ final class SerReader {
         )
     }
 
-    /// SharpCap / FireCapture sometimes write `100 + standardColorID`. The
-    /// extra 100 is undocumented in the canonical SER spec but well-known
-    /// in the planetary capture community. Convert if the offset value
-    /// matches a known pattern.
-    private static func mapExtendedColorID(_ raw: Int32) -> SerColorID? {
+    /// Build the error text for a ColorID we can neither map nor infer.
+    /// Names the CMY Bayer codes explicitly — a user hitting one deserves
+    /// to know their file is a valid-but-exotic SER rather than corrupt.
+    private static func describeUnknownColorID(_ raw: Int32) -> String {
         switch raw {
-        case 100:  return .mono        // 100 + 0
-        case 108:  return .bayerRGGB   // 100 + 8
-        case 109:  return .bayerGRBG   // 100 + 9
-        case 110:  return .bayerGBRG   // 100 + 10
-        case 111:  return .bayerBGGR   // 100 + 11
-        case 116:  return .rgb         // 100 + 16
-        case 117:  return .bgr         // 100 + 17
-        default:   return nil
+        case 16: return "ColorID 16 (BAYER_CYYM) — CMY-Bayer sensors are not supported"
+        case 17: return "ColorID 17 (BAYER_YCMY) — CMY-Bayer sensors are not supported"
+        case 18: return "ColorID 18 (BAYER_YMCY) — CMY-Bayer sensors are not supported"
+        case 19: return "ColorID 19 (BAYER_MYYC) — CMY-Bayer sensors are not supported"
+        default: return "ColorID \(raw)"
         }
     }
 
     /// Last-resort inference from frame byte count. Useful when capture
-    /// tools write a ColorID that doesn't appear in any documented dialect
-    /// (e.g. the user-reported ColorID=101 case where the file's
-    /// 3-bytes-per-pixel math definitively identifies it as RGB24).
+    /// tools write a ColorID that doesn't appear in the spec, and for
+    /// AstroSharper's own pre-0.7.0 bake-in exports (ColorID 16 with
+    /// 6 bytes per pixel is unambiguously RGB48, not CMY Bayer).
     /// Returns nil when the math doesn't cleanly point at a single
     /// interpretation — better to fail with a clear error than to mis-
     /// categorise the data and produce visually-broken output.

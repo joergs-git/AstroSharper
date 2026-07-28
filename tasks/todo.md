@@ -2,6 +2,123 @@
 
 A running record of where we are, what's done, and what's next. Update at the end of every session.
 
+## SHIPPED [2026-07-28] — SER ColorID spec fix + frame-source unblocking (v0.7.0)
+
+Branch: `bugfix/ser-colorid-spec-and-frame-sources`
+
+Trigger: user report — a Siril-produced SER (`ColorID = 100`, 3856×2180, 8-bit,
+104 frames, 3.0 bytes/pixel) rendered flat grey with a vertical line pattern.
+Root cause confirmed from the file's own header bytes: we map ColorID 100 to
+mono, so `bytesPerFrame` came out 3× too small and every displayed frame was
+one third of a real RGB24 frame read as luminance.
+
+### A. SER ColorID — match the v3 spec
+- [ ] `SerColorID.rgb` 16 → **100**, `.bgr` 17 → **101**. Per spec, 16–19 are
+      the CMY Bayer codes (CYYM / YCMY / YMCY / MYYC), which we do not support.
+- [ ] Delete `mapExtendedColorID` — the "+100 dialect" never existed. It was a
+      misreading of the earlier ColorID-101 report, and it mapped 100 → mono.
+- [ ] Keep `inferColorIDFromFrameSize` as the fallback (it also rescues legacy
+      AstroSharper exports, which wrote 16 for RGB).
+- [ ] `SerWriter` bake-in export writes **100**, not 16 — our exported SERs were
+      unreadable for every other tool in the chain.
+- [ ] Surface the raw header value + whether the ID had to be inferred.
+
+### B. Endianness — one source of truth
+- [ ] `SerReader.pixelDataIsLittleEndian`, resolved from the DATA (cheap mid-row
+      smoothness probe), not from the unreliable header flag.
+- [ ] `TransitDetector` consumes it instead of `header.isLittleEndian` — today it
+      is the only consumer of that flag, so it can disagree with the decoder.
+- [ ] Byte-swapped 16-bit SERs get a clear rejection instead of silent noise.
+      Decode-side swapping is deliberately NOT implemented — see Results.
+
+### C. 16-bit RGB SER in the stack runner
+- [ ] `rgb16PSO` (`unpack_rgb16_to_rgba` exists; the preview path already uses it)
+- [ ] RGB staging buffers sized `W·H·3·bytesPerPlane`
+- [ ] `encodeUnpackRGB` picks kernel + scale by bit depth
+- [ ] Drop the "16-bit RGB SER not yet supported" gate
+
+### D. Video containers reachable from the GUI
+- [ ] `FileCatalog`: `mov` / `mp4` / `m4v` alongside `avi`
+- [ ] `isAVI` → membership test over the video set
+- [ ] `LuckyStackSection` gate: any frame sequence, not `.ser` only
+- [ ] `runLuckyStackOnSelection`: drop the "AVI support is coming" error — the
+      engine has accepted these since the E.1 SourceReader migration
+- [ ] Dimension probe + preview routing for the new extensions
+
+### E. Diagnostics
+- [ ] Extend `astrosharper analyze` rather than adding a redundant `serinfo`:
+      raw vs resolved ColorID, endian field + probe result, declared vs actual
+      bytes/frame with an explicit mismatch warning
+- [ ] RGB SER thumbnails in the file list (`FileCatalog.loadSER` returned nil)
+
+### F. Verification + release
+- [ ] Unit tests for ColorID resolution + frame-size inference
+- [ ] `astrosharper validate TESTIMAGES/` — 6/6 unchanged (default paths must
+      stay byte-identical)
+- [ ] Full unit suite green
+- [ ] Real-file check against the reported `Video.ser`
+- [ ] Version bump, CHANGELOG, README, `latest-release.json`
+
+### Results (2026-07-28)
+
+All six blocks landed; 359/359 unit tests (+15 new), 11/11 regression, GUI +
+CLI + Tests targets all build clean.
+
+**The bug, confirmed from the reported file's own bytes.** `Video.ser`:
+ColorID 100, 3856×2180, 8-bit, 104 frames, file 2 622 697 138 B →
+(2 622 697 138 − 178) / 104 / (3856·2180) = exactly **3.0 bytes/pixel**. RGB24.
+We mapped 100 → mono, so `bytesPerFrame` was 8 406 080 instead of 25 218 240
+and every displayed frame was one third of a real frame read as luminance.
+After the fix `analyze` reports RGB with the right frame size, and stacking the
+file end-to-end (104 frames, keep 50%, 9.1 s) produces a clean, correctly
+aligned Moon with no striping.
+
+**The magenta cast in that file is in the source, not in our decode.** Measured
+straight from the raw bytes over disc pixels: R 116.9 / G 65.6 / B 103.0. The
+fix also restores `OscDefaults.isOSC` for RGB SERs (it keyed off `.isRGB`, which
+never matched while the file was misread as mono), so auto-WB + channel
+normalize now engage in the GUI and neutralise it.
+
+**Regression baselines were already stale on `main` before this branch** — 3
+passed / 8 failed, including one fixture that had never been baselined. Proven
+not to be ours: built the CLI at `main`, captured every drift value, rebuilt on
+the branch, and diffed — **identical**, zero new drift on all 11 fixtures. The
+pre-existing shifts are all in the "sharper output" direction (e.g. Strata
+outputSharpness 9.9e-06 → 3.3e-05), consistent with the AutoAP / perf work in
+v0.6.x landing without a `--regenerate`. Baselines have now been regenerated
+and the suite is green again.
+
+**Verified beyond the reported file:**
+- 16-bit RGB48 SER (built by promoting the reported capture to 16-bit): stacks
+  correctly through the new `rgb16PSO` path — previously a hard rejection.
+- `.mov` (ffmpeg, H.264, same 12 frames): stacks to a result matching the SER
+  path — previously blocked in the GUI by an error message that had outlived
+  the engine limitation by several releases.
+
+**Deliberately NOT implemented: decode-side byte swapping.** Big-endian 16-bit
+SERs are detected and refused with a clear message rather than decoded. Raw SER
+bytes are turned into pixels at ~12 sites (`SerFrameLoader`, two in
+`LuckyRunner.decodeFrame`, two in its slot-less path, three in
+`LuckyStackPerChannel`, plus the CPU samplers in `ScrubProxyAtlas`,
+`SerScrubLowResCache`, `FileCatalog.loadSER`, `GifWriter`, `TransitDetector`).
+Threading a swap through all of them for a file variant we have never seen —
+every real-world writer emits little-endian — is disproportionate risk on hot
+paths. Detection + refusal + `analyze` reporting gives an honest outcome now,
+and the resolved value is a single property to consume if such a file ever
+appears.
+
+### Follow-ups (not blocking)
+- `latest-release.json` still points at 0.6.1 on purpose — advance it only once
+  the 0.7.0 DMG is published, so the in-app updater never offers a download
+  that 404s (same two-step as commit 6ad7d5a).
+- Wiki "File Formats" page needs the video-container list and the corrected
+  ColorID table.
+- Image-sequence stacking (a folder of JPEG / TIFF / FITS as one frame source)
+  is still absent — this is what the user originally tried. Needs a new
+  `ImageSequenceReader: SourceReader`; the rest of the pipeline is unaffected.
+- `FitsFrameReader` remains single-frame and BITPIX −32 only, so 16-bit FITS
+  straight from a scope still won't open.
+
 ## SHIPPED [2026-07-03] — SER Transit Detector (v0.6.0, merged to main + notarized release)
 
 Native Swift port of the validated Python `ser_transit.py`. Detects ISS / aircraft

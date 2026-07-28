@@ -2,6 +2,7 @@
   "bytesPerFrame" : 409600,
   "captureDateUTC" : "2022-10-25T00:55:17Z",
   "colorID" : "bayerRGGB",
+  "colorIDWasInferred" : false,
   "colorIsBayer" : true,
   "colorIsMono" : false,
   "colorIsRGB" : false,
@@ -10,8 +11,13 @@
   "imageHeight" : 640,
   "imageWidth" : 640,
   "instrument" : "ZWO ASI183MC",
+  "layoutWarnings" : [
+
+  ],
   "observer" : "Observer",
+  "pixelDataIsLittleEndian" : true,
   "pixelDepth" : 8,
+  "rawColorID" : 8,
   "telescope" : "telescope",
   "totalBytes" : 3679846400
 }
