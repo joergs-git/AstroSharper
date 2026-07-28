@@ -676,7 +676,7 @@ enum Stack {
 
         guard let input = inputPath, let output = outputPath else {
             cliStderr("stack: missing input or output path")
-            cliStderr("usage: astrosharper stack <input.ser> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--sharpen [--sharpen-amount X]] [--auto-psf [--auto-psf-snr N] [--auto-psf-roi] [--capture-gamma N]] [--auto-tile-size --focal-length-mm N --pixel-pitch-um N [--barlow N]] [--metrics file.json] [--quiet]")
+            cliStderr("usage: astrosharper stack <input.ser|.avi|.mov|.mp4> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--sharpen [--sharpen-amount X]] [--auto-psf [--auto-psf-snr N] [--auto-psf-roi] [--capture-gamma N]] [--auto-tile-size --focal-length-mm N --pixel-pitch-um N [--barlow N]] [--metrics file.json] [--quiet]")
             return 64
         }
 

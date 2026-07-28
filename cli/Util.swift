@@ -32,14 +32,17 @@ enum Usage {
         USAGE: astrosharper <subcommand> [options]
 
         SUBCOMMANDS:
-          analyze <file.ser> [--json]
-              Print SER metadata + sanity checks. Pure Foundation, no
-              Metal device required. --json emits machine-readable
-              output for the regression harness.
+          analyze <file.ser|file.fits> [--json] [--probe-frame N]
+              Print SER metadata + sanity checks, including the raw vs
+              resolved ColorID, the pixel byte-order probe, and a warning
+              when the header's bytes-per-pixel disagrees with the file on
+              disk — the fastest way to identify a mislabelled capture.
+              Pure Foundation, no Metal device required. --json emits
+              machine-readable output for the regression harness.
 
           stack <input> <output> [options]
-              Run the lucky-stack pipeline headless. (Coming with the
-              SourceReader-fed accumulator refactor.)
+              Run the lucky-stack pipeline headless. Input may be .ser,
+              .avi, .mov, .mp4 or .m4v.
 
           validate <testimages-dir> [--regenerate] [--filter X] [--quiet]
               Run the regression suite against a TESTIMAGES tree.

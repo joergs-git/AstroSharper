@@ -226,7 +226,16 @@ enum Analyze {
         print("dimensions  : \(h.imageWidth) × \(h.imageHeight)")
         print("frames      : \(h.frameCount)")
         print("bit depth   : \(h.pixelDepthPerPlane)")
+        // Raw ColorID next to the resolved layout. A file whose header value
+        // doesn't match how we read it is exactly the class of bug that
+        // produced grey, striped previews from spec-conformant RGB SERs.
+        let resolution = h.colorIDWasInferred ? "inferred from frame size" : "from header"
         print("color       : \(h.colorID) (mono=\(h.colorID.isMono), bayer=\(h.colorID.isBayer), rgb=\(h.colorID.isRGB))")
+        print("  ColorID   : \(h.rawColorID) — \(resolution)")
+        print("  endian    : header field says \(h.isLittleEndian ? "little" : "big"); pixel probe says \(reader.pixelDataIsLittleEndian ? "little" : "BIG — unsupported")")
+        for warning in layoutWarnings(reader: reader) {
+            print("  ! \(warning)")
+        }
         print("instrument  : \(emptyOrValue(h.instrument))")
         print("observer    : \(emptyOrValue(h.observer))")
         print("telescope   : \(emptyOrValue(h.telescope))")
@@ -253,9 +262,13 @@ enum Analyze {
             "frameCount": h.frameCount,
             "pixelDepth": h.pixelDepthPerPlane,
             "colorID": String(describing: h.colorID),
+            "rawColorID": Int(h.rawColorID),
+            "colorIDWasInferred": h.colorIDWasInferred,
             "colorIsMono": h.colorID.isMono,
             "colorIsBayer": h.colorID.isBayer,
             "colorIsRGB": h.colorID.isRGB,
+            "pixelDataIsLittleEndian": reader.pixelDataIsLittleEndian,
+            "layoutWarnings": layoutWarnings(reader: reader),
             "bytesPerFrame": h.bytesPerFrame,
             "totalBytes": h.frameCount * h.bytesPerFrame,
             "instrument": h.instrument,
@@ -286,5 +299,50 @@ enum Analyze {
 
     private static func emptyOrValue(_ s: String) -> String {
         s.isEmpty ? "(none)" : s
+    }
+
+    /// Cross-check the header's own claims against the file on disk.
+    ///
+    /// The decisive signal is bytes-per-pixel: `(fileSize − 178) / frames /
+    /// (W · H)` must equal what the declared colour layout implies (1 = mono8,
+    /// 2 = mono16, 3 = RGB24, 6 = RGB48). When it doesn't, the header is
+    /// lying about at least one of ColorID, bit depth, or frame count — and
+    /// the preview will be visibly wrong in a way that's otherwise hard to
+    /// attribute. Shared by the text and JSON emitters.
+    private static func layoutWarnings(reader: SerReader) -> [String] {
+        let h = reader.header
+        var out: [String] = []
+
+        if h.colorIDWasInferred {
+            out.append("header ColorID \(h.rawColorID) is not a SER v3 value — layout was derived from the frame size")
+        }
+        if !reader.pixelDataIsLittleEndian {
+            out.append("16-bit samples are byte-swapped; AstroSharper decodes little-endian only")
+        }
+
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: reader.url.path))?[.size] as? Int,
+              h.frameCount > 0, h.imageWidth > 0, h.imageHeight > 0 else {
+            return out
+        }
+        let payload = size - 178
+        guard payload > 0 else {
+            out.append("file holds no frame data (\(size) bytes total)")
+            return out
+        }
+        // The optional timestamp trailer (8 bytes per frame) sits after the
+        // frames, so the measured value can exceed the declared one slightly;
+        // only a shortfall or a large excess indicates a real mismatch.
+        let declaredPerFrame = h.bytesPerFrame
+        let measuredPerFrame = payload / h.frameCount
+        let trailerPerFrame = MemoryLayout<Int64>.size
+        if measuredPerFrame < declaredPerFrame || measuredPerFrame > declaredPerFrame + trailerPerFrame {
+            let declaredBPP = Double(declaredPerFrame) / Double(h.imageWidth * h.imageHeight)
+            let measuredBPP = Double(measuredPerFrame) / Double(h.imageWidth * h.imageHeight)
+            out.append(String(
+                format: "frame size mismatch: header implies %.1f bytes/pixel, file has %.1f — the declared ColorID or bit depth is wrong",
+                declaredBPP, measuredBPP
+            ))
+        }
+        return out
     }
 }
