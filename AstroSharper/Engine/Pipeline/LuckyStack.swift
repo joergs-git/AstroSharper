@@ -820,22 +820,24 @@ enum LuckyStack {
                 await onProgress(.error("\(error)")); return
             }
 
-            // SER mono 8/16, the four Bayer patterns, and packed 8-bit RGB /
-            // BGR all flow through the SerReader fast path with their
-            // dedicated unpack kernels. AVI (and any other SourceReader)
-            // arrives pre-debayered as rgba16Float via `loadFrame`, so the
-            // colour-ID checks below only constrain the SER fast path —
-            // non-SER readers always report `.rgb` and skip the kernel
-            // gate entirely. 16-bit RGB SERs are still rejected because
-            // unpack_rgb8 assumes 1 byte per channel.
+            // SER mono, the four Bayer patterns, and packed RGB / BGR all
+            // flow through the SerReader fast path with their dedicated
+            // unpack kernels, at 8 or 16 bits per channel. AVI (and any
+            // other SourceReader) arrives pre-debayered as rgba16Float via
+            // `loadFrame`, so the checks below only constrain the SER fast
+            // path — non-SER readers always report `.rgb` and skip them.
             let cid = reader.colorID
-            if reader is SerReader {
-                if cid.isRGB && reader.pixelDepth != 8 {
-                    await onProgress(.error("16-bit RGB SER not yet supported — re-export as 8-bit RGB or as Bayer."))
-                    return
-                }
+            if let ser = reader as? SerReader {
                 guard cid.isMono || cid.isBayer || cid.isRGB else {
                     await onProgress(.error("Unsupported SER colour layout (got \(cid))."))
+                    return
+                }
+                // Byte-swapped 16-bit samples would stack into noise. The
+                // unpack kernels read native little-endian, which is what
+                // every real-world capture tool writes; refuse rather than
+                // produce a plausible-looking but meaningless result.
+                guard ser.pixelDataIsLittleEndian else {
+                    await onProgress(.error("This SER's 16-bit samples are byte-swapped (big-endian) — AstroSharper reads little-endian. Re-export the file from your capture or conversion tool."))
                     return
                 }
             }
@@ -1222,6 +1224,7 @@ private final class LuckyRunner {
     let bayer16PSO: MTLComputePipelineState
     let bayer8PSO: MTLComputePipelineState
     let rgb8PSO: MTLComputePipelineState     // packed-RGB SER (3 bytes/pixel, 8-bit)
+    let rgb16PSO: MTLComputePipelineState    // packed-RGB SER (6 bytes/pixel, 16-bit)
     let calibrationPSO: MTLComputePipelineState   // D.1 dark/flat applier
     let qualityPSO: MTLComputePipelineState
     let lumaPSO: MTLComputePipelineState
@@ -1273,7 +1276,8 @@ private final class LuckyRunner {
     let bytesPerPlane: Int
     let isMono16: Bool
     let isBayer: Bool
-    let isRGB: Bool                  // .rgb / .bgr SER (3 bytes per pixel, 8-bit only)
+    let isRGB: Bool                  // .rgb / .bgr SER — packed, 3 or 6 bytes per pixel
+    let isRGB16: Bool                // packed RGB at 16 bits per channel (RGB48 / BGR48)
     let rgbSwapRB: Bool              // true for .bgr — kernel swaps R/B
     let bayerPattern: UInt32
 
@@ -1336,6 +1340,7 @@ private final class LuckyRunner {
         self.bayer16PSO  = Self.makePSO(library: lib, device: device, fn: "unpack_bayer16_to_rgba")
         self.bayer8PSO   = Self.makePSO(library: lib, device: device, fn: "unpack_bayer8_to_rgba")
         self.rgb8PSO     = Self.makePSO(library: lib, device: device, fn: "unpack_rgb8_to_rgba")
+        self.rgb16PSO    = Self.makePSO(library: lib, device: device, fn: "unpack_rgb16_to_rgba")
         self.calibrationPSO = Self.makePSO(library: lib, device: device, fn: "apply_calibration")
         self.qualityPSO  = Self.makePSO(library: lib, device: device, fn: "quality_partials")
         self.lumaPSO     = Self.makePSO(library: lib, device: device, fn: "extract_luma_downsample")
@@ -1368,6 +1373,7 @@ private final class LuckyRunner {
         self.isMono16 = (bytesPerPlane == 2) && !cid.isRGB
         self.isBayer = cid.isBayer
         self.isRGB = cid.isRGB
+        self.isRGB16 = (bytesPerPlane == 2) && cid.isRGB
         self.rgbSwapRB = cid == .bgr
         self.bayerPattern = cid.bayerPatternIndex
 
@@ -1380,7 +1386,9 @@ private final class LuckyRunner {
         if serFastPath != nil {
             if cid.isRGB {
                 self.stagingTextures = []
-                let rgbFrameBytes = W * H * 3
+                // 3 channels × 1 byte (RGB24) or × 2 bytes (RGB48). Matches
+                // SerHeader.bytesPerFrame for packed-RGB sources.
+                let rgbFrameBytes = W * H * 3 * bytesPerPlane
                 self.rgbBuffers = (0..<options.stagingPoolSize).map { _ in
                     dev.makeBuffer(length: rgbFrameBytes, options: [.storageModeShared])!
                 }
@@ -1494,18 +1502,20 @@ private final class LuckyRunner {
         enc.endEncoding()
     }
 
-    /// RGB / BGR variant of `encodeUnpack` — reads from an MTLBuffer
-    /// (3 bytes per pixel, 8-bit) and writes to the rgba16Float frame
-    /// texture. `swapRB` is set per .rgb / .bgr at runner-init time.
+    /// RGB / BGR variant of `encodeUnpack` — reads packed pixels from an
+    /// MTLBuffer (Metal has no 3-channel texture format) and writes to the
+    /// rgba16Float frame texture. Handles both RGB24 (3 B/px) and RGB48
+    /// (6 B/px); `swapRB` is set per .rgb / .bgr at runner-init time.
     func encodeUnpackRGB(
         commandBuffer cmd: MTLCommandBuffer,
         buffer src: MTLBuffer,
         frameTex: MTLTexture
     ) {
         guard let enc = cmd.makeComputeCommandEncoder() else { return }
-        enc.setComputePipelineState(rgb8PSO)
+        let pso = isRGB16 ? rgb16PSO : rgb8PSO
+        enc.setComputePipelineState(pso)
         var p = RgbUnpackParamsCPU(
-            scale: 1.0 / 255.0,
+            scale: isRGB16 ? 1.0 / 65535.0 : 1.0 / 255.0,
             flip: options.meridianFlipped ? 1 : 0,
             swapRB: rgbSwapRB ? 1 : 0,
             width: UInt32(W)
@@ -1513,7 +1523,7 @@ private final class LuckyRunner {
         enc.setBuffer(src, offset: 0, index: 0)
         enc.setTexture(frameTex, index: 0)
         enc.setBytes(&p, length: MemoryLayout<RgbUnpackParamsCPU>.stride, index: 1)
-        let (tgC, tgS) = dispatchThreadgroups(for: frameTex, pso: rgb8PSO)
+        let (tgC, tgS) = dispatchThreadgroups(for: frameTex, pso: pso)
         enc.dispatchThreadgroups(tgC, threadsPerThreadgroup: tgS)
         enc.endEncoding()
     }
@@ -2090,7 +2100,7 @@ private final class LuckyRunner {
         // are blit-copied into the target.
         if let ser = serFastPath {
             if isRGB {
-                let frameBytes = W * H * 3
+                let frameBytes = W * H * 3 * bytesPerPlane
                 guard let buf = device.makeBuffer(length: frameBytes, options: [.storageModeShared]) else {
                     throw NSError(domain: "Lucky", code: 2)
                 }
