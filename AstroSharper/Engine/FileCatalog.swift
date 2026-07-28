@@ -72,8 +72,9 @@ struct FileEntry: Identifiable, Hashable {
     var typeKey: String { url.pathExtension.lowercased() }
 
     var isSER: Bool { url.pathExtension.lowercased() == FileCatalog.serExtension }
-    var isAVI: Bool { url.pathExtension.lowercased() == FileCatalog.aviExtension }
-    /// Any frame-sequence container (SER or AVI). Lucky-Stack and the
+    /// Any AVFoundation-decodable video container (.avi / .mov / .mp4 / .m4v).
+    var isAVI: Bool { FileCatalog.videoExtensions.contains(url.pathExtension.lowercased()) }
+    /// Any frame-sequence container (SER or video). Lucky-Stack and the
     /// auto-batch flow both branch on this — the underlying reader is
     /// chosen by the consumer.
     var isFrameSequence: Bool { isSER || isAVI }
@@ -116,11 +117,16 @@ struct FileCatalog {
     static let supportedExtensions: Set<String> = [
         "tif", "tiff", "png", "jpg", "jpeg",
         "ser",
-        "avi",
+        "avi", "mov", "mp4", "m4v",
         "fits", "fit",
     ]
     static let serExtension = "ser"
-    static let aviExtension = "avi"
+    /// Containers `AviReader` can decode through AVFoundation. `.avi` is the
+    /// planetary-capture default (SharpCap / FireCapture); the QuickTime
+    /// family matters because it is what macOS-native tooling — ffmpeg, or a
+    /// phone recording — produces, and the lucky-stack engine has accepted
+    /// all four since the SourceReader migration.
+    static let videoExtensions: Set<String> = ["avi", "mov", "mp4", "m4v"]
     static let fitsExtensions: Set<String> = ["fits", "fit"]
 
     mutating func load(from folder: URL) {
@@ -187,7 +193,7 @@ struct FileCatalog {
             }
             return nil
         }
-        if ext == aviExtension {
+        if videoExtensions.contains(ext) {
             if let reader = try? AviReader(url: url) {
                 return (reader.imageWidth, reader.imageHeight)
             }
@@ -339,15 +345,15 @@ enum ThumbnailLoader {
         return NSImage(cgImage: cg, size: aspectFitSize(cg, maxDimension: maxDimension))
     }
 
-    /// Read frame 0 of a SER and produce an 8-bit thumbnail. Mono and Bayer
-    /// (RGGB / GRBG / GBRG / BGGR) supported — Bayer is downsampled by
-    /// stepping in 2-px units across the pattern so each thumbnail pixel
-    /// integrates one full RGGB tile (cheap approximation, plenty for the
-    /// list view).
+    /// Read frame 0 of a SER and produce an 8-bit thumbnail. Mono, the four
+    /// RGB Bayer patterns (RGGB / GRBG / GBRG / BGGR) and packed RGB / BGR
+    /// are supported. Bayer is downsampled by stepping in 2-px units across
+    /// the pattern so each thumbnail pixel integrates one full RGGB tile
+    /// (cheap approximation, plenty for the list view).
     private static func loadSER(url: URL, maxDimension: CGFloat) -> NSImage? {
         guard let reader = try? SerReader(url: url) else { return nil }
         let h = reader.header
-        guard h.colorID.isMono || h.colorID.isBayer else { return nil }
+        guard h.colorID.isMono || h.colorID.isBayer || h.colorID.isRGB else { return nil }
 
         let srcW = h.imageWidth, srcH = h.imageHeight
         let scale = max(1.0, max(Double(srcW), Double(srcH)) / Double(maxDimension * 2))
@@ -357,6 +363,11 @@ enum ThumbnailLoader {
         // For Bayer we need to read 2×2 tiles to recover colour. Snap source
         // step to even multiples so each tile is captured cleanly.
         let bayer = h.colorID.isBayer
+        // Packed RGB / BGR carries three interleaved samples per pixel, so
+        // the flat `y·W + x` sample index below does not apply — that path
+        // reads its channels explicitly.
+        let packedRGB = h.colorID.isRGB
+        let swapRB = h.colorID == .bgr
         let rOff: (x: Int, y: Int) = {
             switch h.colorID {
             case .bayerRGGB: return (0, 0)
@@ -369,10 +380,14 @@ enum ThumbnailLoader {
 
         var rgba = [UInt8](repeating: 0, count: dstW * dstH * 4)
         reader.withFrameBytes(at: 0) { ptr, _ in
-            func sample(_ x: Int, _ y: Int) -> UInt8 {
+            /// Read one scalar sample. `plane` selects the channel within a
+            /// packed-RGB pixel and is ignored for mono / Bayer, where each
+            /// pixel is a single sample.
+            func sample(_ x: Int, _ y: Int, plane: Int = 0) -> UInt8 {
                 let xi = min(srcW - 1, max(0, x))
                 let yi = min(srcH - 1, max(0, y))
-                let idx = yi * srcW + xi
+                let samplesPerPixel = packedRGB ? 3 : 1
+                let idx = (yi * srcW + xi) * samplesPerPixel + plane
                 if h.bytesPerPlane == 2 {
                     let p16 = ptr.advanced(by: idx * 2).withMemoryRebound(to: UInt16.self, capacity: 1) { $0.pointee }
                     return UInt8(min(UInt32(p16) >> 8, 255))
@@ -386,7 +401,15 @@ enum ThumbnailLoader {
                 for x in 0..<dstW {
                     let sx = min(srcW - 1, Int(Double(x) * scale))
                     let outIdx = (y * dstW + x) * 4
-                    if bayer {
+                    if packedRGB {
+                        let c0 = sample(sx, sy, plane: 0)
+                        let c1 = sample(sx, sy, plane: 1)
+                        let c2 = sample(sx, sy, plane: 2)
+                        rgba[outIdx + 0] = swapRB ? c2 : c0
+                        rgba[outIdx + 1] = c1
+                        rgba[outIdx + 2] = swapRB ? c0 : c2
+                        rgba[outIdx + 3] = 255
+                    } else if bayer {
                         // Snap to even tile origin for predictable colour.
                         let tx = sx - (sx & 1)
                         let ty = sy - (sy & 1)

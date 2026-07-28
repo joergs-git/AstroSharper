@@ -1601,19 +1601,15 @@ final class AppModel: ObservableObject {
             return
         }
 
+        // Any frame-sequence container qualifies. SER takes the memory-mapped
+        // fast path; .avi / .mov / .mp4 / .m4v go through AviReader, which
+        // `SourceReaderFactory` has dispatched to since the SourceReader
+        // migration. The GUI used to reject video here with an "AVI support
+        // is coming" message that had long outlived the engine limitation.
         let targets = batchTargetIDs
-        let selectedSers = catalog.files.filter { targets.contains($0.id) && $0.isSER }
-        let selectedAvi  = catalog.files.filter { targets.contains($0.id) && $0.isAVI }
-        guard !selectedSers.isEmpty else {
-            if !selectedAvi.isEmpty {
-                // AVI files are recognised in the catalog but the lucky-stack
-                // engine still expects a SER reader; full AVI demuxing is on
-                // the roadmap. Surface the limitation explicitly instead of
-                // silently no-oping.
-                jobStatus = .error("AVI lucky-stack support is coming — please convert to SER for now.")
-            } else {
-                jobStatus = .error("Mark or select at least one .ser file in the list.")
-            }
+        let selectedSequences = catalog.files.filter { targets.contains($0.id) && $0.isFrameSequence }
+        guard !selectedSequences.isEmpty else {
+            jobStatus = .error("Mark or select at least one video file (.ser / .avi / .mov / .mp4) in the list.")
             return
         }
 
@@ -1628,7 +1624,7 @@ final class AppModel: ObservableObject {
         // each non-zero entry in `variants` adds a labelled run that lands
         // in its own subdirectory of the output folder.
         var queue: [LuckyStackItem] = []
-        for entry in selectedSers {
+        for entry in selectedSequences {
             queue.append(LuckyStackItem(
                 url: entry.url,
                 meridianFlipped: entry.meridianFlipped,

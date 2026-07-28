@@ -1,7 +1,8 @@
-// Lucky-Stack panel section. Operates on whatever SER files are marked /
-// selected in the main file list — no separate file picker, single source of
-// truth. Output goes to the same `customOutputFolder` (or `<root>/_processed`
-// fallback) used by the normal sharpen pipeline.
+// Lucky-Stack panel section. Operates on whatever frame-sequence files
+// (.ser / .avi / .mov / .mp4) are marked / selected in the main file list —
+// no separate file picker, single source of truth. Output goes to the same
+// `customOutputFolder` (or `<root>/_processed` fallback) used by the normal
+// sharpen pipeline.
 import AppKit   // NSOpenPanel for the calibration master-frame pickers
 import SwiftUI
 import UniformTypeIdentifiers   // UTType.tiff / .png / .jpeg for picker filtering
@@ -12,13 +13,13 @@ struct LuckyStackSection: View {
 
     private var serTargets: [FileEntry] {
         let ids = app.batchTargetIDs
-        return app.catalog.files.filter { ids.contains($0.id) && $0.isSER }
+        return app.catalog.files.filter { ids.contains($0.id) && $0.isFrameSequence }
     }
     private var serCount: Int { serTargets.count }
-    private var allSerInCatalog: Int { app.catalog.files.filter { $0.isSER }.count }
-    /// Lucky Stack is meaningless without SER input. We disable both the
-    /// header chevron and the run button so the section can't accidentally
-    /// be expanded on an empty / TIFF-only folder.
+    private var allSerInCatalog: Int { app.catalog.files.filter { $0.isFrameSequence }.count }
+    /// Lucky Stack needs a frame sequence — a SER or a video container. We
+    /// disable both the header chevron and the run button so the section
+    /// can't accidentally be expanded on an empty / stills-only folder.
     private var disabled: Bool { allSerInCatalog == 0 }
 
     /// One-line summary of which sharpening / tone passes will fire
@@ -122,7 +123,7 @@ struct LuckyStackSection: View {
                             .font(.system(size: 13, weight: .bold))
                             .foregroundColor(disabled ? .secondary : .primary)
                         if disabled {
-                            Text("· no .ser files")
+                            Text("· no video files")
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
                         }
@@ -138,7 +139,7 @@ struct LuckyStackSection: View {
                     .foregroundColor(.secondary)
             }
             .opacity(disabled ? 0.55 : 1.0)
-            .help(disabled ? "Lucky Stack runs on .ser video files. Open a folder containing SharpCap / FireCapture .ser captures to enable." : "")
+            .help(disabled ? "Lucky Stack runs on frame sequences — .ser, .avi, .mov, .mp4. Open a folder containing captures to enable." : "")
 
             if expanded && !disabled {
                 Picker("Mode", selection: $app.luckyStack.mode) {
@@ -806,7 +807,7 @@ struct LuckyStackSection: View {
                 LuckyRunButton(disabled: serCount == 0) {
                     app.runLuckyStackOnSelection()
                 }
-                .help("Stacks every marked or selected .ser file. Output goes to the configured Output Folder.")
+                .help("Stacks every marked or selected video file (.ser / .avi / .mov / .mp4). Output goes to the configured Output Folder.")
                 // NB: the auto-stack folder watch control moved to the top
                 // toolbar (next to Open) 2026-05-22 — it must be reachable
                 // on an empty capture folder, but this whole section is
@@ -841,16 +842,16 @@ struct LuckyStackSection: View {
     }
 
     private var targetCountLabel: String {
-        if allSerInCatalog == 0 { return "no SER" }
-        return "\(serCount)/\(allSerInCatalog) SER"
+        if allSerInCatalog == 0 { return "no video" }
+        return "\(serCount)/\(allSerInCatalog) video"
     }
 
     private var hintLine: String {
         if allSerInCatalog == 0 {
-            return "No .ser files in the open folder. Open a folder with SharpCap captures (⌘O) to begin."
+            return "No video files in the open folder. Open a folder with .ser / .avi / .mov / .mp4 captures (⌘O) to begin."
         }
         if serCount == 0 {
-            return "Mark or select the .ser files you want to stack in the file list."
+            return "Mark or select the video files you want to stack in the file list."
         }
         return "Will write \(serCount) stacked TIFF\(serCount == 1 ? "" : "s") to the output folder."
     }
