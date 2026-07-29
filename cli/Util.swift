@@ -42,7 +42,10 @@ enum Usage {
 
           stack <input> <output> [options]
               Run the lucky-stack pipeline headless. Input may be .ser,
-              .avi, .mov, .mp4 or .m4v.
+              .avi, .mov, .mp4, .m4v, or a FOLDER of still images, which
+              is read as a frame sequence in natural filename order —
+              the smart-telescope case (Vespera / Seestar / Dwarf write
+              one FITS per sub, never video).
 
           validate <testimages-dir> [--regenerate] [--filter X] [--quiet]
               Run the regression suite against a TESTIMAGES tree.

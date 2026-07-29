@@ -5,7 +5,26 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-29
+
 ### Added
+- **Stack a folder of images — no video file needed.** Mark two or more still
+  frames (TIFF / PNG / JPEG / FITS) and press Run Lucky Stack: they are read as
+  one frame sequence and produce one stacked result. This is the smart-telescope
+  path — Vaonis Vespera, ZWO Seestar and DwarfLab all write one file per sub and
+  never a video, so until now their output could not be stacked without a
+  conversion tool (PIPP is Windows-only, and the ffmpeg route needs a codec most
+  recipes get wrong). No intermediate file is written and nothing is transcoded.
+  Marked video files keep stacking individually, so a mixed folder needs no
+  special handling. Headless too: `astrosharper stack <folder> out.tif`.
+- **16-bit FITS opens.** The reader covered only 32-bit float, which is not what
+  any camera writes — every one of them produces integer FITS, usually 16-bit
+  with the standard BZERO=32768 unsigned convention. All standard BITPIX values
+  (8 / 16 / 32 / 64 integer, -32 / -64 float) are now read, with BZERO and
+  BSCALE applied per the specification.
+- **CFA FITS is debayered automatically** via the `BAYERPAT` keyword, using the
+  same GPU demosaic the SER path uses. A raw sub from a smart telescope goes
+  straight in — no debayer step in another application first.
 - **Clear message when a video's codec can't be decoded** — macOS has no FFV1
   decoder, which is what most "lossless video" recipes on the internet produce.
   AstroSharper used to open such a file, read its frame count correctly, and
@@ -20,6 +39,12 @@ the project follows semantic versioning once it leaves 0.x.
   below a quarter of full scale, the existing Auto toggle engages by itself.
   Display only: no pixel of the texture, the stack, or any saved file changes.
   Press A to dismiss it for that file — it will not switch itself back on.
+
+### Note on scope
+Image-sequence stacking is lucky imaging over many frames of the same subject —
+Moon, Sun, planets. It is not a deep-sky integration path: those need
+calibration frames, plate-solved registration and rejection stacking, which is
+what Siril, APP and PixInsight are for.
 
 
 ## [0.7.0] - 2026-07-28

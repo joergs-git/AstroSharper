@@ -22,7 +22,7 @@ A native, GPU-accelerated lucky-imaging companion for solar, lunar and planetary
 
 ## What it does
 
-**AstroSharper** turns long capture sessions into crisp final images with as little manual tuning as possible. Drop a folder of captures — `.ser`, `.avi`, `.mov`, `.mp4` — flip the **AutoNuke** master toggle on, hit **Run Lucky Stack**, and walk away with a stacked, aligned, deconvolved master file. The engine picks AP geometry, PSF σ, keep-percentage and multi-AP yes/no — all per-data, no settings to guess at.
+**AstroSharper** turns long capture sessions into crisp final images with as little manual tuning as possible. Drop a folder of captures — a `.ser` / `.avi` / `.mov` / `.mp4` video, or just the individual frames your telescope wrote — flip the **AutoNuke** master toggle on, hit **Run Lucky Stack**, and walk away with a stacked, aligned, deconvolved master file. The engine picks AP geometry, PSF σ, keep-percentage and multi-AP yes/no — all per-data, no settings to guess at.
 
 Already have stacked images (TIFF / PNG / JPEG)? Skip Lucky Stack entirely and use the post-stack sharpening + tone pipeline on its own. Either way it's the same UI, same pipeline, same Apple-Silicon-native speed — every step runs on the GPU via Metal compute kernels and `MPSGraph`. A 4K Sun frame goes through unsharp mask in **under 10 ms on an Apple M2**.
 
@@ -30,7 +30,7 @@ Already have stacked images (TIFF / PNG / JPEG)? Skip Lucky Stack entirely and u
 
 - **AutoNuke + AutoAP** — one master toggle hands every "auto" decision to the engine: PSF σ from the limb, AP grid + patch size per data, multi-AP gate, auto keep-%. Beats hand-tuned presets on every fixture in the regression set. → [Lucky Stack](https://github.com/joergs-git/AstroSharper/wiki/Lucky-Stack)
 - **Smart Auto-PSF + Radial Fade Filter** — one-click, parameter-free deconvolution that measures the PSF from the planetary limb and suppresses the dark Gibbs ring on discs over dark sky. → [Sharpening](https://github.com/joergs-git/AstroSharper/wiki/Sharpening)
-- **Works with the video you already have** — SharpCap / FireCapture `.ser` (mono, Bayer and packed RGB, 8- or 16-bit) plus `.avi`, `.mov`, `.mp4` and `.m4v`. No conversion step: if ffmpeg or your phone produced it, you can stack it.
+- **Works with what your gear already produces** — SharpCap / FireCapture `.ser` (mono, Bayer and packed RGB, 8- or 16-bit), `.avi` / `.mov` / `.mp4` / `.m4v` video, **and plain image sequences**. Mark a folder of TIFF / PNG / JPEG / FITS frames and they stack together as one — the smart-telescope path (Vespera, Seestar, Dwarf write one file per sub, never video), with no conversion tool anywhere in the chain. 16-bit FITS opens directly, CFA subs are debayered on the way in.
 - **Folder watch + auto-stack** — point it at your capture folder and walk away; each new capture is stacked the moment it finishes writing. NAS-safe (polling re-scan, size-stability gating).
 - **Stacking & alignment** — Lightspeed / Scientific modes, disc-centroid & ROI stabilization, per-channel stacking for OSC cameras, drizzle 1.5×/2×/3×, opt-in drift correction. → [Stabilization](https://github.com/joergs-git/AstroSharper/wiki/Stabilization)
 - **Quality intelligence** — per-frame sharpness HUD, one-click video-quality scan with a keep-% recommendation, on-disk quality cache. → [Preview HUD & Quality](https://github.com/joergs-git/AstroSharper/wiki/Preview-HUD-and-Quality)
@@ -38,7 +38,7 @@ Already have stacked images (TIFF / PNG / JPEG)? Skip Lucky Stack entirely and u
 
 ## Quick workflow
 
-1. **Open** a folder of captures — `.ser` / `.avi` / `.mov` / `.mp4` (`⌘O` or drag-and-drop on the window).
+1. **Open** a folder of captures — a `.ser` / `.avi` / `.mov` / `.mp4` video, or an image sequence (`⌘O` or drag-and-drop on the window).
 2. **Watch the target picker** at the top light up for the detected target. Click a different chip to override.
 3. *(Optional)* **Press R** on the sharpest-looking row to pin it as the reference — AutoNuke picks a sensible one if you don't.
 4. Open the **Lucky Stack** section, flip **AutoNuke** ON.

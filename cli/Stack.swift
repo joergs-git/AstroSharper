@@ -7,9 +7,8 @@
 // the actual stack output — without it, every GPU change is verified
 // by hand in the running app.
 //
-// AVI lucky-stack is gated on the E.1 SourceReader refactor: until
-// that lands the subcommand checks the input extension and rejects
-// AVI with a clear error.
+// Input may be a .ser, an AVFoundation-decodable video container, or a
+// FOLDER of still images read as a frame sequence.
 import Foundation
 import Metal
 
@@ -676,7 +675,7 @@ enum Stack {
 
         guard let input = inputPath, let output = outputPath else {
             cliStderr("stack: missing input or output path")
-            cliStderr("usage: astrosharper stack <input.ser|.avi|.mov|.mp4> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--sharpen [--sharpen-amount X]] [--auto-psf [--auto-psf-snr N] [--auto-psf-roi] [--capture-gamma N]] [--auto-tile-size --focal-length-mm N --pixel-pitch-um N [--barlow N]] [--metrics file.json] [--quiet]")
+            cliStderr("usage: astrosharper stack <input.ser|.avi|.mov|.mp4|folder-of-images> <output.tif> [--keep N|N,N,...] [--mode lightspeed|scientific] [--multi-ap [--multi-ap-grid N]] [--two-stage [--two-stage-grid N]] [--sigma N] [--drizzle N [--pixfrac X]] [--sharpen [--sharpen-amount X]] [--auto-psf [--auto-psf-snr N] [--auto-psf-roi] [--capture-gamma N]] [--auto-tile-size --focal-length-mm N --pixel-pitch-um N [--barlow N]] [--metrics file.json] [--quiet]")
             return 64
         }
 
@@ -711,14 +710,17 @@ enum Stack {
             return 1
         }
 
-        // E.1 SourceReader-driven LuckyRunner — SER fast path stays as-is,
-        // AVI / MOV / MP4 / M4V are accepted via AVFoundation. FITS lucky-
-        // stack will follow once the FitsFrameReader path is exercised on
-        // captures (header is multi-frame ready, decode loop isn't).
+        // SourceReader-driven LuckyRunner — SER takes the memory-mapped
+        // fast path, AVI / MOV / MP4 / M4V go through AVFoundation, and a
+        // DIRECTORY is read as an image sequence (every supported still
+        // inside it, in natural filename order). The directory case is how
+        // smart-telescope output gets stacked without a conversion step.
+        var inputIsDirectory: ObjCBool = false
+        _ = FileManager.default.fileExists(atPath: inputURL.path, isDirectory: &inputIsDirectory)
         let ext = inputURL.pathExtension.lowercased()
         let supported: Set<String> = ["ser", "avi", "mov", "mp4", "m4v"]
-        guard supported.contains(ext) else {
-            cliStderr("stack: unsupported input '.\(ext)'. Supported: .ser, .avi, .mov, .mp4, .m4v.")
+        guard inputIsDirectory.boolValue || supported.contains(ext) else {
+            cliStderr("stack: unsupported input '.\(ext)'. Supported: .ser, .avi, .mov, .mp4, .m4v, or a folder of still images.")
             return 2
         }
 

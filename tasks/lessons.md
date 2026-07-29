@@ -2,6 +2,17 @@
 
 Patterns and gotchas captured from this project. Read at session start; append after every correction.
 
+## [2026-07-29] — Never size an architecture decision from a Debug measurement
+- **Mistake (nearly made):** Profiling image-sequence stacking in Debug gave 7.2 s per full-size frame — 86 s for 12 frames, which extrapolates to ~2 hours for 1000. That number justified building a scratch mmap transcode cache to avoid the multi-pass decode. The same run in Release: **0.16 s per frame, 45× faster.** No cache needed, and the whole subsystem would have been dead weight plus a cache-invalidation problem.
+- **Root cause:** Swift's per-element bounds checking and unspecialised generics make tight numeric loops (per-pixel decode, per-sample byte reassembly) pathologically slow in Debug. The penalty is concentrated in exactly the code whose cost you are trying to measure, so the error is not a constant factor across the program — it is worst precisely where you are looking.
+- **Rule:** Any performance number that will decide whether a component gets built must come from a Release build. Debug timings are for A/B comparison of the same code path, never for absolute budgets or extrapolation. State the build configuration next to every measurement so the number can't be reused out of context later.
+- **Applies to:** `Engine/IO/ImageSequenceReader.swift`, `Engine/IO/Fits.swift` decode loops. Same rule for any future "is this fast enough to ship" question.
+
+## [2026-07-29] — A "convert to X" feature request is usually a reader request
+- **Nuance:** The ask was "let AstroSharper generate a .ser from marked images so the workflow stays in-app". Writing the SER would have been the wrong mechanism: the pipeline consumes the `SourceReader` protocol, not a file format, so a reader over the file list was less code AND avoided a second copy on disk, the conversion wait, a quantisation step that destroys float FITS precision, and a junk artifact the user must manage.
+- **Rule:** When a request names an intermediate FILE ("make a SER", "export to X first"), check whether the consumer actually needs a file or just needs the data behind an interface. If an abstraction already exists at the consumption point, implement the new source against it and skip the artifact. The user wants the result, not the container.
+- **Applies to:** `Engine/IO/SourceReader.swift` conformances. The part of the instinct that WAS right: an internal mmap-able scratch cache is a legitimate implementation detail — just not a user-visible file. (In this case it turned out not to be needed at all, see the Debug/Release lesson above.)
+
 ## [2026-07-28] — Read the format spec; a plausible "dialect" theory is not evidence
 - **Mistake:** `SerColorID` used 16 / 17 for RGB / BGR, and a `mapExtendedColorID` table folded ColorID 100 onto `.mono` under a "SharpCap writes 100 + standardColorID" theory. The SER v3 spec actually assigns **100 = RGB, 101 = BGR**, and 16–19 to the CMY Bayer layouts. Every conformant RGB24 SER (anything Siril writes) therefore decoded as 8-bit mono with a 3× undersized `bytesPerFrame` — flat, grey, striped. We also stamped 16 into our own exports, making them CMY-mosaic files for every other tool in the chain.
 - **Root cause:** An earlier user report of "ColorID 101" was explained by inventing a dialect instead of checking the spec. The invented table then survived because our own reader and writer agreed with each other — a closed loop that only breaks when a real third-party file arrives.
