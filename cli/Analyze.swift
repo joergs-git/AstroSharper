@@ -109,9 +109,10 @@ enum Analyze {
         let bytes = (try? FileManager.default.attributesOfItem(atPath: reader.url.path)[.size] as? Int) ?? 0
         let totalGB = Double(bytes) / 1_000_000_000.0
         print("file        : \(reader.url.lastPathComponent)")
-        print("format      : FITS (BITPIX=-32, NAXIS=2)")
+        print("format      : FITS (BITPIX=\(reader.bitpix), NAXIS=2)")
         print("dimensions  : \(reader.imageWidth) x \(reader.imageHeight)")
-        print("pixel depth : 32-bit float")
+        print("pixel depth : \(reader.pixelDepth)-bit \(reader.bitpix < 0 ? "float" : "integer")")
+        print("colour      : \(reader.colorID)\(reader.colorID.isBayer ? " (BAYERPAT — demosaiced on load)" : "")")
         if let date = reader.captureDate {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime]
@@ -130,11 +131,12 @@ enum Analyze {
             "imageWidth": reader.imageWidth,
             "imageHeight": reader.imageHeight,
             "frameCount": 1,
-            "pixelDepth": 32,
-            "colorID": "mono",
-            "colorIsMono": true,
-            "colorIsBayer": false,
-            "colorIsRGB": false,
+            "bitpix": reader.bitpix,
+            "pixelDepth": reader.pixelDepth,
+            "colorID": String(describing: reader.colorID),
+            "colorIsMono": reader.colorID.isMono,
+            "colorIsBayer": reader.colorID.isBayer,
+            "colorIsRGB": reader.colorID.isRGB,
             "totalBytes": bytes,
         ]
         if let date = reader.captureDate {

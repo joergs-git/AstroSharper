@@ -803,11 +803,17 @@ enum LuckyStack {
     /// per frame, so a cancel bails within one frame and reports
     /// `.cancelled` rather than `.finished`.
     @discardableResult
+    /// `sequenceURLs`, when non-nil, stacks exactly those still images as
+    /// one sequence instead of opening `sourceURL`. The GUI passes the
+    /// frames the user marked, which may be a subset of the folder —
+    /// dropping a few bad frames by unmarking them has to be honoured.
+    /// `sourceURL` still names the output in that case.
     static func run(
         sourceURL: URL,
         outputURL: URL,
         options: LuckyStackOptions,
         pipeline: Pipeline,
+        sequenceURLs: [URL]? = nil,
         onProgress: @escaping @MainActor (LuckyStackProgress) -> Void
     ) -> Task<Void, Never> {
         Task.detached(priority: .userInitiated) {
@@ -815,7 +821,11 @@ enum LuckyStack {
 
             let reader: SourceReader
             do {
-                reader = try SourceReaderFactory.open(url: sourceURL)
+                if let sequenceURLs {
+                    reader = try ImageSequenceReader(frameURLs: sequenceURLs)
+                } else {
+                    reader = try SourceReaderFactory.open(url: sourceURL)
+                }
             } catch {
                 await onProgress(.error("\(error)")); return
             }

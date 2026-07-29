@@ -185,7 +185,9 @@ struct FileCatalog {
     /// the header for frame-sequence containers, just the metadata for
     /// static images via CGImageSource. Returns nil on unrecognised
     /// types or read failures so the catalog column shows blank.
-    private static func readDimensions(url: URL) -> (width: Int, height: Int)? {
+    /// Also used by `ImageSequenceReader` to validate that every frame in
+    /// a sequence shares the same geometry, without decoding pixels.
+    static func readDimensions(url: URL) -> (width: Int, height: Int)? {
         let ext = url.pathExtension.lowercased()
         if ext == serExtension {
             if let header = try? SerReader(url: url).header {

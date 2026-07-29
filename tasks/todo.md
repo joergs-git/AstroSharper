@@ -2,6 +2,69 @@
 
 A running record of where we are, what's done, and what's next. Update at the end of every session.
 
+## SHIPPED [2026-07-29] — Image sequences as a frame source (v0.8.0)
+
+Branch: `feature/image-sequence-stacking`
+
+Answers the question the 0.7.0 support thread kept circling: a smart telescope
+writes one file per sub and never a video, so the whole lucky-imaging pipeline
+was unreachable without PIPP (Windows) or an ffmpeg incantation.
+
+### Design decision: no intermediate SER
+The proposal was "generate a .ser from the marked frames". Rejected — the
+pipeline consumes the `SourceReader` protocol, not a file format, so an
+`ImageSequenceReader` over the file list is LESS code than a writer path and
+avoids all of the detour's costs: a second full copy on disk (2.5 GB for the
+reported 104-frame capture), the conversion wait, a quantisation step that
+would throw away float FITS precision before stacking, and a junk file the
+user has to manage.
+
+### UX decision: no "Prepare" step
+The ambiguity a prepare-button would resolve does not exist: "Apply to
+Selection" already means N files → N outputs, and "Run Lucky Stack" already
+means marked targets → one result. Marking stills and pressing Run is
+unambiguous, so an extra click would answer nothing. Rules: marked VIDEO files
+stack individually (unchanged); marked STILLS collectively form one sequence.
+A mixed folder needs no special case.
+
+- [x] FITS: all standard BITPIX (8/16/32/64 int, -32/-64 float) + BZERO/BSCALE
+- [x] FITS: `BAYERPAT` → GPU demosaic through the shared Bayer kernel
+- [x] `FitsImage.bitpix` as a first-class field (not a metadata entry)
+- [x] `ImageSequenceReader: SourceReader` with header-only geometry validation
+- [x] `SourceReaderFactory` routes a directory to it → CLI `stack <folder>`
+- [x] `LuckyStackItem.sequenceURLs` so an unmarked bad frame is honoured
+- [x] Section gate + hint line + run button for stills
+- [x] 373/373 tests (+14), 11/11 regression, both targets build
+
+### Results (2026-07-29)
+
+**Verified on synthetic smart-telescope data** — 12 subs at 3856×2180, BITPIX=16
+with BZERO=32768, `BAYERPAT='RGGB'`, scaled to a linear ~0.3-of-full-scale
+range. Opens, debayers, stacks, and produces a correct linear Moon. Before this
+branch the same files threw `unsupportedBitpix(16)` and could not be opened at
+all.
+
+**The multi-pass decode worry was wrong.** The prediction was that re-reading
+frames (9 `decodeFrame` sites; the luma cache only covers one of them) would
+make a decode-per-frame source too slow and force a scratch mmap cache. Measured
+in RELEASE on the same 3856×2180 subject:
+
+| Source | Frames | Total | Per frame |
+| --- | --- | --- | --- |
+| SER (mmap, 2.6 GB) | 104 | 5.07 s | 0.049 s |
+| FITS sequence | 12 | 1.89 s | 0.157 s |
+
+~3× per frame against a memory-mapped SER, i.e. ~2.6 min for 1000 frames. No
+cache built. The earlier Debug measurement (7.2 s/frame) was 45× off and would
+have justified a whole subsystem that isn't needed — Debug Swift numeric loops
+are not a basis for an architecture decision.
+
+### Follow-ups (not blocking)
+- FITS `DATE-OBS` is not used for the sequence time axis (file creation date
+  is). Matters only if derotation is ever applied to a sequence.
+- Multi-extension / data-cube FITS still unsupported (single 2D primary HDU).
+- EXIF timestamps for JPEG sequences, same reason.
+
 ## SHIPPED [2026-07-28] — SER ColorID spec fix + frame-source unblocking (v0.7.0)
 
 Branch: `bugfix/ser-colorid-spec-and-frame-sources`

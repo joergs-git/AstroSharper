@@ -112,6 +112,17 @@ extension SourceReader where Self == SerReader {
 
 enum SourceReaderFactory {
     static func open(url: URL) throws -> SourceReader {
+        // A directory is a frame sequence: every supported still image
+        // inside it, in natural filename order. Lets the CLI stack a
+        // folder of subs directly (`astrosharper stack ./frames out.tif`)
+        // with no conversion step.
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            do { return try ImageSequenceReader(folder: url) }
+            catch { throw SourceReaderOpenError.openFailed("image sequence", error) }
+        }
+
         let ext = url.pathExtension.lowercased()
         switch ext {
         case "ser":
