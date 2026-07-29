@@ -6,13 +6,18 @@
 // AstroSharper's lucky-stack / deconv outputs become useful in those
 // pipelines only after a FITS write path lands.
 //
-// v0 covers the BITPIX = -32 (IEEE single-precision float) variant,
-// 2D primary HDU, no extensions, with the canonical required keywords
-// (SIMPLE, BITPIX, NAXIS, NAXIS1, NAXIS2, END). Optional user
-// metadata gets serialised as additional header cards. Reader
-// validates the required keywords and rejects everything else with a
-// FitsError so the caller can route to a richer external library if
-// ever needed.
+// The reader covers every standard BITPIX — 8, 16, 32, 64 integer and
+// -32 / -64 float — over a 2D primary HDU with the canonical required
+// keywords (SIMPLE, BITPIX, NAXIS, NAXIS1, NAXIS2, END). Integer data is
+// scaled through BZERO / BSCALE per the standard, which is how every
+// camera writes unsigned 16-bit (BITPIX=16 with BZERO=32768). Optional
+// user metadata gets serialised as additional header cards. The writer
+// always emits BITPIX = -32.
+//
+// Integer support matters because it is what smart telescopes actually
+// produce: Vaonis Vespera, ZWO Seestar and DwarfLab all write 16-bit
+// integer FITS per sub, never float and never video. Before this, those
+// files could not be opened at all.
 //
 // Pure-Swift + Foundation. No SPM dependency.
 //
@@ -31,13 +36,20 @@ struct FitsImage: Equatable {
     let height: Int
     let pixels: [Float]
     let metadata: [String: String]
+    /// BITPIX as declared by the source file, negative for float formats.
+    /// A first-class field rather than a metadata entry: `metadata` is the
+    /// caller's own keyword bag, and the required structural keywords are
+    /// stripped from it. Defaults to the format the writer emits.
+    let bitpix: Int
 
-    init(width: Int, height: Int, pixels: [Float], metadata: [String: String] = [:]) {
+    init(width: Int, height: Int, pixels: [Float],
+         metadata: [String: String] = [:], bitpix: Int = -32) {
         precondition(pixels.count == width * height, "buffer size mismatch")
         self.width = width
         self.height = height
         self.pixels = pixels
         self.metadata = metadata
+        self.bitpix = bitpix
     }
 }
 
@@ -163,7 +175,113 @@ enum FitsWriter {
     }
 }
 
+/// The sample layouts a FITS primary HDU can declare, keyed by BITPIX.
+/// FITS integers are big-endian and SIGNED; unsigned data is expressed
+/// by pairing them with a BZERO offset.
+enum FitsSampleFormat {
+    case uint8       // BITPIX  =   8
+    case int16       // BITPIX  =  16
+    case int32       // BITPIX  =  32
+    case int64       // BITPIX  =  64
+    case float32     // BITPIX  = -32
+    case float64     // BITPIX  = -64
+
+    init?(bitpix: Int) {
+        switch bitpix {
+        case 8:   self = .uint8
+        case 16:  self = .int16
+        case 32:  self = .int32
+        case 64:  self = .int64
+        case -32: self = .float32
+        case -64: self = .float64
+        default:  return nil
+        }
+    }
+
+    var byteCount: Int {
+        switch self {
+        case .uint8:              return 1
+        case .int16:              return 2
+        case .int32, .float32:    return 4
+        case .int64, .float64:    return 8
+        }
+    }
+
+    /// Divisor that maps physical integer values onto the [0, 1] range
+    /// the rest of the pipeline works in.
+    ///
+    /// This MUST come from the header alone, never from the data. A
+    /// per-frame divisor (say, the observed maximum) would scale every
+    /// frame of a sequence differently, and stacking frames that no
+    /// longer share a brightness scale produces a flickering, wrong
+    /// result. Float samples are passed through untouched — those files
+    /// are already normalised by whatever wrote them.
+    var normalisationDivisor: Float? {
+        switch self {
+        case .uint8:  return 255
+        case .int16:  return 65535
+        case .int32:  return Float(Int32.max)
+        case .int64:  return Float(Int64.max)
+        case .float32, .float64: return nil
+        }
+    }
+}
+
 enum FitsReader {
+
+    /// Decode `count` big-endian samples starting at `offset` into
+    /// host-order Float, applying BZERO / BSCALE and then normalising
+    /// integer formats into [0, 1].
+    ///
+    /// Values are clamped to [0, 1] afterwards. Signed integer data
+    /// without a BZERO offset can legitimately go negative (a bias-
+    /// subtracted frame); clamping is the sane display choice and keeps
+    /// the texture upload well-defined.
+    private static func decodeSamples(
+        data: Data, offset: Int, count: Int,
+        format: FitsSampleFormat, bzero: Double, bscale: Double
+    ) -> [Float] {
+        var out = [Float](repeating: 0, count: count)
+        let stride = format.byteCount
+        let divisor = Double(format.normalisationDivisor ?? 1)
+
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress?.advanced(by: offset) else { return }
+
+            /// Reassemble a big-endian integer of `stride` bytes. Byte-wise
+            /// so unaligned offsets are safe — a FITS data block starts on
+            /// a 2880-byte boundary, which is not a multiple of 8.
+            func beBits(_ index: Int) -> UInt64 {
+                var v: UInt64 = 0
+                for b in 0..<stride {
+                    v = (v << 8) | UInt64(base.load(fromByteOffset: index * stride + b, as: UInt8.self))
+                }
+                return v
+            }
+
+            for i in 0..<count {
+                let stored: Double
+                switch format {
+                case .uint8:   stored = Double(UInt8(truncatingIfNeeded: beBits(i)))
+                case .int16:   stored = Double(Int16(bitPattern: UInt16(truncatingIfNeeded: beBits(i))))
+                case .int32:   stored = Double(Int32(bitPattern: UInt32(truncatingIfNeeded: beBits(i))))
+                case .int64:   stored = Double(Int64(bitPattern: beBits(i)))
+                case .float32: stored = Double(Float(bitPattern: UInt32(truncatingIfNeeded: beBits(i))))
+                case .float64: stored = Double(bitPattern: beBits(i))
+                }
+                let physical = bzero + bscale * stored
+                guard format.normalisationDivisor != nil else {
+                    // Float sample: pass through exactly as before, with
+                    // no clamp. These files carry whatever range their
+                    // writer chose and existing behaviour depends on it.
+                    out[i] = Float(physical)
+                    continue
+                }
+                out[i] = Float(Swift.min(1.0, Swift.max(0.0, physical / divisor)))
+            }
+        }
+        return out
+    }
 
     /// Parse a FITS file from disk. Validates SIMPLE=T, BITPIX=-32,
     /// NAXIS=2, then reads the row-major Float32 pixel data into
@@ -209,7 +327,9 @@ enum FitsReader {
         guard let bitpix = (cards["BITPIX"]).flatMap({ Int($0) }) else {
             throw FitsError.missingKeyword("BITPIX")
         }
-        guard bitpix == -32 else { throw FitsError.unsupportedBitpix(bitpix) }
+        guard let sampleFormat = FitsSampleFormat(bitpix: bitpix) else {
+            throw FitsError.unsupportedBitpix(bitpix)
+        }
         guard let naxis = (cards["NAXIS"]).flatMap({ Int($0) }) else {
             throw FitsError.missingKeyword("NAXIS")
         }
@@ -221,31 +341,31 @@ enum FitsReader {
             throw FitsError.missingKeyword("NAXIS2")
         }
 
-        // Read pixel data.
-        let pixelByteCount = w * h * 4
+        // BZERO / BSCALE convert stored integers to physical values:
+        //   physical = BZERO + BSCALE × stored
+        // This is how unsigned 16-bit is represented in a format whose
+        // integers are signed — BITPIX=16 with BZERO=32768 is what every
+        // astronomy camera writes. Defaults are the identity transform.
+        let bzero = (cards["BZERO"]).flatMap { Double($0) } ?? 0
+        let bscale = (cards["BSCALE"]).flatMap { Double($0) } ?? 1
+
+        let pixelByteCount = w * h * sampleFormat.byteCount
         guard cursor + pixelByteCount <= data.count else {
             throw FitsError.fileTooSmall
         }
-        var pixels = [Float](repeating: 0, count: w * h)
-        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            let base = raw.baseAddress!.advanced(by: cursor)
-            for i in 0..<(w * h) {
-                let b0 = base.load(fromByteOffset: i * 4 + 0, as: UInt8.self)
-                let b1 = base.load(fromByteOffset: i * 4 + 1, as: UInt8.self)
-                let b2 = base.load(fromByteOffset: i * 4 + 2, as: UInt8.self)
-                let b3 = base.load(fromByteOffset: i * 4 + 3, as: UInt8.self)
-                let beBits = (UInt32(b0) << 24) | (UInt32(b1) << 16)
-                           | (UInt32(b2) << 8)  | UInt32(b3)
-                pixels[i] = Float(bitPattern: beBits)
-            }
-        }
+        let pixels = decodeSamples(
+            data: data, offset: cursor, count: w * h,
+            format: sampleFormat, bzero: bzero, bscale: bscale
+        )
 
-        // Strip the standard required keys before exposing metadata.
+        // Strip the structural keywords before exposing metadata — they are
+        // represented by the struct's own fields, not by the caller's
+        // keyword bag.
         var metadata = cards
         for required in ["SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2"] {
             metadata.removeValue(forKey: required)
         }
-        return FitsImage(width: w, height: h, pixels: pixels, metadata: metadata)
+        return FitsImage(width: w, height: h, pixels: pixels, metadata: metadata, bitpix: bitpix)
     }
 
     /// Lightweight header peek — returns (width, height) without
@@ -330,14 +450,39 @@ final class FitsFrameReader {
     /// data-cube FITS would need a richer model.
     var frameCount: Int  { 1 }
 
-    /// BITPIX=-32 = IEEE single-precision float, the only variant
-    /// the v0 reader accepts.
-    var pixelDepth: Int  { 32 }
+    /// BITPIX exactly as the header declares it — negative for float
+    /// formats. Surfaced for diagnostics; `pixelDepth` is the unsigned
+    /// bit count the `SourceReader` protocol asks for.
+    var bitpix: Int { image.bitpix }
 
-    /// FITS doesn't carry a Bayer pattern in any standardised way at
-    /// this layer — we treat the 2D image as monochrome and let the
-    /// downstream OSC heuristics route via the file extension instead.
-    var colorID: SerColorID { .mono }
+    /// Bits per sample. Reported unsigned — a BITPIX of -32 is 32 bits
+    /// of float, not "minus 32 bits".
+    var pixelDepth: Int { abs(bitpix) }
+
+    /// Colour layout from the `BAYERPAT` keyword, which every camera that
+    /// writes CFA data sets (ZWO / SharpCap / N.I.N.A. / Siril all agree
+    /// on the name and the four-letter values). Absent keyword = mono,
+    /// which is both the old behaviour and the right answer for a
+    /// monochrome or already-debayered frame.
+    ///
+    /// This is what lets a smart-telescope raw sub go straight into
+    /// AstroSharper: without it the CFA mosaic would stack as grey.
+    var colorID: SerColorID { Self.bayerPattern(from: image.metadata) ?? .mono }
+
+    /// Map a FITS `BAYERPAT` value onto our colour enum. FITS stores it
+    /// as a quoted string; `parseCard` has already stripped the quotes.
+    static func bayerPattern(from metadata: [String: String]) -> SerColorID? {
+        guard let raw = metadata["BAYERPAT"]?
+            .trimmingCharacters(in: .whitespaces)
+            .uppercased(), !raw.isEmpty else { return nil }
+        switch raw {
+        case "RGGB": return .bayerRGGB
+        case "GRBG": return .bayerGRBG
+        case "GBRG": return .bayerGBRG
+        case "BGGR": return .bayerBGGR
+        default:     return nil
+        }
+    }
 
     var nominalFrameRate: Double? { nil }
 
@@ -374,15 +519,89 @@ final class FitsFrameReader {
         return iso.date(from: raw)
     }
 
+    /// Demosaic a CFA frame on the GPU with the shared Bayer kernel.
+    /// The normalised [0,1] floats are quantised back to 16-bit and
+    /// staged in an `r16Uint` texture, exactly the layout the kernel
+    /// expects from a 16-bit Bayer SER, so both formats reach the same
+    /// code path and the same output.
+    private func demosaicToTexture(pattern: SerColorID, device: MTLDevice) throws -> MTLTexture {
+        let w = image.width, h = image.height
+        guard let library = MetalDevice.shared.library,
+              let fn = library.makeFunction(name: "unpack_bayer16_to_rgba"),
+              let pso = try? device.makeComputePipelineState(function: fn) else {
+            throw FitsError.ioError("Bayer demosaic kernel unavailable")
+        }
+
+        var samples = [UInt16](repeating: 0, count: w * h)
+        for i in 0..<(w * h) {
+            samples[i] = UInt16(max(0, min(65535, (image.pixels[i] * 65535).rounded())))
+        }
+
+        let stageDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r16Uint, width: w, height: h, mipmapped: false
+        )
+        stageDesc.storageMode = .shared
+        stageDesc.usage = [.shaderRead]
+        let dstDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false
+        )
+        dstDesc.storageMode = .private
+        dstDesc.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        guard let staging = device.makeTexture(descriptor: stageDesc),
+              let dst = device.makeTexture(descriptor: dstDesc) else {
+            throw FitsError.ioError("MTLTexture allocation failed (\(w)×\(h))")
+        }
+        samples.withUnsafeBufferPointer { ptr in
+            staging.replace(
+                region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                  size: MTLSize(width: w, height: h, depth: 1)),
+                mipmapLevel: 0,
+                withBytes: ptr.baseAddress!,
+                bytesPerRow: w * MemoryLayout<UInt16>.size
+            )
+        }
+
+        guard let queue = device.makeCommandQueue(),
+              let cmd = queue.makeCommandBuffer(),
+              let enc = cmd.makeComputeCommandEncoder() else {
+            throw FitsError.ioError("Metal command encoding failed")
+        }
+        enc.setComputePipelineState(pso)
+        // Mirrors BayerUnpackParams in Shaders.metal: (scale, flip, pattern).
+        var params: (Float, UInt32, UInt32) = (1.0 / 65535.0, 0, pattern.bayerPatternIndex)
+        enc.setBytes(&params, length: MemoryLayout<(Float, UInt32, UInt32)>.stride, index: 0)
+        enc.setTexture(staging, index: 0)
+        enc.setTexture(dst, index: 1)
+        let tgw = pso.threadExecutionWidth
+        let tgh = max(1, pso.maxTotalThreadsPerThreadgroup / tgw)
+        enc.dispatchThreadgroups(
+            MTLSize(width: (w + tgw - 1) / tgw, height: (h + tgh - 1) / tgh, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: tgw, height: tgh, depth: 1)
+        )
+        enc.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        return dst
+    }
+
     /// Convert the in-memory Float32 pixel buffer to an `rgba16Float`
     /// texture — broadcast mono to RGB, alpha=1. Index is ignored
-    /// because FITS v0 is single-frame; callers passing index>0 still
+    /// because FITS is single-frame here; callers passing index>0 still
     /// get frame 0 (matches the model that "frameCount=1 means index
     /// 0 is always the only valid frame").
     func loadFrame(at index: Int, device: MTLDevice) throws -> MTLTexture {
         _ = index   // single-frame; index ignored
         let w = image.width
         let h = image.height
+
+        // CFA data goes through the same GPU demosaic the SER path uses.
+        // Quantising the normalised floats back to 16-bit to feed the
+        // existing `unpack_bayer16_to_rgba` kernel costs nothing real —
+        // the source was 16-bit integer to begin with — and avoids a
+        // second, divergent demosaic implementation.
+        if let pattern = Self.bayerPattern(from: image.metadata) {
+            return try demosaicToTexture(pattern: pattern, device: device)
+        }
         // Float32 → Float16 RGBA broadcast. One pass, no autorelease
         // churn. CPU-only since the buffer's already in memory.
         var rgba = [UInt16](repeating: 0, count: w * h * 4)
