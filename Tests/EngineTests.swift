@@ -8,6 +8,7 @@
 //
 // Subsequent algorithm work (Block A LAPD, Block B sigma-clip, etc.)
 // each adds its own @Suite here.
+import AppKit   // NSBitmapImageRep — builds PNG fixtures for the sequence tests
 import Foundation
 import Testing
 @testable import AstroSharper
@@ -228,6 +229,259 @@ struct SerColorIDTests {
         // onto our RGB cases.
         #expect(SerColorID(rawValue: 16) == nil)
         #expect(SerColorID(rawValue: 17) == nil)
+    }
+}
+
+// MARK: - FITS integer BITPIX
+
+/// Smart telescopes (Vespera, Seestar, Dwarf) write 16-bit integer FITS
+/// per sub. Before this, only BITPIX=-32 opened at all, so their output
+/// was unreachable.
+@Suite("FITS — integer BITPIX and BZERO/BSCALE")
+struct FitsIntegerBitpixTests {
+
+    /// Build a minimal FITS with an explicit sample layout. `samples` are
+    /// the STORED values, written big-endian as the format requires.
+    private func writeFits(
+        width: Int, height: Int, bitpix: Int,
+        samples: [Int64], extraCards: [(String, String)] = []
+    ) throws -> URL {
+        func card(_ k: String, _ v: String) -> String {
+            String((k.padding(toLength: 8, withPad: " ", startingAt: 0) + "= "
+                + v.leftPadded(to: 20)).padding(toLength: 80, withPad: " ", startingAt: 0))
+        }
+        var header = card("SIMPLE", "T") + card("BITPIX", "\(bitpix)") + card("NAXIS", "2")
+            + card("NAXIS1", "\(width)") + card("NAXIS2", "\(height)")
+        for (k, v) in extraCards { header += card(k, v) }
+        header += "END".padding(toLength: 80, withPad: " ", startingAt: 0)
+        let blocks = (header.count + 2879) / 2880
+        header = header.padding(toLength: blocks * 2880, withPad: " ", startingAt: 0)
+
+        var data = Data(header.utf8)
+        let byteCount = abs(bitpix) / 8
+        for s in samples {
+            let bits = UInt64(bitPattern: s)
+            for b in stride(from: byteCount - 1, through: 0, by: -1) {
+                data.append(UInt8((bits >> (UInt64(b) * 8)) & 0xFF))
+            }
+        }
+        let pad = ((data.count + 2879) / 2880) * 2880 - data.count
+        data.append(Data(repeating: 0, count: pad))
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("astrosharper-fits-\(UUID().uuidString).fits")
+        try data.write(to: url)
+        return url
+    }
+
+    @Test("BITPIX=16 with BZERO=32768 decodes as unsigned and normalises to [0,1]")
+    func unsigned16ViaBzero() throws {
+        // Stored signed values -32768, 0, 32767 → physical 0, 32768, 65535.
+        let url = try writeFits(
+            width: 3, height: 1, bitpix: 16,
+            samples: [-32768, 0, 32767],
+            extraCards: [("BZERO", "32768"), ("BSCALE", "1")]
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let image = try FitsReader.read(url)
+        #expect(abs(image.pixels[0] - 0.0) < 1e-5)
+        #expect(abs(image.pixels[1] - 32768.0 / 65535.0) < 1e-4)
+        #expect(abs(image.pixels[2] - 1.0) < 1e-4)
+    }
+
+    @Test("BITPIX=8 normalises against 255")
+    func uint8Normalises() throws {
+        let url = try writeFits(width: 3, height: 1, bitpix: 8, samples: [0, 128, 255])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let image = try FitsReader.read(url)
+        #expect(abs(image.pixels[0] - 0.0) < 1e-5)
+        #expect(abs(image.pixels[1] - 128.0 / 255.0) < 1e-4)
+        #expect(abs(image.pixels[2] - 1.0) < 1e-5)
+    }
+
+    @Test("BSCALE is applied before normalisation")
+    func bscaleApplied() throws {
+        // BSCALE=2 doubles every physical value: stored 100 → 200/65535.
+        let url = try writeFits(
+            width: 1, height: 1, bitpix: 16, samples: [100],
+            extraCards: [("BZERO", "0"), ("BSCALE", "2")]
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let image = try FitsReader.read(url)
+        #expect(abs(image.pixels[0] - 200.0 / 65535.0) < 1e-5)
+    }
+
+    @Test("float BITPIX=-32 still passes through unscaled and unclamped")
+    func float32Unchanged() throws {
+        // 2.5 as IEEE-754 single = 0x40200000. Values above 1 must survive:
+        // clamping float files would break every existing FITS workflow.
+        let url = try writeFits(
+            width: 1, height: 1, bitpix: -32, samples: [Int64(Int32(bitPattern: 0x4020_0000))]
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let image = try FitsReader.read(url)
+        #expect(abs(image.pixels[0] - 2.5) < 1e-5)
+    }
+
+    @Test("BAYERPAT maps onto the matching Bayer layout")
+    func bayerPatternRecognised() throws {
+        for (keyword, expected) in [
+            ("RGGB", SerColorID.bayerRGGB), ("GRBG", .bayerGRBG),
+            ("GBRG", .bayerGBRG), ("BGGR", .bayerBGGR),
+        ] {
+            let url = try writeFits(
+                width: 2, height: 2, bitpix: 16, samples: [0, 0, 0, 0],
+                extraCards: [("BAYERPAT", "'\(keyword)    '")]
+            )
+            defer { try? FileManager.default.removeItem(at: url) }
+            let reader = try FitsFrameReader(url: url)
+            #expect(reader.colorID == expected, "BAYERPAT \(keyword)")
+        }
+    }
+
+    @Test("no BAYERPAT means mono, and BITPIX is reported honestly")
+    func monoWithoutBayerPattern() throws {
+        let url = try writeFits(width: 2, height: 2, bitpix: 16, samples: [0, 0, 0, 0])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try FitsFrameReader(url: url)
+        #expect(reader.colorID == .mono)
+        #expect(reader.bitpix == 16)
+        #expect(reader.pixelDepth == 16)
+    }
+
+    @Test("an unsupported BITPIX is still rejected")
+    func rejectsUnknownBitpix() throws {
+        let url = try writeFits(width: 1, height: 1, bitpix: 8, samples: [0])
+        defer { try? FileManager.default.removeItem(at: url) }
+        // Corrupt BITPIX to a value the standard doesn't define.
+        var raw = try Data(contentsOf: url)
+        if let range = raw.range(of: Data("BITPIX  =                    8".utf8)) {
+            raw.replaceSubrange(range, with: Data("BITPIX  =                   12".utf8))
+            try raw.write(to: url)
+        }
+        #expect(throws: FitsError.self) { _ = try FitsReader.read(url) }
+    }
+}
+
+private extension String {
+    /// Right-align in a fixed width, matching the FITS card convention for
+    /// numeric values.
+    func leftPadded(to width: Int) -> String {
+        count >= width ? self : String(repeating: " ", count: width - count) + self
+    }
+}
+
+// MARK: - Image sequences as a frame source
+
+@Suite("ImageSequenceReader — stills as a frame sequence")
+struct ImageSequenceReaderTests {
+
+    /// Write `count` PNGs of the given size into a fresh temp folder.
+    private func makeSequence(count: Int, width: Int = 8, height: Int = 6,
+                              oddSizeAt: Int? = nil) throws -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("astrosharper-seq-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for i in 0..<count {
+            let w = (oddSizeAt == i) ? width + 2 : width
+            let h = (oddSizeAt == i) ? height + 2 : height
+            let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+                bitsPerSample: 8, samplesPerPixel: 3, hasAlpha: false, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: w * 3, bitsPerPixel: 24
+            )!
+            let data = rep.representation(using: .png, properties: [:])!
+            // Deliberately non-zero-padded names so natural ordering is
+            // actually exercised: frame_2 must precede frame_10.
+            try data.write(to: dir.appendingPathComponent("frame_\(i).png"))
+        }
+        return dir
+    }
+
+    @Test("a folder of stills opens as a frame sequence")
+    func folderOpensAsSequence() throws {
+        let dir = try makeSequence(count: 12)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let reader = try ImageSequenceReader(folder: dir)
+        #expect(reader.frameCount == 12)
+        #expect(reader.imageWidth == 8)
+        #expect(reader.imageHeight == 6)
+        #expect(reader.colorID.isRGB)
+        // Compare resolved paths — `deletingLastPathComponent` leaves a
+        // trailing slash that URL equality treats as a difference.
+        #expect(reader.url.standardizedFileURL.path == dir.standardizedFileURL.path)
+    }
+
+    @Test("frames are in natural order — frame_2 before frame_10")
+    func naturalOrdering() throws {
+        let dir = try makeSequence(count: 12)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Rebuild the expected order the same way the reader does, then
+        // assert the lexical order would have been different — otherwise
+        // this test passes for the wrong reason.
+        let names = (0..<12).map { "frame_\($0).png" }
+        let natural = names.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        let lexical = names.sorted()
+        #expect(natural != lexical, "fixture must actually distinguish the two orderings")
+        #expect(natural.first == "frame_0.png")
+        #expect(natural.last == "frame_11.png")
+    }
+
+    @Test("a single image is not a sequence")
+    func singleFrameRejected() throws {
+        let dir = try makeSequence(count: 1)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        #expect(throws: ImageSequenceError.self) {
+            _ = try ImageSequenceReader(folder: dir)
+        }
+    }
+
+    @Test("a mismatched frame is rejected up front, naming the file")
+    func dimensionMismatchRejected() throws {
+        let dir = try makeSequence(count: 5, oddSizeAt: 3)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        #expect(throws: ImageSequenceError.self) {
+            _ = try ImageSequenceReader(folder: dir)
+        }
+    }
+
+    @Test("an explicit subset stacks — unmarking bad frames must be honoured")
+    func explicitSubset() throws {
+        let dir = try makeSequence(count: 10)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let subset = (0..<10).filter { $0 % 2 == 0 }
+            .map { dir.appendingPathComponent("frame_\($0).png") }
+        let reader = try ImageSequenceReader(frameURLs: subset)
+        #expect(reader.frameCount == 5)
+    }
+
+    @Test("video containers are not treated as sequence frames")
+    func videoIsNotAStill() {
+        for ext in ["ser", "avi", "mov", "mp4", "m4v"] {
+            #expect(!ImageSequenceReader.isStillImage(URL(fileURLWithPath: "/tmp/a.\(ext)")))
+        }
+        for ext in ["png", "jpg", "jpeg", "tif", "tiff", "fits", "fit"] {
+            #expect(ImageSequenceReader.isStillImage(URL(fileURLWithPath: "/tmp/a.\(ext)")))
+        }
+    }
+
+    @Test("SourceReaderFactory routes a directory to the sequence reader")
+    func factoryHandlesDirectory() throws {
+        let dir = try makeSequence(count: 4)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let reader = try SourceReaderFactory.open(url: dir)
+        #expect(reader is ImageSequenceReader)
+        #expect(reader.frameCount == 4)
     }
 }
 
