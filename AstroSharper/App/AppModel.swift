@@ -1606,10 +1606,23 @@ final class AppModel: ObservableObject {
         // `SourceReaderFactory` has dispatched to since the SourceReader
         // migration. The GUI used to reject video here with an "AVI support
         // is coming" message that had long outlived the engine limitation.
+        //
+        // Marked still images are treated differently from video: each video
+        // is its own sequence and stacks to its own output, whereas the
+        // marked stills COLLECTIVELY form one sequence and produce a single
+        // stacked result. That rule needs no extra control — the two
+        // meanings already live on different buttons ("Apply to Selection"
+        // sharpens N files into N outputs; this one always produces one).
         let targets = batchTargetIDs
-        let selectedSequences = catalog.files.filter { targets.contains($0.id) && $0.isFrameSequence }
-        guard !selectedSequences.isEmpty else {
-            jobStatus = .error("Mark or select at least one video file (.ser / .avi / .mov / .mp4) in the list.")
+        let marked = catalog.files.filter { targets.contains($0.id) }
+        let selectedSequences = marked.filter { $0.isFrameSequence }
+        let selectedStills = marked.filter { ImageSequenceReader.isStillImage($0.url) }
+        guard !selectedSequences.isEmpty || selectedStills.count >= 2 else {
+            if selectedStills.count == 1 {
+                jobStatus = .error("Stacking needs at least 2 frames — mark the rest of the sequence.")
+            } else {
+                jobStatus = .error("Mark or select a video file (.ser / .avi / .mov / .mp4), or at least 2 still images to stack as a sequence.")
+            }
             return
         }
 
@@ -1624,18 +1637,24 @@ final class AppModel: ObservableObject {
         // each non-zero entry in `variants` adds a labelled run that lands
         // in its own subdirectory of the output folder.
         var queue: [LuckyStackItem] = []
-        for entry in selectedSequences {
+
+        /// Append the default run plus every requested variant for one
+        /// source. Shared by the video and still-sequence paths so the
+        /// variant behaviour can't drift between them.
+        func enqueue(url: URL, sequenceURLs: [URL]?, meridianFlipped: Bool) {
             queue.append(LuckyStackItem(
-                url: entry.url,
-                meridianFlipped: entry.meridianFlipped,
+                url: url,
+                sequenceURLs: sequenceURLs,
+                meridianFlipped: meridianFlipped,
                 variantLabel: "",
                 absoluteCount: nil,
                 keepPercent: luckyStack.keepPercent
             ))
             for n in luckyStack.variants.absoluteCounts where n > 0 {
                 queue.append(LuckyStackItem(
-                    url: entry.url,
-                    meridianFlipped: entry.meridianFlipped,
+                    url: url,
+                    sequenceURLs: sequenceURLs,
+                    meridianFlipped: meridianFlipped,
                     variantLabel: "f\(n)",
                     absoluteCount: n,
                     keepPercent: luckyStack.keepPercent
@@ -1643,13 +1662,31 @@ final class AppModel: ObservableObject {
             }
             for p in luckyStack.variants.percentages where p > 0 {
                 queue.append(LuckyStackItem(
-                    url: entry.url,
-                    meridianFlipped: entry.meridianFlipped,
+                    url: url,
+                    sequenceURLs: sequenceURLs,
+                    meridianFlipped: meridianFlipped,
                     variantLabel: "p\(p)",
                     absoluteCount: nil,
                     keepPercent: p
                 ))
             }
+        }
+
+        for entry in selectedSequences {
+            enqueue(url: entry.url, sequenceURLs: nil, meridianFlipped: entry.meridianFlipped)
+        }
+        if selectedStills.count >= 2 {
+            // One item for the whole set. The folder names the output, and
+            // the frames keep catalog order (natural sort), which is the
+            // capture order for every numbered sequence.
+            let frameURLs = selectedStills.map(\.url)
+            enqueue(
+                url: frameURLs[0].deletingLastPathComponent(),
+                sequenceURLs: frameURLs,
+                // A meridian flip applies to the whole session, so take it
+                // from the first frame rather than inventing a per-frame rule.
+                meridianFlipped: selectedStills[0].meridianFlipped
+            )
         }
 
         luckyStack.queue = queue
@@ -2126,7 +2163,8 @@ final class AppModel: ObservableObject {
             sourceURL: item.url,
             outputURL: outURL,
             options: perItemOpts,
-            pipeline: stabilizerPipeline
+            pipeline: stabilizerPipeline,
+            sequenceURLs: item.sequenceURLs
         ) { [weak self] p in
             guard let self else { return }
             // Cancellation / re-run guard: bail if this closure is from
@@ -3027,6 +3065,10 @@ struct LuckyStackItem: Identifiable {
     enum Status { case pending, processing, done, error }
     let id = UUID()
     let url: URL
+    /// Non-nil when this item stacks a set of still images as one
+    /// sequence. `url` is then the containing folder (which names the
+    /// output); these are the frames the user actually marked.
+    var sequenceURLs: [URL]?
     var meridianFlipped: Bool = false
     /// Empty for the default "use the slider" run; otherwise "f100", "p25",
     /// etc. Becomes the subdirectory name in the output folder.

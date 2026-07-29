@@ -17,10 +17,31 @@ struct LuckyStackSection: View {
     }
     private var serCount: Int { serTargets.count }
     private var allSerInCatalog: Int { app.catalog.files.filter { $0.isFrameSequence }.count }
-    /// Lucky Stack needs a frame sequence — a SER or a video container. We
-    /// disable both the header chevron and the run button so the section
-    /// can't accidentally be expanded on an empty / stills-only folder.
-    private var disabled: Bool { allSerInCatalog == 0 }
+
+    /// Marked still images. Two or more of them stack together as ONE
+    /// sequence — the smart-telescope case, where a capture arrives as a
+    /// folder of subs rather than a video file.
+    private var stillTargets: [FileEntry] {
+        let ids = app.batchTargetIDs
+        return app.catalog.files.filter {
+            ids.contains($0.id) && ImageSequenceReader.isStillImage($0.url)
+        }
+    }
+    private var stillsInCatalog: Int {
+        app.catalog.files.filter { ImageSequenceReader.isStillImage($0.url) }.count
+    }
+    /// True when the marked stills form a stackable sequence.
+    private var stillSequenceActive: Bool { stillTargets.count >= 2 }
+
+    /// How many outputs the next run produces: one per video, plus one for
+    /// the still sequence if there is one.
+    private var plannedOutputCount: Int { serCount + (stillSequenceActive ? 1 : 0) }
+
+    /// Lucky Stack needs frames to work with — a video container, or at
+    /// least two still images. We disable the header chevron and the run
+    /// button so the section can't be expanded on a folder that has
+    /// neither.
+    private var disabled: Bool { allSerInCatalog == 0 && stillsInCatalog < 2 }
 
     /// One-line summary of which sharpening / tone passes will fire
     /// on the next stacked output, given the current toggle state.
@@ -123,7 +144,7 @@ struct LuckyStackSection: View {
                             .font(.system(size: 13, weight: .bold))
                             .foregroundColor(disabled ? .secondary : .primary)
                         if disabled {
-                            Text("· no video files")
+                            Text("· nothing to stack")
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
                         }
@@ -139,7 +160,7 @@ struct LuckyStackSection: View {
                     .foregroundColor(.secondary)
             }
             .opacity(disabled ? 0.55 : 1.0)
-            .help(disabled ? "Lucky Stack runs on frame sequences — .ser, .avi, .mov, .mp4. Open a folder containing captures to enable." : "")
+            .help(disabled ? "Lucky Stack runs on a frame sequence: a .ser / .avi / .mov / .mp4 capture, or two or more still images that get stacked together as one. Open a folder containing either to enable." : "")
 
             if expanded && !disabled {
                 Picker("Mode", selection: $app.luckyStack.mode) {
@@ -804,10 +825,10 @@ struct LuckyStackSection: View {
                 // sharpen the saved file.
                 savedFilePipelineSummary
 
-                LuckyRunButton(disabled: serCount == 0) {
+                LuckyRunButton(disabled: plannedOutputCount == 0) {
                     app.runLuckyStackOnSelection()
                 }
-                .help("Stacks every marked or selected video file (.ser / .avi / .mov / .mp4). Output goes to the configured Output Folder.")
+                .help("Stacks every marked video file (.ser / .avi / .mov / .mp4) into its own result, and all marked still images together into one. Output goes to the configured Output Folder.")
                 // NB: the auto-stack folder watch control moved to the top
                 // toolbar (next to Open) 2026-05-22 — it must be reachable
                 // on an empty capture folder, but this whole section is
@@ -842,18 +863,30 @@ struct LuckyStackSection: View {
     }
 
     private var targetCountLabel: String {
-        if allSerInCatalog == 0 { return "no video" }
-        return "\(serCount)/\(allSerInCatalog) video"
+        if allSerInCatalog > 0 { return "\(serCount)/\(allSerInCatalog) video" }
+        if stillsInCatalog >= 2 { return "\(stillTargets.count)/\(stillsInCatalog) frames" }
+        return "no frames"
     }
 
     private var hintLine: String {
-        if allSerInCatalog == 0 {
-            return "No video files in the open folder. Open a folder with .ser / .avi / .mov / .mp4 captures (⌘O) to begin."
+        if disabled {
+            return "Nothing to stack in the open folder. Open a folder with .ser / .avi / .mov / .mp4 captures, or with an image sequence (⌘O)."
         }
-        if serCount == 0 {
-            return "Mark or select the video files you want to stack in the file list."
+        if plannedOutputCount == 0 {
+            return stillsInCatalog >= 2 && allSerInCatalog == 0
+                ? "Mark the images you want to stack — 2 or more are combined into one result."
+                : "Mark or select what you want to stack in the file list."
         }
-        return "Will write \(serCount) stacked TIFF\(serCount == 1 ? "" : "s") to the output folder."
+        // Spell out that many marked images collapse into ONE output, so
+        // nobody expects a stacked file per frame.
+        var parts: [String] = []
+        if serCount > 0 {
+            parts.append("\(serCount) video file\(serCount == 1 ? "" : "s")")
+        }
+        if stillSequenceActive {
+            parts.append("\(stillTargets.count) images as one sequence")
+        }
+        return "Will stack \(parts.joined(separator: " + ")) → \(plannedOutputCount) TIFF\(plannedOutputCount == 1 ? "" : "s") in the output folder."
     }
 }
 
