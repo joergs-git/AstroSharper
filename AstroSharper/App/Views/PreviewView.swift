@@ -1699,6 +1699,18 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
     private var displayBlack: Float = 0.0    // = p1 of the luma histogram
     private var displayScale: Float = 1.0    // = 1 / max(0.005, p99 − p1)
     private var displayGamma: Float = 2.5    // user-bracket pick — fixed for now
+
+    /// The file we last made an auto-range decision for. Auto-engage runs
+    /// exactly once per file so a user who switches the toggle off mid-file
+    /// isn't overridden on the next scrub or pipeline pass.
+    private var autoRangeDecidedForFileID: UUID?
+
+    /// p99 below this means even the brightest 1% of the frame is dim —
+    /// the signature of linear, unstretched capture data (raw 16-bit FITS
+    /// converted to SER, low-gain Ha, deep-sky subs). A normal stretched
+    /// capture or a stacked output sits far above it, so the auto-engage
+    /// below cannot fire on material that already looks right.
+    private static let linearSourceP99Threshold: Float = 0.25
     private var lastUniformLogToken: String = ""    // for de-duped log spam
 
     /// Recompute auto-range params for the current `beforeTex`. Cheap
@@ -1738,11 +1750,43 @@ final class PreviewCoordinator: NSObject, MTKViewDelegate {
             NSLog("Display auto-range: p1=%.4f median=%.4f p99=%.4f → black=%.4f scale=%.3f gamma=%.2f (source=%@)",
                   pts.black, pts.median, pts.white, displayBlack, displayScale, displayGamma,
                   afterTex != nil ? "afterTex" : "beforeTex")
+            autoEngageIfLinear(p99: pts.white)
         } else {
             NSLog("Display auto-range: percentile compute returned nil — using identity")
             displayBlack = 0
             displayScale = 1.0
         }
+    }
+
+    /// Turn the display auto-range ON by itself when a freshly-opened file
+    /// is linear capture data, which otherwise renders as a near-black
+    /// rectangle and reads as "the app can't open my file".
+    ///
+    /// This is display-only in the strictest sense — it moves the same
+    /// toolbar toggle (`A`) the user could flip by hand, changes no pixel
+    /// in the texture, and leaves stacking and every saved file untouched.
+    /// The correct workflow for linear data is still to stack linear and
+    /// stretch afterwards in Step 2; this only makes the frames visible
+    /// while you work.
+    ///
+    /// Deliberately one-directional and once-per-file: it never switches
+    /// the toggle OFF, and re-deciding is gated on the file changing, so
+    /// pressing `A` to dismiss it survives every subsequent scrub and
+    /// pipeline pass on that file.
+    private func autoEngageIfLinear(p99: Float) {
+        guard let fileID = app.previewFileID else { return }
+        guard autoRangeDecidedForFileID != fileID else { return }
+        autoRangeDecidedForFileID = fileID
+
+        guard !app.displayAutoRange else { return }
+        // Guard the bottom end too: an all-black frame (failed decode,
+        // capture with the cap on) has nothing to reveal, and stretching
+        // it would just amplify sensor noise into a confusing mess.
+        guard p99 > 0.001, p99 < Self.linearSourceP99Threshold else { return }
+
+        app.displayAutoRange = true
+        NSLog("Display auto-range: auto-engaged — p99=%.4f is below the %.2f linear-source threshold",
+              p99, Self.linearSourceP99Threshold)
     }
 
     func draw(in view: MTKView) {

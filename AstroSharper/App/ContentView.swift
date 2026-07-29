@@ -155,7 +155,7 @@ private struct ToolbarView: View {
             }
             .toggleStyle(.button)
             .keyboardShortcut("a", modifiers: [])
-            .help("Auto display gain (A): per-texture brightness so dim captures look right out of the box. Off = the Brightness slider applies alone. Saved files are never affected.")
+            .help("Auto display gain (A): per-texture brightness so dim captures look right out of the box. Turns itself on when you open linear, unstretched data (raw FITS converted to SER, low-gain Hα) — press A to dismiss it for that file. Off = the Brightness slider applies alone. Saved files are never affected.")
 
             // Display Brightness — independent of any pipeline stage. Live
             // preview only; the saved TIF carries no visible trace.
