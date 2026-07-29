@@ -7,11 +7,15 @@
 // that the preview / scrub / play paths can pick the reader by file type
 // without further code branching downstream.
 //
-// Lucky-Stack still routes AVI through its existing "SER required" gate —
-// the stacker's tight loop wants a frame-bytes pointer, which AVI's lazy
-// codec-aware decode doesn't expose cheaply. Wiring AVI into Lucky-Stack
-// is a separate engine task; this reader unblocks browsing and quality
-// scanning today.
+// Lucky-Stack consumes this reader through `SourceReader.loadFrame`, which
+// hands back a ready-to-use rgba16Float texture — the stacker's SER fast
+// path (raw frame-bytes pointer + GPU unpack) is bypassed for video.
+//
+// Codec support is whatever macOS itself can decode: ProRes, H.264, HEVC,
+// and the uncompressed AVIs FireCapture / SharpCap emit. Notably NOT FFV1,
+// which ffmpeg tutorials recommend for lossless output — see
+// `undecodableCodec` below, which catches it at open time with an
+// actionable message instead of failing on every frame.
 import AVFoundation
 import CoreVideo
 import Foundation
@@ -30,7 +34,27 @@ enum AviReaderError: Error, CustomStringConvertible {
     ///   ffmpeg -i in.avi -c:v prores -profile:v 4 out.mov
     case noVideoTrack
     case unknownDuration
+    /// The track passed the `isDecodable` check at open time but a frame
+    /// still failed to produce an image. Motion JPEG is the known case:
+    /// macOS reports it as decodable in both AVI and MOV, then hands back
+    /// nothing. Since this cannot be predicted at open time, the message
+    /// carries the same re-encode advice as `undecodableCodec`.
     case decodeFailed(frame: Int)
+    /// The container is readable and declares a video track, but macOS has
+    /// no decoder for its codec. FFV1 is the one users hit in practice —
+    /// it is ffmpeg's default suggestion for "lossless", and every
+    /// ffmpeg-based tutorial reaches for it, but AVFoundation cannot touch
+    /// it. Without this check the failure surfaced late and uselessly as
+    /// "frame 0 decode failed", after the frame count had already been
+    /// read successfully from the container metadata.
+    case undecodableCodec(fourCC: String)
+
+    /// Single source of truth for the re-encode advice, so the two codec
+    /// failures can't drift apart. ProRes 4444 is the recommendation
+    /// because it is natively decoded on every Mac, keeps 4:4:4 chroma
+    /// (no subsampling before stacking), and measures effectively
+    /// lossless — 0.09% RMS error on an 8-bit round trip.
+    static let reencodeHint = "ffmpeg -i input -c:v prores_ks -profile:v 4444 output.mov"
 
     var description: String {
         switch self {
@@ -41,7 +65,15 @@ enum AviReaderError: Error, CustomStringConvertible {
         case .unknownDuration:
             return "container reports zero / invalid duration"
         case .decodeFailed(let f):
-            return "frame \(f) decode failed"
+            return """
+                frame \(f) decode failed — macOS accepted this video's codec but could not produce an image from it (Motion JPEG does this). Re-encode to ProRes:
+                  \(Self.reencodeHint)
+                """
+        case .undecodableCodec(let fourCC):
+            return """
+                video codec '\(fourCC)' cannot be decoded by macOS. Re-encode to ProRes (visually lossless) or H.264:
+                  \(Self.reencodeHint)
+                """
         }
     }
 }
@@ -68,6 +100,15 @@ final class AviReader {
         let videoTracks = asset.tracks(withMediaType: .video)
         guard let track = videoTracks.first else {
             throw AviReaderError.noVideoTrack
+        }
+        // Reject an undecodable codec HERE rather than letting every frame
+        // fail later. `isDecodable` answers "can this machine decode this
+        // track", which is exactly the question — the container parses, the
+        // duration and frame count read back fine, and only the pixels are
+        // unreachable. Naming the codec turns an inscrutable failure into
+        // an actionable one.
+        guard track.isDecodable else {
+            throw AviReaderError.undecodableCodec(fourCC: Self.codecName(of: track))
         }
         let size = track.naturalSize.applying(track.preferredTransform)
         let w = Int(abs(size.width).rounded())
@@ -108,6 +149,29 @@ final class AviReader {
     }
 
     // MARK: - Helpers
+
+    /// The track's codec as a readable four-character code (`FFV1`, `avc1`,
+    /// `ap4h`, …). CMFormatDescription stores the media subtype as a packed
+    /// big-endian FourCC; unpack it back into characters so the error names
+    /// something the user can search for. Falls back to "unknown" when the
+    /// track carries no format description.
+    private static func codecName(of track: AVAssetTrack) -> String {
+        guard let desc = track.formatDescriptions.first else { return "unknown" }
+        // swiftlint:disable:next force_cast
+        let subtype = CMFormatDescriptionGetMediaSubType(desc as! CMFormatDescription)
+        let bytes = [
+            UInt8((subtype >> 24) & 0xFF),
+            UInt8((subtype >> 16) & 0xFF),
+            UInt8((subtype >> 8) & 0xFF),
+            UInt8(subtype & 0xFF),
+        ]
+        // Non-printable bytes mean this isn't a conventional FourCC; show
+        // the numeric value rather than control characters.
+        guard bytes.allSatisfy({ $0 >= 0x20 && $0 < 0x7F }) else {
+            return "0x\(String(subtype, radix: 16))"
+        }
+        return String(bytes: bytes, encoding: .ascii) ?? "unknown"
+    }
 
     /// Render a CGImage into a 16-bit half-float RGBA Metal texture. Same
     /// pattern as ImageTexture.load — keeps the pipeline format consistent.
