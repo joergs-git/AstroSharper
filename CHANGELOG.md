@@ -5,6 +5,23 @@ the project follows semantic versioning once it leaves 0.x.
 
 ## [Unreleased]
 
+### Added
+- **Clear message when a video's codec can't be decoded** — macOS has no FFV1
+  decoder, which is what most "lossless video" recipes on the internet produce.
+  AstroSharper used to open such a file, read its frame count correctly, and
+  then fail with "frame 0 decode failed". It now names the codec at open time
+  and gives the re-encode command. Motion JPEG, which macOS reports as
+  decodable and then fails to decode anyway, gets the same advice on the first
+  frame. ProRes 4444 is the recommendation: natively supported, 4:4:4 chroma,
+  and measured at 0.09% RMS error on an 8-bit round trip.
+- **Auto display gain turns itself on for linear captures** — opening
+  unstretched data (raw FITS converted to SER, low-gain Hα) no longer shows a
+  near-black rectangle. When the brightest 1% of a newly opened frame sits
+  below a quarter of full scale, the existing Auto toggle engages by itself.
+  Display only: no pixel of the texture, the stack, or any saved file changes.
+  Press A to dismiss it for that file — it will not switch itself back on.
+
+
 ## [0.7.0] - 2026-07-28
 
 ### Fixed
